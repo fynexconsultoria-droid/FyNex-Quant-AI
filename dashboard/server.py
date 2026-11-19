@@ -289,16 +289,21 @@ def save_binance_config_endpoint(payload: BinanceConfigPayload):
             trading_mode=payload.trading_mode,
             trade_amount_usdt=payload.trade_amount_usdt
         )
-        test_res = binance_client.test_binance_connection(
-            api_key=payload.api_key,
-            api_secret=payload.api_secret,
-            testnet=payload.testnet
-        )
+        # O ambiente efetivo é derivado do modo no momento de salvar
+        saved = binance_client.load_binance_config()
+        test_res = binance_client.test_binance_connection(testnet=saved["testnet"])
+        running, _ = is_bot_running()
+        message = "Configurações salvas no arquivo .env com sucesso!"
+        if running:
+            message += " O robô está em execução: reinicie-o para aplicar as novas configurações."
         return {
             "status": "saved",
-            "message": "Configurações salvas no arquivo .env com sucesso!",
+            "message": message,
+            "restart_required": running,
             "test_result": test_res
         }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao salvar configurações da Binance: {str(e)}")
 

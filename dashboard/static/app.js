@@ -493,7 +493,22 @@ function selectEnvironment(isTestnet) {
       btnTestnet.classList.remove("active");
     }
   }
+
+  // Mantém modo e ambiente coerentes: testnet => sandbox, live => produção
+  const checked = document.querySelector('input[name="tradingMode"]:checked');
+  if (checked && ((checked.value === "testnet" && !isTestnet) || (checked.value === "live" && isTestnet))) {
+    const paper = document.getElementById("modePaper");
+    if (paper) paper.checked = true;
+  }
 }
+
+// Ao escolher o modo, o ambiente é ajustado automaticamente
+document.addEventListener("change", (e) => {
+  if (e.target && e.target.name === "tradingMode") {
+    if (e.target.value === "testnet") selectEnvironment(true);
+    if (e.target.value === "live") selectEnvironment(false);
+  }
+});
 
 async function pasteApiKey() {
   try {
@@ -723,9 +738,9 @@ async function saveBinanceConnectionModal() {
     }
 
     if (data.test_result && data.test_result.success) {
-      alert(`✅ Configurações salvas com sucesso!\nConexão estabelecida com a ${data.test_result.environment}.\nSaldo USDT Livre: $${(data.test_result.usdt_free || 0).toFixed(2)}`);
+      alert(`✅ ${data.message}\nConexão estabelecida com a ${data.test_result.environment}.\nSaldo USDT Livre: $${(data.test_result.usdt_free || 0).toFixed(2)}`);
     } else {
-      alert(`⚠️ Configurações salvas no .env!\nPorém o teste de conexão retornou:\n${(data.test_result && data.test_result.message) || 'Verifique suas chaves.'}`);
+      alert(`⚠️ ${data.message}\nPorém o teste de conexão retornou:\n${(data.test_result && data.test_result.message) || 'Verifique suas chaves.'}`);
     }
 
     closeBinanceModal();

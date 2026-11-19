@@ -35,6 +35,11 @@ from sklearn.metrics import accuracy_score, classification_report
 
 # Módulo de Conexão com a Binance (FyNex Quant AI)
 import binance_client
+from position_manager import PositionManager, RiskManager
+
+# Trava de segurança: o modo 'live' (dinheiro real) permanece desativado até que a
+# estratégia seja validada em backtest com taxas + paper trading (Plano de Ação, Fase 4).
+LIVE_TRADING_ENABLED = False
 
 # Biblioteca 'ta' (Technical Analysis Library in Python)
 import ta
@@ -699,6 +704,14 @@ def run_continuous_trading_bot(
     api_key = bin_cfg["api_key"]
     api_secret = bin_cfg["api_secret"]
 
+    # Bloqueio de segurança: o modo live fica desativado até a validação da estratégia (Fase 4)
+    if final_mode == "live" and not LIVE_TRADING_ENABLED:
+        logger.error(
+            "⛔ [BLOQUEADO] O modo 'live' está desativado no código até que a estratégia seja validada "
+            "em backtest com taxas e paper trading. Use 'paper' ou 'testnet'."
+        )
+        return
+
     # Validação de segurança caso tenha selecionado Live ou Testnet sem chaves
     if final_mode in ["live", "testnet"] and not bin_cfg["has_keys"]:
         logger.warning(
@@ -707,10 +720,32 @@ def run_continuous_trading_bot(
         )
         final_mode = "paper"
 
+    # O ambiente é derivado do modo (testnet => sandbox, live => produção, paper => dados reais)
+    try:
+        final_testnet = binance_client.resolve_environment(final_mode, final_testnet)
+    except binance_client.EnvironmentConfigError as e:
+        logger.error(f"⛔ [CONFIGURAÇÃO INCOERENTE] {e}")
+        return
+
+    use_keys = bin_cfg["has_keys"] and final_mode in ["live", "testnet"]
     exchange = binance_client.get_binance_exchange(
-        api_key=api_key if bin_cfg["has_keys"] else None,
-        api_secret=api_secret if bin_cfg["has_keys"] else None,
+        api_key=api_key if use_keys else None,
+        api_secret=api_secret if use_keys else None,
         testnet=final_testnet
+    )
+
+    risk_manager = RiskManager(
+        db,
+        mode=final_mode,
+        max_daily_loss_usdt=bin_cfg["max_daily_loss_usdt"],
+        max_trades_per_day=bin_cfg["max_trades_per_day"],
+        max_trade_amount_usdt=bin_cfg["max_trade_amount_usdt"],
+    )
+    positions = PositionManager(
+        db, exchange, mode=final_mode, symbol=symbol, timeframe=timeframe,
+        stop_loss_pct=stop_loss_pct, take_profit_pct=take_profit_pct,
+        trade_amount_usdt=final_amount, use_exchange_oco=bin_cfg["use_exchange_oco"],
+        risk=risk_manager,
     )
 
     env_name = "Binance Spot Testnet (Sandbox)" if final_testnet else "Binance Spot Oficial (Mercado Real)"
@@ -733,6 +768,11 @@ def run_continuous_trading_bot(
     logger.info(f"   Retreinamento Automático: A cada {retrain_every_n_candles} novos candles")
     logger.info(f"   Confiança Base: {confidence_threshold * 100:.0f}% (com Auto-Calibração Ativa)")
     logger.info(f"   Gestão de Risco: Stop Loss {stop_loss_pct * 100:.1f}% | Take Profit {take_profit_pct * 100:.1f}%")
+    logger.info(
+        f"   Limites: Perda diária ${risk_manager.max_daily_loss_usdt:,.2f} | "
+        f"{risk_manager.max_trades_per_day} trades/dia | Máx. por ordem ${risk_manager.max_trade_amount_usdt:,.2f} | "
+        f"OCO na exchange: {'Sim' if positions.use_exchange_oco else 'Não'}"
+    )
     logger.info("====================================================================")
 
     # 1. Sincronização Inicial de Histórico
@@ -760,12 +800,9 @@ def run_continuous_trading_bot(
     # Variáveis de Estado
     candles_since_retrain = 0
     last_evaluated_candle_ts = 0
-    in_position = False
-    entry_price = 0.0
-    entry_time_str = ""
-    simulated_capital = 1000.0
-    position_qty = 0.0
-    position_order_id = ""
+
+    # Restaura posição persistida (sobrevive a reinícios) e reconcilia com a conta
+    positions.restore()
 
     # Calibração inicial
     calib = DynamicCalibrator.get_calibration(50.0, 0, base_threshold=confidence_threshold)
@@ -782,82 +819,12 @@ def run_continuous_trading_bot(
                 continue
 
             db.save_candles(symbol, timeframe, live_df)
-            current_price = live_df["close"].iloc[-1]
+            current_price = float(live_df["close"].iloc[-1])
 
             # -----------------------------------------------------------------
-            # 2. Gestão de Risco em Tempo Real (Stop Loss / Take Profit)
+            # 2. Gestão de Risco em Tempo Real (OCO na exchange / Stop Loss / Take Profit)
             # -----------------------------------------------------------------
-            if in_position:
-                sl_price = entry_price * (1.0 - stop_loss_pct)
-                tp_price = entry_price * (1.0 + take_profit_pct)
-                pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
-                now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-
-                if current_price <= sl_price:
-                    if final_mode in ["live", "testnet"]:
-                        sell_res = binance_client.execute_spot_sell(exchange, symbol, position_qty)
-                        exit_p = sell_res.get("price", current_price) if sell_res.get("success") else current_price
-                        exit_order_id = sell_res.get("order_id", "")
-                        pnl_usd = (exit_p - entry_price) * position_qty
-                        simulated_capital += pnl_usd
-                        db.record_trade(
-                            symbol, timeframe, model_version, entry_time_str, entry_price,
-                            now_str, exit_p, "STOP_LOSS", pnl_pct, pnl_usd,
-                            mode=final_mode, order_id=exit_order_id, quantity=position_qty
-                        )
-                        logger.warning(
-                            f"🚨 [STOP LOSS BINANCE ({final_mode.upper()})] Preço: ${exit_p:,.2f} <= SL: ${sl_price:,.2f} "
-                            f"| PnL: {pnl_pct:+.2f}% (${pnl_usd:+.2f}) | Ordem ID: {exit_order_id}"
-                        )
-                    else:
-                        pnl_usd = simulated_capital * (pnl_pct / 100.0)
-                        simulated_capital += pnl_usd
-                        db.record_trade(
-                            symbol, timeframe, model_version, entry_time_str, entry_price,
-                            now_str, current_price, "STOP_LOSS", pnl_pct, pnl_usd,
-                            mode="paper"
-                        )
-                        logger.warning(
-                            f"🚨 [STOP LOSS] Preço: ${current_price:,.2f} <= SL: ${sl_price:,.2f} "
-                            f"| PnL: {pnl_pct:+.2f}% (${pnl_usd:+.2f}) | Saldo: ${simulated_capital:,.2f}"
-                        )
-                    in_position = False
-                    entry_price = 0.0
-                    position_qty = 0.0
-                    position_order_id = ""
-
-                elif current_price >= tp_price:
-                    if final_mode in ["live", "testnet"]:
-                        sell_res = binance_client.execute_spot_sell(exchange, symbol, position_qty)
-                        exit_p = sell_res.get("price", current_price) if sell_res.get("success") else current_price
-                        exit_order_id = sell_res.get("order_id", "")
-                        pnl_usd = (exit_p - entry_price) * position_qty
-                        simulated_capital += pnl_usd
-                        db.record_trade(
-                            symbol, timeframe, model_version, entry_time_str, entry_price,
-                            now_str, exit_p, "TAKE_PROFIT", pnl_pct, pnl_usd,
-                            mode=final_mode, order_id=exit_order_id, quantity=position_qty
-                        )
-                        logger.info(
-                            f"🎯 [TAKE PROFIT BINANCE ({final_mode.upper()})] Preço: ${exit_p:,.2f} >= TP: ${tp_price:,.2f} "
-                            f"| PnL: {pnl_pct:+.2f}% (${pnl_usd:+.2f}) | Ordem ID: {exit_order_id}"
-                        )
-                    else:
-                        pnl_usd = simulated_capital * (pnl_pct / 100.0)
-                        simulated_capital += pnl_usd
-                        db.record_trade(
-                            symbol, timeframe, model_version, entry_time_str, entry_price,
-                            now_str, current_price, "TAKE_PROFIT", pnl_pct, pnl_usd,
-                            mode="paper"
-                        )
-                        logger.info(
-                            f"🎯 [TAKE PROFIT] Preço: ${current_price:,.2f} >= TP: ${tp_price:,.2f} "
-                            f"| PnL: {pnl_pct:+.2f}% (${pnl_usd:+.2f}) | Saldo: ${simulated_capital:,.2f}"
-                        )
-                    in_position = False
-                    entry_price = 0.0
-                    position_qty = 0.0
-                    position_order_id = ""
+            positions.check_exits(current_price)
 
             # -----------------------------------------------------------------
             # 3. Detecção de Fechamento de Candle
@@ -950,43 +917,9 @@ def run_continuous_trading_bot(
                     )
 
                     # Entrada no Trade (Real via Binance ou Simulado)
-                    if not in_position and pred == 1 and prob_up >= active_confidence:
-                        if final_mode in ["live", "testnet"]:
-                            buy_res = binance_client.execute_spot_buy(exchange, symbol, final_amount)
-                            if buy_res.get("success"):
-                                in_position = True
-                                entry_price = buy_res["price"]
-                                position_qty = buy_res["quantity"]
-                                position_order_id = buy_res["order_id"]
-                                entry_time_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-                                sl_target = entry_price * (1.0 - stop_loss_pct)
-                                tp_target = entry_price * (1.0 + take_profit_pct)
-
-                                logger.info("   ==================================================")
-                                logger.info(f"   🚀 [ORDEM SPOT REAL EXECUTADA NA BINANCE ({final_mode.upper()})]")
-                                logger.info(f"      Ordem ID: {position_order_id} | Qtd: {position_qty:.6f} {symbol}")
-                                logger.info(f"      Entrada Média: ${entry_price:,.2f} | Custo: ${buy_res['cost_usdt']:,.2f} USDT")
-                                logger.info(f"      Stop Loss ({stop_loss_pct*100:.1f}%):   ${sl_target:,.2f}")
-                                logger.info(f"      Take Profit ({take_profit_pct*100:.1f}%): ${tp_target:,.2f}")
-                                logger.info("   ==================================================")
-                            else:
-                                logger.error(f"   ❌ [FALHA AO ENVIAR ORDEM NA BINANCE] {buy_res.get('message')}")
-                        else:
-                            in_position = True
-                            entry_price = current_price
-                            position_qty = (simulated_capital * 0.1) / current_price if current_price > 0 else 0.0
-                            position_order_id = "SIMULATED_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-                            entry_time_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-                            sl_target = entry_price * (1.0 - stop_loss_pct)
-                            tp_target = entry_price * (1.0 + take_profit_pct)
-
-                            logger.info("   ==================================================")
-                            logger.info(f"   🚀 [ORDEM DE COMPRA EXECUTADA (SIMULADA)]")
-                            logger.info(f"      Entrada: ${entry_price:,.2f} | Confiança: {prob_up:.1%} (Exigido: {active_confidence:.1%})")
-                            logger.info(f"      Stop Loss ({stop_loss_pct*100:.1f}%):   ${sl_target:,.2f}")
-                            logger.info(f"      Take Profit ({take_profit_pct*100:.1f}%): ${tp_target:,.2f}")
-                            logger.info("   ==================================================")
-                    elif not in_position and pred == 1 and prob_up < active_confidence:
+                    if not positions.in_position and pred == 1 and prob_up >= active_confidence:
+                        positions.try_open(current_price, model_version, prob_up)
+                    elif not positions.in_position and pred == 1 and prob_up < active_confidence:
                         logger.info(f"   ✋ [SINAL FILTRADO] Probabilidade de alta ({prob_up:.1%}) abaixo do filtro exigido pela calibração ({active_confidence:.1%}).")
 
             # Heartbeat informativo em tempo real
@@ -999,7 +932,7 @@ def run_continuous_trading_bot(
                 remaining_sec = check_interval_seconds
 
             candles_left = max(0, retrain_every_n_candles - candles_since_retrain)
-            pos_info = f"Comprado (${entry_price:,.2f})" if in_position else "Aguardando Sinal"
+            pos_info = positions.status_label()
 
             logger.info(
                 f"⏳ [MONITORANDO] {symbol}: ${current_price:,.2f} | "
@@ -1018,7 +951,10 @@ def run_continuous_trading_bot(
             f"Relatório Final de Trades: {trade_stats['total_trades']} operações "
             f"({trade_stats['wins']}V / {trade_stats['losses']}D | Taxa de Acerto: {trade_stats['win_rate']:.1f}%)"
         )
-        logger.info(f"PnL Acumulado: {trade_stats['total_pnl_pct']:+.2f}% | Saldo Final: ${simulated_capital:,.2f}")
+        logger.info(f"PnL Acumulado: {trade_stats['total_pnl_pct']:+.2f}% (${trade_stats['total_pnl_usd']:+.2f})")
+        if positions.in_position:
+            logger.warning("⚠️ Robô encerrado COM POSIÇÃO ABERTA. Ela será restaurada no próximo início"
+                           + (" e continua protegida pela OCO na exchange." if positions.position.oco_list_id else "."))
         logger.info("=" * 60)
 
 
