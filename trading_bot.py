@@ -74,6 +74,27 @@ logger = logging.getLogger("QuantTradingBot")
 # -----------------------------------------------------------------------------
 # 1. Camada de Persistência em Banco de Dados SQLite
 # -----------------------------------------------------------------------------
+TIMEFRAME_MS: Dict[str, int] = {
+    "1m": 60_000,
+    "3m": 3 * 60_000,
+    "5m": 5 * 60_000,
+    "15m": 15 * 60_000,
+    "30m": 30 * 60_000,
+    "1h": 60 * 60_000,
+    "4h": 4 * 60 * 60_000,
+    "1d": 24 * 60 * 60_000,
+}
+
+
+def timeframe_to_ms(timeframe: str) -> int:
+    if timeframe in TIMEFRAME_MS:
+        return TIMEFRAME_MS[timeframe]
+    unit = timeframe[-1]
+    val = int(timeframe[:-1])
+    mult = {"m": 60_000, "h": 3_600_000, "d": 86_400_000}[unit]
+    return val * mult
+
+
 class TradingDatabase:
     """
     Gerenciador de banco de dados SQLite para persistência contínua de candles,
@@ -85,9 +106,12 @@ class TradingDatabase:
         self._init_database()
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Cria uma conexão com suporte a timeout e concorrência."""
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        """Cria uma conexão com suporte a timeout e concorrência (WAL)."""
+        conn = sqlite3.connect(self.db_path, timeout=15.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA busy_timeout=15000;")
         return conn
 
     def _init_database(self) -> None:
@@ -132,12 +156,25 @@ class TradingDatabase:
                     entry_price REAL NOT NULL,
                     actual_close REAL,
                     actual_direction INTEGER,
-                    is_correct INTEGER
+                    is_correct INTEGER,
+                    UNIQUE(symbol, timeframe, candle_timestamp)
                 );
             """)
 
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_pred_eval 
+                ON predictions(symbol, timeframe, candle_timestamp);
+            """)
+
+            # Migração: remove duplicatas antigas e garante índice UNIQUE em bancos existentes
+            cursor.execute("""
+                DELETE FROM predictions
+                WHERE id NOT IN (
+                    SELECT MAX(id) FROM predictions GROUP BY symbol, timeframe, candle_timestamp
+                );
+            """)
+            cursor.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_predictions_candle
                 ON predictions(symbol, timeframe, candle_timestamp);
             """)
 
@@ -173,18 +210,30 @@ class TradingDatabase:
                     pass
 
             conn.commit()
-        logger.info(f"Banco de dados SQLite operacional: {self.db_path}")
+        logger.info(f"Banco de dados SQLite operacional (WAL): {self.db_path}")
 
-    def save_candles(self, symbol: str, timeframe: str, df: pd.DataFrame) -> int:
+    def save_candles(
+        self,
+        symbol: str,
+        timeframe: str,
+        df: pd.DataFrame,
+        drop_last_open: bool = False
+    ) -> int:
         """
-        Salva candles no banco ignorando registros duplicados (INSERT OR IGNORE).
-        Retorna a quantidade de novos registros inseridos.
+        Salva ou atualiza candles no banco via UPSERT (ON CONFLICT DO UPDATE).
+        Se drop_last_open=True, descarta a última linha do DataFrame (candle ainda em formação
+        retornado pela API da exchange), evitando corromper o banco com candles parciais.
+        Retorna a quantidade de linhas processadas.
         """
         if df.empty:
             return 0
 
+        work_df = df.iloc[:-1] if (drop_last_open and len(df) > 1) else df
+        if work_df.empty:
+            return 0
+
         rows = []
-        for _, row in df.iterrows():
+        for _, row in work_df.iterrows():
             ts = int(row["timestamp"].timestamp() * 1000) if isinstance(row["timestamp"], pd.Timestamp) else int(row["timestamp"])
             dt_str = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             rows.append((
@@ -203,14 +252,39 @@ class TradingDatabase:
             cursor = conn.cursor()
             initial_changes = conn.total_changes
             cursor.executemany("""
-                INSERT OR IGNORE INTO ohlcv_candles 
+                INSERT INTO ohlcv_candles
                 (symbol, timeframe, timestamp, datetime_utc, open, high, low, close, volume)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol, timeframe, timestamp) DO UPDATE SET
+                    datetime_utc = excluded.datetime_utc,
+                    open = excluded.open,
+                    high = excluded.high,
+                    low = excluded.low,
+                    close = excluded.close,
+                    volume = excluded.volume
             """, rows)
             conn.commit()
-            inserted = conn.total_changes - initial_changes
+            changed = conn.total_changes - initial_changes
 
-        return inserted
+        return changed
+
+    def get_last_candle_timestamp(self, symbol: str, timeframe: str) -> Optional[int]:
+        """Retorna o maior timestamp (ms) armazenado para o par/timeframe, ou None."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT MAX(timestamp) AS max_ts FROM ohlcv_candles WHERE symbol = ? AND timeframe = ?",
+                (symbol, timeframe)
+            ).fetchone()
+        return int(row["max_ts"]) if row and row["max_ts"] is not None else None
+
+    def get_last_predicted_candle_timestamp(self, symbol: str, timeframe: str) -> int:
+        """Retorna o último candle_timestamp para o qual já houve previsão registrada."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT MAX(candle_timestamp) AS max_ts FROM predictions WHERE symbol = ? AND timeframe = ?",
+                (symbol, timeframe)
+            ).fetchone()
+        return int(row["max_ts"]) if row and row["max_ts"] is not None else 0
 
     def get_recent_candles(self, symbol: str, timeframe: str, limit: int = 1500) -> pd.DataFrame:
         """Recupera os últimos N candles ordenados cronologicamente."""
@@ -245,19 +319,29 @@ class TradingDatabase:
         prob_up: float,
         prob_down: float,
         entry_price: float
-    ) -> int:
-        """Registra uma nova previsão feita pela IA."""
+    ) -> Optional[int]:
+        """
+        Registra uma nova previsão feita pela IA.
+        Idempotente por (symbol, timeframe, candle_timestamp): se já existir previsão
+        para aquele candle, não cria duplicata e retorna o id existente.
+        """
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO predictions (
+                INSERT OR IGNORE INTO predictions (
                     symbol, timeframe, model_version, candle_timestamp,
                     predicted_at, prediction, prob_up, prob_down, entry_price
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (symbol, timeframe, model_version, candle_timestamp, now_str, prediction, prob_up, prob_down, entry_price))
             conn.commit()
-            return cursor.lastrowid
+            if cursor.lastrowid and cursor.rowcount > 0:
+                return cursor.lastrowid
+            row = conn.execute(
+                "SELECT id FROM predictions WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?",
+                (symbol, timeframe, candle_timestamp)
+            ).fetchone()
+            return int(row["id"]) if row else None
 
     def evaluate_pending_predictions(
         self,
@@ -267,9 +351,13 @@ class TradingDatabase:
         current_closed_close: float
     ) -> List[Dict[str, Any]]:
         """
-        Avalia previsões anteriores pendentes de resultado quando um novo candle se fecha.
-        Determina se a previsão de direção acertou (is_correct = 1) ou errou (0).
+        Avalia previsões anteriores pendentes comparando cada previsão feita no candle `t`
+        exclusivamente com o fechamento real do candle imediatamente seguinte (`t + tf_ms`).
+        Se o robô ficou desligado e o candle `t + tf_ms` está no banco, usa o close dele;
+        se o candle `t + tf_ms` for exatamente o recém-fechado (`current_closed_ts`),
+        usa `current_closed_close`. Nunca avalia uma previsão antiga contra um candle de horas depois.
         """
+        tf_ms = timeframe_to_ms(timeframe)
         evaluated = []
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -283,19 +371,33 @@ class TradingDatabase:
 
             for row in rows:
                 pred_id = row["id"]
+                pred_ts = int(row["candle_timestamp"])
+                target_ts = pred_ts + tf_ms
                 pred = row["prediction"]
                 entry_p = row["entry_price"]
                 prob_up = row["prob_up"]
 
-                # Direção real: 1 se fechou acima do preço de entrada, senão 0
-                actual_dir = 1 if current_closed_close > entry_p else 0
+                if target_ts == current_closed_ts:
+                    target_close: Optional[float] = float(current_closed_close)
+                else:
+                    c_row = cursor.execute(
+                        "SELECT close FROM ohlcv_candles WHERE symbol = ? AND timeframe = ? AND timestamp = ?",
+                        (symbol, timeframe, target_ts)
+                    ).fetchone()
+                    target_close = float(c_row["close"]) if c_row else None
+
+                if target_close is None:
+                    # O candle t+1 ainda não existe no banco (lacuna não preenchida); não julga com candle errado
+                    continue
+
+                actual_dir = 1 if target_close > entry_p else 0
                 is_correct = 1 if pred == actual_dir else 0
 
                 cursor.execute("""
                     UPDATE predictions
                     SET actual_close = ?, actual_direction = ?, is_correct = ?
                     WHERE id = ?
-                """, (current_closed_close, actual_dir, is_correct, pred_id))
+                """, (target_close, actual_dir, is_correct, pred_id))
 
                 evaluated.append({
                     "id": pred_id,
@@ -304,7 +406,7 @@ class TradingDatabase:
                     "is_correct": bool(is_correct),
                     "prob_up": prob_up,
                     "entry_price": entry_p,
-                    "actual_close": current_closed_close
+                    "actual_close": target_close
                 })
 
             conn.commit()
@@ -533,13 +635,14 @@ def fetch_live_ohlcv(
     exchange: ccxt.binance,
     symbol: str = "BTC/USDT",
     timeframe: str = "1m",
-    limit: int = 1000
+    limit: int = 1000,
+    since: Optional[int] = None
 ) -> pd.DataFrame:
     """
     Coleta cotações e candles reais diretamente da API pública da Binance.
     """
     try:
-        raw_ohlcv = exchange.fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit)
+        raw_ohlcv = exchange.fetch_ohlcv(symbol=symbol, timeframe=timeframe, since=since, limit=limit)
         if not raw_ohlcv:
             return pd.DataFrame()
 
@@ -558,6 +661,68 @@ def fetch_live_ohlcv(
     except Exception as e:
         logger.error(f"Erro inesperado na coleta de dados: {e}")
         return pd.DataFrame()
+
+
+def backfill_candles(
+    db: TradingDatabase,
+    exchange: ccxt.binance,
+    symbol: str = "BTC/USDT",
+    timeframe: str = "1m",
+    min_candles: int = 1000,
+    max_batches: int = 15
+) -> int:
+    """
+    Sincroniza candles com a exchange preenchendo eventuais lacunas desde o último candle
+    salvo no banco (paginado com `since`). Sempre descarta o último candle se ainda estiver
+    em formação.
+    """
+    tf_ms = timeframe_to_ms(timeframe)
+    now_ms = int(time.time() * 1000)
+    last_ts = db.get_last_candle_timestamp(symbol, timeframe)
+
+    # Se não houver histórico ou a lacuna for muito antiga (> max_batches * 1000 candles),
+    # busca diretamente os últimos `min_candles` candles.
+    if last_ts is None or (now_ms - last_ts) > (max_batches * 1000 * tf_ms):
+        df = fetch_live_ohlcv(exchange, symbol=symbol, timeframe=timeframe, limit=min_candles)
+        return db.save_candles(symbol, timeframe, df, drop_last_open=True)
+
+    total_saved = 0
+    cursor_since = last_ts
+    for _ in range(max_batches):
+        df = fetch_live_ohlcv(exchange, symbol=symbol, timeframe=timeframe, limit=1000, since=cursor_since)
+        if df.empty:
+            break
+        total_saved += db.save_candles(symbol, timeframe, df, drop_last_open=True)
+        last_fetched_ts = int(df["timestamp"].iloc[-1].timestamp() * 1000)
+        if len(df) < 1000 or last_fetched_ts >= now_ms - tf_ms:
+            break
+        if last_fetched_ts <= cursor_since:
+            break
+        cursor_since = last_fetched_ts
+
+    return total_saved
+
+
+def get_latest_contiguous_segment(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """
+    Retorna apenas o segmento contíguo mais recente do DataFrame (sem buracos temporais),
+    garantindo que indicadores (RSI, MACD, SMA, ATR) e Target nunca sejam calculados
+    atravessando uma lacuna de tempo.
+    """
+    if df.empty or len(df) < 2:
+        return df
+
+    tf_ms = timeframe_to_ms(timeframe)
+    if pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        diffs = df["timestamp"].diff().dt.total_seconds() * 1000.0
+    else:
+        diffs = df["timestamp"].astype("int64").diff()
+    gap_mask = diffs > (tf_ms * 1.5)
+    if not gap_mask.any():
+        return df
+
+    last_gap_pos = int(np.where(gap_mask.values)[0][-1])
+    return df.iloc[last_gap_pos:].reset_index(drop=True)
 
 
 # -----------------------------------------------------------------------------
@@ -775,15 +940,17 @@ def run_continuous_trading_bot(
     )
     logger.info("====================================================================")
 
-    # 1. Sincronização Inicial de Histórico
+    # 1. Sincronização Inicial de Histórico (Backfill paginado + descarte do candle aberto)
     logger.info(f"Sincronizando candles da {env_name}...")
-    init_df = fetch_live_ohlcv(exchange, symbol=symbol, timeframe=timeframe, limit=1000)
-    if init_df.empty:
+    novos_inseridos = backfill_candles(db, exchange, symbol=symbol, timeframe=timeframe, min_candles=1000)
+    recent_df = get_latest_contiguous_segment(db.get_recent_candles(symbol, timeframe, limit=1200), timeframe)
+    if recent_df.empty:
         logger.error("Falha ao coletar dados da exchange. Verifique a conexão com a internet.")
         return
-
-    novos_inseridos = db.save_candles(symbol, timeframe, init_df)
-    logger.info(f"Sincronização concluída: {novos_inseridos} novos candles registrados no SQLite.")
+    logger.info(
+        f"Sincronização concluída: {novos_inseridos} candles gravados/atualizados no SQLite "
+        f"(segmento contíguo: {len(recent_df)} candles)."
+    )
 
     # 2. Carregamento ou Treinamento Inicial do Modelo
     saved_model_data = model_storage.load_latest_model(symbol, timeframe)
@@ -791,15 +958,14 @@ def run_continuous_trading_bot(
         model, model_version, _, feature_cols = saved_model_data
     else:
         model_version = 1
-        recent_df = db.get_recent_candles(symbol, timeframe, limit=1000)
         feat_df, feature_cols = build_features(recent_df)
         dataset = create_target(feat_df)
         model, initial_acc = train_model(dataset, feature_cols, model_version=model_version)
         model_storage.save_model(model, model_version, initial_acc, feature_cols, symbol, timeframe)
 
-    # Variáveis de Estado
+    # Variáveis de Estado (inicia com o último candle já previsto no banco para evitar duplicata no restart)
     candles_since_retrain = 0
-    last_evaluated_candle_ts = 0
+    last_evaluated_candle_ts = db.get_last_predicted_candle_timestamp(symbol, timeframe)
 
     # Restaura posição persistida (sobrevive a reinícios) e reconcilia com a conta
     positions.restore()
@@ -814,11 +980,12 @@ def run_continuous_trading_bot(
         while True:
             # 1. Coleta os candles mais recentes
             live_df = fetch_live_ohlcv(exchange, symbol=symbol, timeframe=timeframe, limit=30)
-            if live_df.empty:
+            if live_df.empty or len(live_df) < 2:
                 time.sleep(check_interval_seconds)
                 continue
 
-            db.save_candles(symbol, timeframe, live_df)
+            # Salva APENAS candles já fechados (descarta a última linha em formação)
+            db.save_candles(symbol, timeframe, live_df, drop_last_open=True)
             current_price = float(live_df["close"].iloc[-1])
 
             # -----------------------------------------------------------------
@@ -840,7 +1007,7 @@ def run_continuous_trading_bot(
 
                 logger.info(f"\n🔔 [NOVO CANDLE FECHADO] {closed_time_str} | Fechamento: ${closed_close:,.2f}")
 
-                # 3.1. Feedback Loop: Avaliar previsões anteriores com o fechamento real
+                # 3.1. Feedback Loop: Avaliar previsões anteriores com o fechamento real (t+1 exato)
                 evaluations = db.evaluate_pending_predictions(
                     symbol, timeframe, closed_ts, closed_close
                 )
@@ -872,29 +1039,39 @@ def run_continuous_trading_bot(
                 # 3.3. Retreinamento Automático por Janela Deslizante
                 # -------------------------------------------------------------
                 if candles_since_retrain >= retrain_every_n_candles:
-                    logger.info(f"\n🔄 Janela Deslizante: {candles_since_retrain} novos candles acumulados. Retreinando e salvando a IA...")
-                    retrain_df = db.get_recent_candles(symbol, timeframe, limit=1200)
-                    feat_retrain_df, _ = build_features(retrain_df)
-                    retrain_dataset = create_target(feat_retrain_df)
+                    retrain_raw = db.get_recent_candles(symbol, timeframe, limit=1200)
+                    retrain_df = get_latest_contiguous_segment(retrain_raw, timeframe)
+                    if len(retrain_df) >= 200:
+                        logger.info(f"\n🔄 Janela Deslizante: {candles_since_retrain} novos candles acumulados. Retreinando e salvando a IA...")
+                        feat_retrain_df, _ = build_features(retrain_df)
+                        retrain_dataset = create_target(feat_retrain_df)
 
-                    model_version += 1
-                    model, new_acc = train_model(
-                        retrain_dataset,
-                        feature_cols,
-                        model_version=model_version
-                    )
-                    # Salva a nova versão em disco na pasta 'models/'
-                    model_storage.save_model(model, model_version, new_acc, feature_cols, symbol, timeframe)
-                    candles_since_retrain = 0
+                        model_version += 1
+                        model, new_acc = train_model(
+                            retrain_dataset,
+                            feature_cols,
+                            model_version=model_version
+                        )
+                        # Salva a nova versão em disco na pasta 'models/'
+                        model_storage.save_model(model, model_version, new_acc, feature_cols, symbol, timeframe)
+                        candles_since_retrain = 0
+                    else:
+                        logger.warning(f"Segmento contíguo ({len(retrain_df)} candles) ainda curto para retreino; aguardando mais dados.")
 
                 # -------------------------------------------------------------
                 # 3.4. Nova Inferência com a IA sobre o candle fechado
                 # -------------------------------------------------------------
-                full_history_df = db.get_recent_candles(symbol, timeframe, limit=100)
-                feat_full_df, _ = build_features(full_history_df)
-                closed_features = feat_full_df.iloc[-2:-1][feature_cols]
+                full_history_df = get_latest_contiguous_segment(
+                    db.get_recent_candles(symbol, timeframe, limit=100), timeframe
+                )
+                if len(full_history_df) >= 35:
+                    feat_full_df, _ = build_features(full_history_df)
+                    # Como o banco contém apenas candles fechados, iloc[-1:] é o candle recém-fechado
+                    closed_features = feat_full_df.iloc[-1:][feature_cols]
+                else:
+                    closed_features = pd.DataFrame()
 
-                if not closed_features.isna().values.any():
+                if not closed_features.empty and not closed_features.isna().values.any():
                     pred = int(model.predict(closed_features)[0])
                     probabilities = model.predict_proba(closed_features)[0]
                     prob_down, prob_up = float(probabilities[0]), float(probabilities[1])

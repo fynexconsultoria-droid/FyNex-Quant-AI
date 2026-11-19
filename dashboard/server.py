@@ -50,11 +50,13 @@ app.add_middleware(
 
 
 def get_db_connection():
-    """Retorna uma conexão SQLite configurada para leitura rápida."""
+    """Retorna uma conexão SQLite configurada para leitura rápida com WAL."""
     if not os.path.exists(DB_PATH):
         return None
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout=15000;")
     return conn
 
 
