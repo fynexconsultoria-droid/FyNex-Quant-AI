@@ -1,0 +1,20 @@
+# Segredos
+.env
+
+# Dados e artefatos gerados em runtime
+*.db
+*.db-wal
+*.db-shm
+*.log
+*.log.*
+models/
+backup_*/
+bot.pid
+STOP
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
