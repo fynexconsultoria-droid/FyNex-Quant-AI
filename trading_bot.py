@@ -209,8 +209,81 @@ class TradingDatabase:
                 except sqlite3.OperationalError:
                     pass
 
+            # 4. Tabela de estado vivo do robô (lida pelo dashboard em tempo real)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS bot_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    pid INTEGER,
+                    symbol TEXT NOT NULL,
+                    timeframe TEXT NOT NULL,
+                    trading_mode TEXT NOT NULL,
+                    model_version INTEGER NOT NULL,
+                    model_accuracy REAL NOT NULL,
+                    base_confidence REAL NOT NULL,
+                    active_confidence REAL NOT NULL,
+                    calibration_mode TEXT NOT NULL,
+                    calibration_badge TEXT NOT NULL,
+                    calibration_desc TEXT NOT NULL,
+                    in_position INTEGER NOT NULL DEFAULT 0,
+                    entry_price REAL NOT NULL DEFAULT 0.0,
+                    updated_at TEXT NOT NULL
+                );
+            """)
+
             conn.commit()
         logger.info(f"Banco de dados SQLite operacional (WAL): {self.db_path}")
+
+    def upsert_bot_state(
+        self,
+        pid: int,
+        symbol: str,
+        timeframe: str,
+        trading_mode: str,
+        model_version: int,
+        model_accuracy: float,
+        base_confidence: float,
+        active_confidence: float,
+        calibration_mode: str,
+        calibration_badge: str,
+        calibration_desc: str,
+        in_position: bool,
+        entry_price: float = 0.0
+    ) -> None:
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO bot_state (
+                    id, pid, symbol, timeframe, trading_mode, model_version, model_accuracy,
+                    base_confidence, active_confidence, calibration_mode, calibration_badge,
+                    calibration_desc, in_position, entry_price, updated_at
+                ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    pid = excluded.pid,
+                    symbol = excluded.symbol,
+                    timeframe = excluded.timeframe,
+                    trading_mode = excluded.trading_mode,
+                    model_version = excluded.model_version,
+                    model_accuracy = excluded.model_accuracy,
+                    base_confidence = excluded.base_confidence,
+                    active_confidence = excluded.active_confidence,
+                    calibration_mode = excluded.calibration_mode,
+                    calibration_badge = excluded.calibration_badge,
+                    calibration_desc = excluded.calibration_desc,
+                    in_position = excluded.in_position,
+                    entry_price = excluded.entry_price,
+                    updated_at = excluded.updated_at
+            """, (
+                pid, symbol, timeframe, trading_mode, model_version, float(model_accuracy),
+                float(base_confidence), float(active_confidence), calibration_mode,
+                calibration_badge, calibration_desc, 1 if in_position else 0,
+                float(entry_price), now_str
+            ))
+            conn.commit()
+
+    def get_bot_state(self) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT * FROM bot_state WHERE id = 1").fetchone()
+        return dict(row) if row else None
 
     def save_candles(
         self,
@@ -506,12 +579,50 @@ class ModelPersistence:
     """
     Gerencia o salvamento e carregamento dos cérebros treinados em disco,
     garantindo que o aprendizado nunca seja perdido ao reiniciar o programa.
+    Mantém um arquivo de metadados por (symbol, timeframe), além do metadata.json
+    legado, e faz gravação atômica (.tmp + os.replace).
     """
 
-    def __init__(self, models_dir: str = "models"):
+    def __init__(self, models_dir: str = "models", max_versions_kept: int = 10):
         self.models_dir = models_dir
+        self.max_versions_kept = max_versions_kept
         os.makedirs(self.models_dir, exist_ok=True)
         self.meta_path = os.path.join(self.models_dir, "metadata.json")
+
+    def get_meta_path(self, symbol: str, timeframe: str) -> str:
+        clean_symbol = symbol.replace("/", "_")
+        return os.path.join(self.models_dir, f"metadata_{clean_symbol}_{timeframe}.json")
+
+    @staticmethod
+    def _atomic_dump_joblib(obj: Any, target_path: str) -> None:
+        tmp_path = target_path + ".tmp"
+        joblib.dump(obj, tmp_path)
+        os.replace(tmp_path, target_path)
+
+    @staticmethod
+    def _atomic_dump_json(data: Dict[str, Any], target_path: str) -> None:
+        tmp_path = target_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+        os.replace(tmp_path, target_path)
+
+    def _prune_old_versions(self, clean_symbol: str, timeframe: str) -> None:
+        if self.max_versions_kept <= 0:
+            return
+        prefix = f"model_v"
+        suffix = f"_{clean_symbol}_{timeframe}.joblib"
+        versioned = []
+        for fname in os.listdir(self.models_dir):
+            if fname.startswith(prefix) and fname.endswith(suffix):
+                ver_str = fname[len(prefix):-len(suffix)]
+                if ver_str.isdigit():
+                    versioned.append((int(ver_str), os.path.join(self.models_dir, fname)))
+        versioned.sort(key=lambda x: x[0], reverse=True)
+        for _, old_path in versioned[self.max_versions_kept:]:
+            try:
+                os.remove(old_path)
+            except OSError:
+                pass
 
     def save_model(
         self,
@@ -520,17 +631,18 @@ class ModelPersistence:
         accuracy: float,
         feature_cols: List[str],
         symbol: str,
-        timeframe: str
+        timeframe: str,
+        extra_meta: Optional[Dict[str, Any]] = None
     ) -> str:
         clean_symbol = symbol.replace("/", "_")
         version_filename = f"model_v{version}_{clean_symbol}_{timeframe}.joblib"
         version_path = os.path.join(self.models_dir, version_filename)
         latest_path = os.path.join(self.models_dir, f"latest_{clean_symbol}_{timeframe}.joblib")
 
-        joblib.dump(model, version_path)
-        joblib.dump(model, latest_path)
+        self._atomic_dump_joblib(model, version_path)
+        self._atomic_dump_joblib(model, latest_path)
 
-        metadata = {
+        metadata: Dict[str, Any] = {
             "version": version,
             "accuracy": float(accuracy),
             "feature_cols": feature_cols,
@@ -539,11 +651,30 @@ class ModelPersistence:
             "saved_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             "file": version_filename
         }
-        with open(self.meta_path, "w", encoding="utf-8") as f:
-            json.dump(metadata, f, indent=4)
+        if extra_meta:
+            metadata.update(extra_meta)
+
+        pair_meta_path = self.get_meta_path(symbol, timeframe)
+        self._atomic_dump_json(metadata, pair_meta_path)
+        self._atomic_dump_json(metadata, self.meta_path)
+        self._prune_old_versions(clean_symbol, timeframe)
 
         logger.info(f"💾 [MODELO SALVO EM DISCO] Versão v{version} gravada em '{version_path}' (Acurácia Teste: {accuracy * 100:.2f}%)")
         return version_path
+
+    def load_metadata(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
+        pair_meta_path = self.get_meta_path(symbol, timeframe)
+        candidates = [pair_meta_path, self.meta_path]
+        for path in candidates:
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                    if meta.get("symbol") == symbol and meta.get("timeframe") == timeframe:
+                        return meta
+                except Exception:
+                    continue
+        return None
 
     def load_latest_model(
         self,
@@ -553,22 +684,20 @@ class ModelPersistence:
         clean_symbol = symbol.replace("/", "_")
         latest_path = os.path.join(self.models_dir, f"latest_{clean_symbol}_{timeframe}.joblib")
 
-        if not os.path.exists(latest_path) or not os.path.exists(self.meta_path):
+        if not os.path.exists(latest_path):
+            return None
+
+        meta = self.load_metadata(symbol, timeframe)
+        if not meta:
             return None
 
         try:
-            with open(self.meta_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-
-            if meta.get("symbol") != symbol or meta.get("timeframe") != timeframe:
-                return None
-
             model = joblib.load(latest_path)
             version = int(meta.get("version", 1))
             acc = float(meta.get("accuracy", 0.5))
             features = meta.get("feature_cols", [])
 
-            logger.info(f"🧠 [MODELO RECUPERADO DE DISCO] Carregado Modelo v{version} previamente treinado (Acurácia: {acc * 100:.2f}%)")
+            logger.info(f"🧠 [MODELO RECUPERADO DE DISCO] Carregado Modelo v{version} ({symbol} {timeframe}) (Acurácia: {acc * 100:.2f}%)")
             return model, version, acc, features
         except Exception as e:
             logger.warning(f"Não foi possível restaurar modelo salvo: {e}. Um novo modelo será treinado.")
@@ -836,6 +965,103 @@ def train_model(
 
 
 # -----------------------------------------------------------------------------
+# Controle de Instância Única (PID File) e Desligamento Limpo (Signal File)
+# -----------------------------------------------------------------------------
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+PID_FILE_PATH = os.path.join(BASE_DIR, "bot.pid")
+STOP_SIGNAL_PATH = os.path.join(BASE_DIR, "bot.stop")
+
+
+def is_pid_alive_bot(pid: int) -> bool:
+    """Verifica se `pid` pertence a um processo Python ativo rodando trading_bot.py."""
+    if not pid or pid <= 0:
+        return False
+    try:
+        import psutil
+        if not psutil.pid_exists(pid):
+            return False
+        proc = psutil.Process(pid)
+        name = (proc.name() or "").lower()
+        if "python" not in name:
+            return False
+        cmdline = proc.cmdline() or []
+        return any(os.path.basename(str(arg)).lower() == "trading_bot.py" for arg in cmdline)
+    except Exception:
+        return False
+
+
+def get_running_bot_pid(pid_path: str = PID_FILE_PATH) -> Optional[int]:
+    """Lê o PID do arquivo `bot.pid` e confirma se o processo ainda está vivo."""
+    if not os.path.exists(pid_path):
+        return None
+    try:
+        with open(pid_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        pid = int(data.get("pid", 0))
+    except Exception:
+        return None
+    if is_pid_alive_bot(pid):
+        return pid
+    try:
+        os.remove(pid_path)
+    except OSError:
+        pass
+    return None
+
+
+def acquire_single_instance_lock(
+    symbol: str,
+    timeframe: str,
+    trading_mode: str,
+    pid_path: str = PID_FILE_PATH
+) -> bool:
+    """Garante que apenas uma instância do robô rode por vez."""
+    existing_pid = get_running_bot_pid(pid_path)
+    my_pid = os.getpid()
+    if existing_pid and existing_pid != my_pid:
+        return False
+    payload = {
+        "pid": my_pid,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "trading_mode": trading_mode,
+        "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    tmp_path = pid_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    os.replace(tmp_path, pid_path)
+    return True
+
+
+def release_single_instance_lock(pid_path: str = PID_FILE_PATH) -> None:
+    if not os.path.exists(pid_path):
+        return
+    try:
+        with open(pid_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if int(data.get("pid", -1)) == os.getpid():
+            os.remove(pid_path)
+    except Exception:
+        pass
+
+
+def request_bot_stop(stop_path: str = STOP_SIGNAL_PATH) -> None:
+    with open(stop_path, "w", encoding="utf-8") as f:
+        f.write(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+
+
+def consume_stop_signal(stop_path: str = STOP_SIGNAL_PATH) -> bool:
+    if os.path.exists(stop_path):
+        try:
+            os.remove(stop_path)
+        except OSError:
+            pass
+        return True
+    return False
+
+
+# -----------------------------------------------------------------------------
 # 8. Loop de Execução e Aprendizado Contínuo com Auto-Calibração
 # -----------------------------------------------------------------------------
 def run_continuous_trading_bot(
@@ -890,6 +1116,13 @@ def run_continuous_trading_bot(
         final_testnet = binance_client.resolve_environment(final_mode, final_testnet)
     except binance_client.EnvironmentConfigError as e:
         logger.error(f"⛔ [CONFIGURAÇÃO INCOERENTE] {e}")
+        return
+
+    # Trava de instância única (evita dois robôs operando ao mesmo tempo)
+    consume_stop_signal()
+    if not acquire_single_instance_lock(symbol, timeframe, final_mode):
+        other_pid = get_running_bot_pid()
+        logger.error(f"⛔ Já existe uma instância do robô em execução (PID {other_pid}). Abortando nova instância.")
         return
 
     use_keys = bin_cfg["has_keys"] and final_mode in ["live", "testnet"]
@@ -955,13 +1188,13 @@ def run_continuous_trading_bot(
     # 2. Carregamento ou Treinamento Inicial do Modelo
     saved_model_data = model_storage.load_latest_model(symbol, timeframe)
     if saved_model_data is not None:
-        model, model_version, _, feature_cols = saved_model_data
+        model, model_version, current_model_acc, feature_cols = saved_model_data
     else:
         model_version = 1
         feat_df, feature_cols = build_features(recent_df)
         dataset = create_target(feat_df)
-        model, initial_acc = train_model(dataset, feature_cols, model_version=model_version)
-        model_storage.save_model(model, model_version, initial_acc, feature_cols, symbol, timeframe)
+        model, current_model_acc = train_model(dataset, feature_cols, model_version=model_version)
+        model_storage.save_model(model, model_version, current_model_acc, feature_cols, symbol, timeframe)
 
     # Variáveis de Estado (inicia com o último candle já previsto no banco para evitar duplicata no restart)
     candles_since_retrain = 0
@@ -971,13 +1204,39 @@ def run_continuous_trading_bot(
     positions.restore()
 
     # Calibração inicial
-    calib = DynamicCalibrator.get_calibration(50.0, 0, base_threshold=confidence_threshold)
+    acc_init = db.get_rolling_accuracy(symbol, timeframe, last_n=30)
+    calib = DynamicCalibrator.get_calibration(
+        acc_init["accuracy_pct"], acc_init["total"], base_threshold=confidence_threshold
+    )
     active_confidence = calib["threshold"]
+
+    def _publish_state() -> None:
+        db.upsert_bot_state(
+            pid=os.getpid(),
+            symbol=symbol,
+            timeframe=timeframe,
+            trading_mode=final_mode,
+            model_version=model_version,
+            model_accuracy=current_model_acc,
+            base_confidence=confidence_threshold,
+            active_confidence=active_confidence,
+            calibration_mode=calib["mode"],
+            calibration_badge=calib["badge"],
+            calibration_desc=calib["description"],
+            in_position=positions.in_position,
+            entry_price=positions.position.entry_price if positions.position else 0.0,
+        )
+
+    _publish_state()
 
     logger.info("\n=== Sistema operacional. Entrando no loop de monitoramento contínuo... ===")
 
     try:
         while True:
+            if consume_stop_signal():
+                logger.info("🛑 Sinal de parada limpa recebido (bot.stop). Encerrando loop...")
+                break
+
             # 1. Coleta os candles mais recentes
             live_df = fetch_live_ohlcv(exchange, symbol=symbol, timeframe=timeframe, limit=30)
             if live_df.empty or len(live_df) < 2:
@@ -1052,6 +1311,7 @@ def run_continuous_trading_bot(
                             feature_cols,
                             model_version=model_version
                         )
+                        current_model_acc = new_acc
                         # Salva a nova versão em disco na pasta 'models/'
                         model_storage.save_model(model, model_version, new_acc, feature_cols, symbol, timeframe)
                         candles_since_retrain = 0
@@ -1110,6 +1370,7 @@ def run_continuous_trading_bot(
 
             candles_left = max(0, retrain_every_n_candles - candles_since_retrain)
             pos_info = positions.status_label()
+            _publish_state()
 
             logger.info(
                 f"⏳ [MONITORANDO] {symbol}: ${current_price:,.2f} | "
@@ -1118,11 +1379,23 @@ def run_continuous_trading_bot(
                 f"IA: v{model_version} [{calib['badge']} {calib['mode']}] | Posição: {pos_info}"
             )
 
-            time.sleep(check_interval_seconds)
+            # Aguarda o próximo ciclo checando o sinal de parada a cada 1s para resposta rápida
+            steps = max(1, int(check_interval_seconds))
+            stop_now = False
+            for _ in range(steps):
+                if consume_stop_signal():
+                    stop_now = True
+                    break
+                time.sleep(1)
+            if stop_now:
+                logger.info("🛑 Sinal de parada limpa recebido (bot.stop). Encerrando loop...")
+                break
 
     except KeyboardInterrupt:
+        logger.info("🛑 Execução interrompida pelo usuário (Ctrl+C).")
+    finally:
+        release_single_instance_lock()
         logger.info("\n" + "=" * 60)
-        logger.info("🛑 Execução interrompida pelo usuário.")
         trade_stats = db.get_trade_summary(symbol)
         logger.info(
             f"Relatório Final de Trades: {trade_stats['total_trades']} operações "

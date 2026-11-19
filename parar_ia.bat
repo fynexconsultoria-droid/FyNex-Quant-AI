@@ -4,7 +4,9 @@ echo =========================================================
 echo             Parando a IA em Segundo Plano
 echo =========================================================
 
-powershell -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*trading_bot.py*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force; Write-Host ('Processo encerrado: PID ' + $_.ProcessId) }"
+python -c "import os,time,trading_bot as tb; pid=tb.get_running_bot_pid(); print('Robô não está em execução.' if not pid else f'Enviando sinal de parada limpa ao PID {pid}...'); tb.request_bot_stop() if pid else None"
+timeout /t 3 /nobreak >nul
+python -c "import psutil,trading_bot as tb; pid=tb.get_running_bot_pid(); (psutil.Process(pid).terminate(), print(f'Processo encerrado: PID {pid}')) if pid else print('Robô encerrado de forma limpa.')"
 
 echo.
 echo Verificação concluída.
