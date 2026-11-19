@@ -12,7 +12,6 @@ Fornece APIs em tempo real para alimentar a interface gráfica interativa:
 
 import os
 import sys
-import json
 import time
 import secrets
 import sqlite3

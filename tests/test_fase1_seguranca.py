@@ -120,8 +120,9 @@ def test_paper_open_and_take_profit_pnl_matches_position_size(db, no_kill_switch
     assert not manager.in_position
     t = trades(db)[0]
     assert t["reason"] == "TAKE_PROFIT"
-    assert t["pnl_usd"] == pytest.approx(1.5)  # 3% de $50, não de $1000
-    assert t["pnl_pct"] == pytest.approx(3.0)
+    # 3% de $50 = $1.50 bruto; menos slippage (0.02%) e taxas Spot (0.1% entrada + 0.1% saída)
+    assert 1.35 < t["pnl_usd"] < 1.50
+    assert 2.70 < t["pnl_pct"] < 3.00
 
 
 # ----------------------------------------------- 1.4 posição persistida (C5)

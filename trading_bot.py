@@ -23,6 +23,8 @@ import time
 import json
 import sqlite3
 import logging
+from logging.handlers import RotatingFileHandler
+import threading
 from datetime import datetime, timezone
 from typing import Tuple, List, Optional, Dict, Any
 
@@ -31,7 +33,9 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import accuracy_score, precision_score, log_loss
 
 # Módulo de Conexão com a Binance (FyNex Quant AI)
 import binance_client
@@ -42,7 +46,6 @@ from position_manager import PositionManager, RiskManager
 LIVE_TRADING_ENABLED = False
 
 # Biblioteca 'ta' (Technical Analysis Library in Python)
-import ta
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, SMAIndicator
 from ta.volatility import AverageTrueRange
@@ -57,18 +60,27 @@ except Exception:
     pass
 
 # -----------------------------------------------------------------------------
-# Configuração de Logging Dual (Console + Arquivo 'trading_bot.log')
+# Configuração de Logging Dual com Rotação Automática (5 MB x 5 arquivos)
 # -----------------------------------------------------------------------------
+LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s - %(message)s"
+LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("trading_bot.log", encoding="utf-8")
-    ]
+    format=LOG_FORMAT,
+    datefmt=LOG_DATEFMT,
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("QuantTradingBot")
+if not any(isinstance(h, RotatingFileHandler) for h in logger.handlers):
+    _file_handler = RotatingFileHandler(
+        "trading_bot.log",
+        maxBytes=5 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    _file_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATEFMT))
+    logger.addHandler(_file_handler)
 
 
 # -----------------------------------------------------------------------------
@@ -487,11 +499,15 @@ class TradingDatabase:
         return evaluated
 
     def get_rolling_accuracy(self, symbol: str, timeframe: str, last_n: int = 30) -> Dict[str, Any]:
-        """Calcula a taxa de acerto real das últimas N previsões avaliadas."""
+        """
+        Calcula a taxa de acerto real das últimas N previsões avaliadas e também
+        a precisão específica dos sinais de COMPRA (prediction = 1), que é a métrica
+        que realmente impacta as entradas do robô.
+        """
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT is_correct
+                SELECT prediction, is_correct
                 FROM predictions
                 WHERE symbol = ? AND timeframe = ? AND is_correct IS NOT NULL
                 ORDER BY id DESC
@@ -499,14 +515,42 @@ class TradingDatabase:
             """, (symbol, timeframe, last_n))
             rows = cursor.fetchall()
 
+            # Busca também os últimos `last_n` sinais de COMPRA (prediction = 1) avaliados
+            cursor.execute("""
+                SELECT is_correct
+                FROM predictions
+                WHERE symbol = ? AND timeframe = ? AND is_correct IS NOT NULL AND prediction = 1
+                ORDER BY id DESC
+                LIMIT ?
+            """, (symbol, timeframe, last_n))
+            buy_rows = cursor.fetchall()
+
         if not rows:
-            return {"total": 0, "correct": 0, "accuracy_pct": 50.0}
+            return {
+                "total": 0,
+                "correct": 0,
+                "accuracy_pct": 50.0,
+                "buy_total": 0,
+                "buy_correct": 0,
+                "buy_precision_pct": 50.0,
+            }
 
         total = len(rows)
         correct = sum(1 for r in rows if r["is_correct"] == 1)
         acc = (correct / total) * 100.0
 
-        return {"total": total, "correct": correct, "accuracy_pct": acc}
+        buy_total = len(buy_rows)
+        buy_correct = sum(1 for r in buy_rows if r["is_correct"] == 1)
+        buy_prec = (buy_correct / buy_total * 100.0) if buy_total > 0 else acc
+
+        return {
+            "total": total,
+            "correct": correct,
+            "accuracy_pct": acc,
+            "buy_total": buy_total,
+            "buy_correct": buy_correct,
+            "buy_precision_pct": buy_prec,
+        }
 
     def record_trade(
         self,
@@ -609,7 +653,7 @@ class ModelPersistence:
     def _prune_old_versions(self, clean_symbol: str, timeframe: str) -> None:
         if self.max_versions_kept <= 0:
             return
-        prefix = f"model_v"
+        prefix = "model_v"
         suffix = f"_{clean_symbol}_{timeframe}.joblib"
         versioned = []
         for fname in os.listdir(self.models_dir):
@@ -710,50 +754,59 @@ class ModelPersistence:
 class DynamicCalibrator:
     """
     Ajusta dinamicamente o rigor de probabilidade e tolerância ao risco
-    com base na performance real das previsões mais recentes.
+    priorizando a PRECISÃO REAL dos sinais de compra (classe 1) quando há amostra
+    suficiente, evitando ruído de amostras minúsculas.
     """
 
     @staticmethod
     def get_calibration(
         rolling_accuracy: float,
         evaluated_count: int,
-        base_threshold: float = 0.55
+        base_threshold: float = 0.55,
+        buy_precision_pct: Optional[float] = None,
+        buy_evaluated_count: Optional[int] = None,
+        min_samples: int = 12
     ) -> Dict[str, Any]:
         """
         Retorna o limiar ajustado e o regime de mercado diagnosticado.
+        Se `buy_precision_pct` e `buy_evaluated_count` forem fornecidos, usa a precisão
+        dos sinais de compra como métrica principal.
         """
-        if evaluated_count < 8:
+        metric = buy_precision_pct if (buy_precision_pct is not None and (buy_evaluated_count or 0) >= min_samples) else rolling_accuracy
+        count = buy_evaluated_count if (buy_evaluated_count is not None and buy_evaluated_count >= min_samples) else evaluated_count
+
+        if count < min_samples:
             return {
                 "threshold": base_threshold,
                 "mode": "CALIBRAÇÃO INICIAL",
                 "badge": "ℹ️",
-                "description": f"Coletando amostras ({evaluated_count}/8). Régua padrão de {base_threshold:.0%}."
+                "description": f"Coletando amostras ({count}/{min_samples}). Régua padrão de {base_threshold:.0%}."
             }
 
-        # Mercado com alto ruído (acurácia abaixo de 42%)
-        if rolling_accuracy < 42.0:
+        # Mercado com alto ruído (assertividade abaixo de 45%)
+        if metric < 45.0:
             return {
-                "threshold": 0.65,
+                "threshold": max(0.65, base_threshold + 0.08),
                 "mode": "PROTEÇÃO ATIVA",
                 "badge": "🛡️",
-                "description": f"Mercado errático (Acurácia {rolling_accuracy:.1f}%). Exigência elevada para 65% para evitar armadilhas."
+                "description": f"Mercado errático (Precisão {metric:.1f}%). Exigência elevada para evitar armadilhas."
             }
-        # Mercado em consolidação / moderado (42% a 54%)
-        elif rolling_accuracy < 54.0:
+        # Mercado em consolidação / moderado (45% a 55%)
+        elif metric < 55.0:
             return {
                 "threshold": base_threshold,
                 "mode": "REGIME NEUTRO",
                 "badge": "⚖️",
-                "description": f"Acurácia em {rolling_accuracy:.1f}%. Operando com confiança padrão de {base_threshold:.0%}."
+                "description": f"Precisão em {metric:.1f}%. Operando com confiança padrão de {base_threshold:.0%}."
             }
-        # Mercado em tendência favorável (>= 54%)
+        # Mercado em tendência favorável (>= 55%)
         else:
             optimized_th = max(0.52, base_threshold - 0.02)
             return {
                 "threshold": optimized_th,
                 "mode": "REGIME FAVORÁVEL",
                 "badge": "🚀",
-                "description": f"Alta sincronia (Acurácia {rolling_accuracy:.1f}%). Confiança otimizada para {optimized_th:.0%}."
+                "description": f"Alta sincronia (Precisão {metric:.1f}%). Confiança otimizada para {optimized_th:.0%}."
             }
 
 
@@ -855,42 +908,58 @@ def get_latest_contiguous_segment(df: pd.DataFrame, timeframe: str) -> pd.DataFr
 
 
 # -----------------------------------------------------------------------------
-# 5. Engenharia de Features Técnicas
+# 5. Engenharia de Features Técnicas (Estacionárias / Invariantes à Escala de Preço)
 # -----------------------------------------------------------------------------
 def build_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
     """
-    Calcula indicadores estatísticos e de momento:
+    Calcula indicadores estatísticos e de momento todos normalizados (sem valores
+    absolutos em dólares, para que o modelo não perca validade quando o nível de preço muda):
     - RSI 14
-    - MACD Line, Signal e Histograma
+    - MACD Line, Signal e Histograma normalizados pelo preço (% do close)
     - ATR Normalizado (% do preço)
-    - Relação de Médias Móveis (SMA 9 / SMA 21)
-    - Momentum imediato de retorno
+    - Relação de Médias Móveis (SMA 9 / SMA 21 - 1)
+    - Retornos de múltiplos períodos (1, 3, 5, 10 candles)
+    - Volatilidade realizada de curto prazo (std dos retornos em 10 candles)
     - Dinâmica percentual de volume
+    - Codificação cíclica da hora do dia (hour_sin, hour_cos)
     """
     df = df.copy()
+    close = df["close"].replace(0, np.nan)
 
     # 1. RSI (14)
     rsi_indicator = RSIIndicator(close=df["close"], window=14)
     df["rsi_14"] = rsi_indicator.rsi()
 
-    # 2. MACD (12, 26, 9)
+    # 2. MACD (12, 26, 9) normalizado pelo preço de fechamento (estacionário)
     macd_indicator = MACD(close=df["close"], window_slow=26, window_fast=12, window_sign=9)
-    df["macd_line"] = macd_indicator.macd()
-    df["macd_signal"] = macd_indicator.macd_signal()
-    df["macd_diff"] = macd_indicator.macd_diff()
+    df["macd_line"] = macd_indicator.macd() / close
+    df["macd_signal"] = macd_indicator.macd_signal() / close
+    df["macd_diff"] = macd_indicator.macd_diff() / close
 
     # 3. ATR Normalizado (Volatilidade Relativa ao Preço)
     atr_indicator = AverageTrueRange(high=df["high"], low=df["low"], close=df["close"], window=14)
-    df["atr_pct"] = atr_indicator.average_true_range() / df["close"]
+    df["atr_pct"] = atr_indicator.average_true_range() / close
 
     # 4. Médias Móveis Rápidas e Lentas
     sma_9 = SMAIndicator(close=df["close"], window=9).sma_indicator()
     sma_21 = SMAIndicator(close=df["close"], window=21).sma_indicator()
-    df["sma_ratio"] = sma_9 / sma_21
+    df["sma_ratio"] = (sma_9 / sma_21) - 1.0
 
-    # 5. Momentum e Dinâmica de Volume
+    # 5. Momentum em múltiplos horizontes, volatilidade e dinâmica de volume
     df["return_1"] = df["close"].pct_change(1)
-    df["volume_change"] = df["volume"].pct_change(1).clip(-2.0, 5.0)
+    df["return_3"] = df["close"].pct_change(3)
+    df["return_5"] = df["close"].pct_change(5)
+    df["return_10"] = df["close"].pct_change(10)
+    df["volatility_10"] = df["return_1"].rolling(10).std()
+    df["volume_change"] = df["volume"].pct_change(1).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-2.0, 5.0)
+
+    # 6. Sazonalidade intradiária cíclica
+    if "timestamp" in df.columns and pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        hours = df["timestamp"].dt.hour + df["timestamp"].dt.minute / 60.0
+    else:
+        hours = pd.Series(0.0, index=df.index)
+    df["hour_sin"] = np.sin(2.0 * np.pi * hours / 24.0)
+    df["hour_cos"] = np.cos(2.0 * np.pi * hours / 24.0)
 
     feature_cols = [
         "rsi_14",
@@ -900,68 +969,244 @@ def build_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
         "atr_pct",
         "sma_ratio",
         "return_1",
-        "volume_change"
+        "return_3",
+        "return_5",
+        "return_10",
+        "volatility_10",
+        "volume_change",
+        "hour_sin",
+        "hour_cos",
     ]
 
     return df, feature_cols
 
 
 # -----------------------------------------------------------------------------
-# 6. Construção da Variável Alvo (Target)
+# 6. Construção da Variável Alvo (Triple Barrier / Custo-Consciente)
 # -----------------------------------------------------------------------------
-def create_target(df: pd.DataFrame) -> pd.DataFrame:
+def create_target(
+    df: pd.DataFrame,
+    mode: str = "next_candle_cost",
+    take_profit_pct: float = 0.004,
+    stop_loss_pct: float = 0.003,
+    horizon_candles: int = 15,
+    min_net_return_pct: float = 0.0
+) -> pd.DataFrame:
     """
-    Define a variável dependente binária:
-    - 1 se o próximo candle fechar acima do atual.
-    - 0 se fechar igual ou abaixo.
+    Constrói a variável dependente binária (`Target`):
+    - mode='triple_barrier':
+        Target = 1 se, dentro dos próximos `horizon_candles` candles, a máxima atingir
+        `close * (1 + take_profit_pct)` ANTES de a mínima atingir `close * (1 - stop_loss_pct)`.
+        Se um mesmo candle tocar ambos os níveis, considera conservadoramente que o Stop Loss
+        foi atingido primeiro (Target = 0). As últimas `horizon_candles` linhas (sem futuro
+        completo) são descartadas para evitar look-ahead bias.
+    - mode='next_candle_cost' (compatível com avaliação t+1):
+        Target = 1 se o próximo candle fechar acima de `close * (1 + min_net_return_pct)`.
     """
     df = df.copy()
-    df["Target"] = (df["close"].shift(-1) > df["close"]).astype(float)
+
+    if mode == "triple_barrier":
+        closes = df["close"].to_numpy(dtype=float)
+        highs = df["high"].to_numpy(dtype=float)
+        lows = df["low"].to_numpy(dtype=float)
+        n = len(df)
+        targets = np.full(n, np.nan, dtype=float)
+        h = max(1, int(horizon_candles))
+
+        for i in range(0, max(0, n - h)):
+            entry = closes[i]
+            tp_level = entry * (1.0 + take_profit_pct)
+            sl_level = entry * (1.0 - stop_loss_pct)
+            outcome = 0.0
+            for j in range(i + 1, i + h + 1):
+                hit_sl = lows[j] <= sl_level
+                hit_tp = highs[j] >= tp_level
+                if hit_sl and hit_tp:
+                    outcome = 0.0
+                    break
+                if hit_sl:
+                    outcome = 0.0
+                    break
+                if hit_tp:
+                    outcome = 1.0
+                    break
+            targets[i] = outcome
+
+        df["Target"] = targets
+    else:
+        threshold = df["close"] * (1.0 + float(min_net_return_pct))
+        df["Target"] = np.where(df["close"].shift(-1).isna(), np.nan, (df["close"].shift(-1) > threshold).astype(float))
+
     df_clean = df.dropna().copy()
     df_clean["Target"] = df_clean["Target"].astype(int)
     return df_clean
 
 
 # -----------------------------------------------------------------------------
-# 7. Treinamento e Retreinamento do Modelo (Rolling Retraining)
+# 7. Treinamento Walk-Forward, Calibração de Probabilidades e Campeão/Desafiante
 # -----------------------------------------------------------------------------
+def _base_rf() -> RandomForestClassifier:
+    return RandomForestClassifier(
+        n_estimators=120,
+        max_depth=5,
+        min_samples_split=10,
+        min_samples_leaf=5,
+        class_weight="balanced_subsample",
+        random_state=42,
+        n_jobs=1,
+    )
+
+
+def evaluate_walk_forward(
+    df: pd.DataFrame,
+    feature_cols: List[str],
+    n_splits: int = 4
+) -> Dict[str, float]:
+    """
+    Avalia a arquitetura do modelo via validação cruzada temporal (TimeSeriesSplit),
+    retornando acurácia, precisão da classe 1 (compra) e log-loss fora da amostra.
+    """
+    X = df[feature_cols]
+    y = df["Target"]
+
+    effective_splits = min(max(2, n_splits), max(2, len(df) // 40))
+    if len(df) < 30 or y.nunique() < 2:
+        return {"accuracy": 0.5, "precision_buy": 0.0, "log_loss": 0.693, "folds": 0}
+
+    tscv = TimeSeriesSplit(n_splits=effective_splits)
+    accs: List[float] = []
+    precs: List[float] = []
+    losses: List[float] = []
+
+    for train_idx, test_idx in tscv.split(X):
+        X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
+        y_tr, y_te = y.iloc[train_idx], y.iloc[test_idx]
+        if y_tr.nunique() < 2:
+            continue
+        clf = _base_rf()
+        clf.fit(X_tr, y_tr)
+        preds = clf.predict(X_te)
+        probs = clf.predict_proba(X_te)
+        accs.append(float(accuracy_score(y_te, preds)))
+        precs.append(float(precision_score(y_te, preds, zero_division=0)))
+        if probs.shape[1] == 2 and y_te.nunique() == 2:
+            losses.append(float(log_loss(y_te, probs, labels=[0, 1])))
+
+    if not accs:
+        return {"accuracy": 0.5, "precision_buy": 0.0, "log_loss": 0.693, "folds": 0}
+
+    return {
+        "accuracy": float(np.mean(accs)),
+        "precision_buy": float(np.mean(precs)),
+        "log_loss": float(np.mean(losses)) if losses else 0.693,
+        "folds": len(accs),
+    }
+
+
+def should_promote_challenger(
+    challenger_metrics: Dict[str, float],
+    champion_metrics: Optional[Dict[str, float]],
+    min_precision_buy: float = 0.50
+) -> bool:
+    """
+    Decide se o modelo desafiante (novo treino) deve substituir o campeão atual.
+    Se não houver campeão anterior, promove sempre. Havendo campeão, exige que o
+    desafiante não degrade a precisão de compra nem a acurácia walk-forward.
+    """
+    if not champion_metrics:
+        return True
+    chal_prec = challenger_metrics.get("precision_buy", 0.0)
+    champ_prec = champion_metrics.get("precision_buy", 0.0)
+    chal_acc = challenger_metrics.get("accuracy", 0.5)
+    champ_acc = champion_metrics.get("accuracy", 0.5)
+
+    # Composta: 60% precisão do sinal de compra + 40% acurácia geral
+    chal_score = 0.6 * chal_prec + 0.4 * chal_acc
+    champ_score = 0.6 * champ_prec + 0.4 * champ_acc
+    return chal_score >= (champ_score - 0.005) and (chal_prec >= min_precision_buy or chal_score >= champ_score)
+
+
 def train_model(
     df: pd.DataFrame,
     feature_cols: List[str],
     model_version: int = 1,
-    train_split_ratio: float = 0.8
-) -> Tuple[RandomForestClassifier, float]:
+    train_split_ratio: float = 0.8,
+    calibrate_probabilities: bool = True,
+    refit_full: bool = True
+) -> Tuple[Any, float]:
     """
-    Treina/Retreina o RandomForestClassifier preservando rigorosamente
-    a cronologia temporal (sem data leakage e sem shuffle).
+    Treina/Retreina o classificador preservando rigorosamente a cronologia temporal:
+    1. Avalia fora da amostra (holdout temporal + TimeSeriesSplit walk-forward).
+    2. Reajusta com 100% dos dados recentes (`refit_full=True`) para não desperdiçar os
+       últimos 20% dos candles na produção.
+    3. Calibra as probabilidades com `CalibratedClassifierCV` (sigmoid / Platt scaling)
+       para que `prob_up >= threshold` reflita probabilidade real.
+    Retorna `(model, accuracy)` mantendo total compatibilidade com chamadas existentes
+    e anexa `model.validation_metrics_` com o relatório completo.
     """
-    split_index = int(len(df) * train_split_ratio)
+    split_index = max(1, int(len(df) * train_split_ratio))
     X = df[feature_cols]
     y = df["Target"]
 
     X_train, X_test = X.iloc[:split_index], X.iloc[split_index:]
     y_train, y_test = y.iloc[:split_index], y.iloc[split_index:]
 
-    model = RandomForestClassifier(
-        n_estimators=150,
-        max_depth=5,
-        min_samples_split=10,
-        min_samples_leaf=5,
-        random_state=42,
-        n_jobs=-1
-    )
-    model.fit(X_train, y_train)
+    base_eval_model = _base_rf()
+    base_eval_model.fit(X_train, y_train)
 
-    y_pred = model.predict(X_test)
-    accuracy = accuracy_score(y_test, y_pred)
+    if len(X_test) > 0:
+        y_pred = base_eval_model.predict(X_test)
+        holdout_acc = float(accuracy_score(y_test, y_pred))
+        holdout_prec = float(precision_score(y_test, y_pred, zero_division=0))
+    else:
+        holdout_acc = 0.5
+        holdout_prec = 0.0
 
-    logger.info(f"⚡ [RETREINO ML v{model_version}] Treino: {len(X_train)} | Teste: {len(X_test)} | Acurácia Teste: {accuracy * 100:.2f}%")
+    wf_metrics = evaluate_walk_forward(df, feature_cols, n_splits=4)
+    accuracy = wf_metrics["accuracy"] if wf_metrics["folds"] > 0 else holdout_acc
+    precision_buy = wf_metrics["precision_buy"] if wf_metrics["folds"] > 0 else holdout_prec
 
-    importances = pd.Series(model.feature_importances_, index=feature_cols).sort_values(ascending=False)
+    importances = pd.Series(base_eval_model.feature_importances_, index=feature_cols).sort_values(ascending=False)
     top_feats = ", ".join([f"{k}: {v:.1%}" for k, v in importances.head(3).items()])
+
+    # Reajuste final em 100% da janela + calibração de probabilidade
+    X_fit = X if refit_full else X_train
+    y_fit = y if refit_full else y_train
+
+    min_class_count = int(y_fit.value_counts().min()) if y_fit.nunique() >= 2 else 0
+    if calibrate_probabilities and min_class_count >= 10 and len(X_fit) >= 60:
+        final_model: Any = CalibratedClassifierCV(
+            estimator=_base_rf(),
+            method="sigmoid",
+            cv=TimeSeriesSplit(n_splits=3),
+        )
+        try:
+            final_model.fit(X_fit, y_fit)
+        except Exception:
+            final_model = _base_rf()
+            final_model.fit(X_fit, y_fit)
+    else:
+        final_model = _base_rf()
+        final_model.fit(X_fit, y_fit)
+
+    final_model.validation_metrics_ = {
+        "accuracy": float(accuracy),
+        "holdout_accuracy": float(holdout_acc),
+        "precision_buy": float(precision_buy),
+        "holdout_precision_buy": float(holdout_prec),
+        "log_loss": float(wf_metrics.get("log_loss", 0.693)),
+        "folds": int(wf_metrics.get("folds", 0)),
+        "samples": int(len(df)),
+    }
+
+    logger.info(
+        f"⚡ [RETREINO ML v{model_version}] Amostras: {len(df)} | "
+        f"Acurácia WF: {accuracy * 100:.2f}% | Precisão Compra: {precision_buy * 100:.2f}% | "
+        f"Holdout: {holdout_acc * 100:.2f}%"
+    )
     logger.info(f"   Top Features: {top_feats}")
 
-    return model, accuracy
+    return final_model, accuracy
 
 
 # -----------------------------------------------------------------------------
@@ -1154,7 +1399,7 @@ def run_continuous_trading_bot(
     }.get(final_mode, "PAPER TRADING")
 
     logger.info("====================================================================")
-    logger.info(f"🚀 INICIANDO QUANT TRADING BOT - MACHINE LEARNING CONTÍNUO")
+    logger.info("🚀 INICIANDO QUANT TRADING BOT - MACHINE LEARNING CONTÍNUO")
     logger.info(f"   Par: {symbol} | Tempo Gráfico: {timeframe}")
     logger.info(f"   Ambiente de Conexão: {env_name}")
     logger.info(f"   Modo de Operação: {mode_label}")
@@ -1186,15 +1431,28 @@ def run_continuous_trading_bot(
     )
 
     # 2. Carregamento ou Treinamento Inicial do Modelo
+    _, current_feature_cols = build_features(recent_df.iloc[:40])
     saved_model_data = model_storage.load_latest_model(symbol, timeframe)
-    if saved_model_data is not None:
+    if saved_model_data is not None and saved_model_data[3] == current_feature_cols:
         model, model_version, current_model_acc, feature_cols = saved_model_data
+        champion_metrics = getattr(model, "validation_metrics_", {"accuracy": current_model_acc, "precision_buy": current_model_acc})
     else:
         model_version = 1
         feat_df, feature_cols = build_features(recent_df)
-        dataset = create_target(feat_df)
+        dataset = create_target(
+            feat_df, mode="triple_barrier",
+            take_profit_pct=take_profit_pct, stop_loss_pct=stop_loss_pct,
+        )
         model, current_model_acc = train_model(dataset, feature_cols, model_version=model_version)
-        model_storage.save_model(model, model_version, current_model_acc, feature_cols, symbol, timeframe)
+        champion_metrics = getattr(model, "validation_metrics_", {"accuracy": current_model_acc, "precision_buy": current_model_acc})
+        model_storage.save_model(
+            model, model_version, current_model_acc, feature_cols, symbol, timeframe,
+            extra_meta={"validation": champion_metrics}
+        )
+
+    # Controle de retreino assíncrono (não bloqueia a checagem de SL/TP)
+    model_lock = threading.Lock()
+    retrain_in_progress = False
 
     # Variáveis de Estado (inicia com o último candle já previsto no banco para evitar duplicata no restart)
     candles_since_retrain = 0
@@ -1206,7 +1464,11 @@ def run_continuous_trading_bot(
     # Calibração inicial
     acc_init = db.get_rolling_accuracy(symbol, timeframe, last_n=30)
     calib = DynamicCalibrator.get_calibration(
-        acc_init["accuracy_pct"], acc_init["total"], base_threshold=confidence_threshold
+        acc_init["accuracy_pct"],
+        acc_init["total"],
+        base_threshold=confidence_threshold,
+        buy_precision_pct=acc_init.get("buy_precision_pct"),
+        buy_evaluated_count=acc_init.get("buy_total"),
     )
     active_confidence = calib["threshold"]
 
@@ -1285,36 +1547,66 @@ def run_continuous_trading_bot(
                         f"{acc_stats['correct']} acertos ({acc_stats['accuracy_pct']:.1f}% de assertividade real)"
                     )
 
-                # 3.2. Auto-Calibração Dinâmica
+                # 3.2. Auto-Calibração Dinâmica (prioriza precisão dos sinais de compra)
                 calib = DynamicCalibrator.get_calibration(
                     rolling_accuracy=acc_stats["accuracy_pct"],
                     evaluated_count=acc_stats["total"],
-                    base_threshold=confidence_threshold
+                    base_threshold=confidence_threshold,
+                    buy_precision_pct=acc_stats.get("buy_precision_pct"),
+                    buy_evaluated_count=acc_stats.get("buy_total"),
                 )
                 active_confidence = calib["threshold"]
                 logger.info(f"   {calib['badge']} [AUTO-CALIBRAÇÃO] {calib['mode']} -> Filtro Ativo: {active_confidence:.1%} ({calib['description']})")
 
                 # -------------------------------------------------------------
-                # 3.3. Retreinamento Automático por Janela Deslizante
+                # 3.3. Retreinamento Assíncrono + Campeão/Desafiante (M11, A2)
                 # -------------------------------------------------------------
-                if candles_since_retrain >= retrain_every_n_candles:
-                    retrain_raw = db.get_recent_candles(symbol, timeframe, limit=1200)
+                if candles_since_retrain >= retrain_every_n_candles and not retrain_in_progress:
+                    retrain_raw = db.get_recent_candles(symbol, timeframe, limit=1500)
                     retrain_df = get_latest_contiguous_segment(retrain_raw, timeframe)
                     if len(retrain_df) >= 200:
-                        logger.info(f"\n🔄 Janela Deslizante: {candles_since_retrain} novos candles acumulados. Retreinando e salvando a IA...")
-                        feat_retrain_df, _ = build_features(retrain_df)
-                        retrain_dataset = create_target(feat_retrain_df)
-
-                        model_version += 1
-                        model, new_acc = train_model(
-                            retrain_dataset,
-                            feature_cols,
-                            model_version=model_version
-                        )
-                        current_model_acc = new_acc
-                        # Salva a nova versão em disco na pasta 'models/'
-                        model_storage.save_model(model, model_version, new_acc, feature_cols, symbol, timeframe)
+                        retrain_in_progress = True
                         candles_since_retrain = 0
+                        next_ver = model_version + 1
+
+                        def _bg_retrain(df_snapshot: pd.DataFrame, ver: int) -> None:
+                            nonlocal model, model_version, current_model_acc, champion_metrics, retrain_in_progress
+                            try:
+                                logger.info(f"\n🔄 [THREAD RETREINO] Treinando desafiante v{ver} em segundo plano...")
+                                feat_retrain_df, f_cols = build_features(df_snapshot)
+                                retrain_dataset = create_target(
+                                    feat_retrain_df, mode="triple_barrier",
+                                    take_profit_pct=take_profit_pct, stop_loss_pct=stop_loss_pct,
+                                )
+                                challenger, new_acc = train_model(
+                                    retrain_dataset, f_cols, model_version=ver
+                                )
+                                chal_metrics = getattr(
+                                    challenger, "validation_metrics_",
+                                    {"accuracy": new_acc, "precision_buy": new_acc}
+                                )
+                                if should_promote_challenger(chal_metrics, champion_metrics):
+                                    with model_lock:
+                                        model = challenger
+                                        model_version = ver
+                                        current_model_acc = new_acc
+                                        champion_metrics = chal_metrics
+                                    model_storage.save_model(
+                                        challenger, ver, new_acc, f_cols, symbol, timeframe,
+                                        extra_meta={"validation": chal_metrics}
+                                    )
+                                    logger.info(f"🏆 [CAMPEÃO PROMOVIDO] Modelo v{ver} assumiu a operação.")
+                                else:
+                                    logger.info(
+                                        f"🛡️ [CAMPEÃO MANTIDO] Desafiante v{ver} (Prec.Compra {chal_metrics.get('precision_buy', 0)*100:.1f}%) "
+                                        f"não superou o campeão v{model_version} ({champion_metrics.get('precision_buy', 0)*100:.1f}%)."
+                                    )
+                            except Exception as e:
+                                logger.error(f"Erro no retreino em background: {e}")
+                            finally:
+                                retrain_in_progress = False
+
+                        threading.Thread(target=_bg_retrain, args=(retrain_df, next_ver), daemon=True).start()
                     else:
                         logger.warning(f"Segmento contíguo ({len(retrain_df)} candles) ainda curto para retreino; aguardando mais dados.")
 
@@ -1332,14 +1624,17 @@ def run_continuous_trading_bot(
                     closed_features = pd.DataFrame()
 
                 if not closed_features.empty and not closed_features.isna().values.any():
-                    pred = int(model.predict(closed_features)[0])
-                    probabilities = model.predict_proba(closed_features)[0]
+                    with model_lock:
+                        active_model = model
+                        active_ver = model_version
+                    pred = int(active_model.predict(closed_features)[0])
+                    probabilities = active_model.predict_proba(closed_features)[0]
                     prob_down, prob_up = float(probabilities[0]), float(probabilities[1])
 
                     pred_id = db.record_prediction(
                         symbol=symbol,
                         timeframe=timeframe,
-                        model_version=model_version,
+                        model_version=active_ver,
                         candle_timestamp=closed_ts,
                         prediction=pred,
                         prob_up=prob_up,
@@ -1372,7 +1667,7 @@ def run_continuous_trading_bot(
             pos_info = positions.status_label()
             _publish_state()
 
-            logger.info(
+            logger.debug(
                 f"⏳ [MONITORANDO] {symbol}: ${current_price:,.2f} | "
                 f"Fechamento: ~{remaining_sec:02d}s | "
                 f"Retreino: {candles_left} candle(s) | "
@@ -1433,8 +1728,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--retrain",
         type=int,
-        default=5,
-        help="Retreina a IA a cada N candles fechados (padrão: 5)"
+        default=30,
+        help="Retreina a IA a cada N candles fechados (padrão: 30)"
     )
     parser.add_argument(
         "--confidence",

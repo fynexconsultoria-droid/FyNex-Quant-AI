@@ -15,11 +15,16 @@ from datetime import datetime, timezone
 from typing import Optional, Tuple, Dict, Any
 
 import binance_client
+import alerts
 
 logger = logging.getLogger("QuantTradingBot")
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 KILL_SWITCH_PATH = os.path.join(BASE_DIR, "STOP")
+
+# Taxa Spot padrão da Binance (0.1% = 0.001 por lado) e slippage estimado no paper trading
+PAPER_FEE_PCT = 0.001
+PAPER_SLIPPAGE_PCT = 0.0002
 
 # Se o preço cair este percentual ABAIXO do stop e a OCO ainda não executou
 # (ex.: gap que pulou o stop-limit), o robô cancela a OCO e vende a mercado.
@@ -184,18 +189,32 @@ class PositionManager:
                      quantity: Optional[float] = None) -> Dict[str, Any]:
         pos = self.position
         qty = quantity if quantity is not None else pos.quantity
-        pnl_pct = (exit_price - pos.entry_price) / pos.entry_price * 100.0
-        pnl_usd = (exit_price - pos.entry_price) * qty
+        if not self.is_real:
+            # No modo paper, aplica slippage na saída e desconta taxa Spot de compra + venda (0.1% cada lado)
+            effective_exit = exit_price * (1.0 - PAPER_SLIPPAGE_PCT)
+            gross_entry_cost = pos.entry_price * qty
+            gross_exit_proceeds = effective_exit * qty
+            total_fees = (gross_entry_cost + gross_exit_proceeds) * PAPER_FEE_PCT
+            pnl_usd = (gross_exit_proceeds - gross_entry_cost) - total_fees
+            pnl_pct = (pnl_usd / gross_entry_cost) * 100.0 if gross_entry_cost > 0 else 0.0
+            recorded_exit_price = effective_exit
+        else:
+            pnl_pct = (exit_price - pos.entry_price) / pos.entry_price * 100.0
+            pnl_usd = (exit_price - pos.entry_price) * qty
+            recorded_exit_price = exit_price
+
         self.db.record_trade(
             self.symbol, self.timeframe, pos.model_version, pos.entry_time, pos.entry_price,
-            utc_now_str(), exit_price, reason, pnl_pct, pnl_usd,
+            utc_now_str(), recorded_exit_price, reason, pnl_pct, pnl_usd,
             mode=self.mode, order_id=exit_order_id or pos.order_id, quantity=qty
         )
         icon = "🎯" if pnl_usd > 0 else "🚨"
-        logger.warning(
-            f"{icon} [{reason} ({self.mode.upper()})] Saída: ${exit_price:,.2f} | Entrada: ${pos.entry_price:,.2f} "
-            f"| PnL: {pnl_pct:+.2f}% (${pnl_usd:+.2f}) | Ordem: {exit_order_id or '-'}"
+        msg = (
+            f"{icon} [{reason} ({self.mode.upper()})] Saída: ${recorded_exit_price:,.2f} | Entrada: ${pos.entry_price:,.2f} "
+            f"| PnL Líquido: {pnl_pct:+.2f}% (${pnl_usd:+.2f}) | Ordem: {exit_order_id or '-'}"
         )
+        logger.warning(msg)
+        alerts.send_alert(msg, level="TRADE_EXIT")
         self._clear()
         return {"pnl_pct": pnl_pct, "pnl_usd": pnl_usd}
 
@@ -265,6 +284,7 @@ class PositionManager:
             allowed, reason = self.risk.can_open(self.trade_amount_usdt)
             if not allowed:
                 logger.warning(f"   ⛔ [RISCO] Entrada bloqueada: {reason}")
+                alerts.send_alert(f"Entrada bloqueada pelo RiskManager: {reason}", level="RISK_LIMIT")
                 return False
 
         if self.is_real:
@@ -330,17 +350,24 @@ class PositionManager:
         sell = binance_client.execute_spot_sell_with_retry(self.exchange, self.symbol, pos.quantity)
         if not sell.get("success"):
             self.consecutive_sell_failures += 1
-            logger.critical(
-                f"   🆘 [VENDA FALHOU] {sell.get('message')} | A posição CONTINUA ABERTA e será tentada "
+            err_msg = (
+                f"🆘 [VENDA FALHOU] {sell.get('message')} | A posição CONTINUA ABERTA e será tentada "
                 f"novamente (falhas consecutivas: {self.consecutive_sell_failures}). Verifique a conta Binance!"
             )
+            logger.critical("   " + err_msg)
+            alerts.send_alert(err_msg, level="CRITICAL")
             return False
 
         self._record_exit(sell["price"], reason, sell["order_id"], sell["quantity"])
         return True
 
     # ------------------------------------------------------------ check exits
-    def check_exits(self, current_price: float) -> None:
+    def check_exits(
+        self,
+        current_price: float,
+        candle_high: Optional[float] = None,
+        candle_low: Optional[float] = None
+    ) -> None:
         if not self.in_position:
             return
         pos = self.position
@@ -367,10 +394,16 @@ class PositionManager:
                 logger.warning(f"   Falha ao consultar OCO: {status.get('message')}")
                 return
 
-        if current_price <= pos.sl_price:
-            self.close("STOP_LOSS", current_price)
-        elif current_price >= pos.tp_price:
-            self.close("TAKE_PROFIT", current_price)
+        low_check = min(current_price, candle_low) if candle_low is not None else current_price
+        high_check = max(current_price, candle_high) if candle_high is not None else current_price
+
+        # Conservador: se um mesmo candle tocou tanto SL quanto TP, prioriza STOP_LOSS
+        if low_check <= pos.sl_price:
+            exit_p = pos.sl_price if not self.is_real else current_price
+            self.close("STOP_LOSS", exit_p)
+        elif high_check >= pos.tp_price:
+            exit_p = pos.tp_price if not self.is_real else current_price
+            self.close("TAKE_PROFIT", exit_p)
 
     def status_label(self) -> str:
         if not self.position:
