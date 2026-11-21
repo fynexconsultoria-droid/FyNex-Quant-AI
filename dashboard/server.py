@@ -10,6 +10,7 @@ Fornece APIs em tempo real para alimentar a interface gráfica interativa:
 - Histórico de Operações e Curva de Capital (Paper Trading separado do Live/Testnet)
 """
 
+import base64
 import os
 import sys
 import time
@@ -54,6 +55,7 @@ META_PATH = os.path.join(MODELS_DIR, "metadata.json")
 LOG_PATH = os.path.join(BASE_DIR, "logs", "trading_bot.log")
 LEGACY_LOG_PATH = os.path.join(BASE_DIR, "trading_bot.log")
 BOT_SCRIPT = os.path.join(BASE_DIR, "trading_bot.py")
+SUPERVISOR_SCRIPT = os.path.join(BASE_DIR, "supervisor.py")
 
 # Token CSRF gerado a cada inicialização do servidor e injetado no index.html
 CSRF_TOKEN = secrets.token_urlsafe(32)
@@ -71,6 +73,29 @@ ALLOWED_ORIGIN_TUPLES = {
     ("http", "localhost", None),
     ("http", "testserver", None),
 }
+
+
+def _register_cloud_hosts() -> None:
+    """Registra domínios públicos configurados no Railway/Render ou via FYNEX_PUBLIC_HOSTS."""
+    raw_hosts = [
+        os.environ.get("RAILWAY_PUBLIC_DOMAIN", ""),
+        os.environ.get("RENDER_EXTERNAL_HOSTNAME", ""),
+        *os.environ.get("FYNEX_PUBLIC_HOSTS", "").split(","),
+    ]
+    for item in raw_hosts:
+        h = item.strip().lower().removeprefix("https://").removeprefix("http://").strip("/")
+        if not h:
+            continue
+        ALLOWED_HOSTS.add(h)
+        host_only = h.split(":")[0]
+        ALLOWED_HOSTS.add(host_only)
+        ALLOWED_ORIGIN_TUPLES.add(("https", host_only, None))
+        ALLOWED_ORIGIN_TUPLES.add(("https", host_only, 443))
+        ALLOWED_ORIGIN_TUPLES.add(("http", host_only, None))
+
+
+_register_cloud_hosts()
+
 CSP_HEADER = (
     "default-src 'self'; "
     "script-src 'self' https://unpkg.com; "
@@ -86,6 +111,23 @@ CSP_HEADER = (
 app = FastAPI(title="FyNex Quant AI Dashboard")
 
 
+def _check_basic_auth(request: Request) -> bool:
+    """Se FYNEX_DASHBOARD_PASSWORD estiver definida (deploy na nuvem), exige HTTP Basic Auth."""
+    expected_pw = os.environ.get("FYNEX_DASHBOARD_PASSWORD", "").strip()
+    if not expected_pw:
+        return True
+    expected_user = os.environ.get("FYNEX_DASHBOARD_USER", "admin").strip() or "admin"
+    auth = request.headers.get("authorization") or ""
+    if not auth.lower().startswith("basic "):
+        return False
+    try:
+        decoded = base64.b64decode(auth.split(" ", 1)[1].strip()).decode("utf-8")
+        user, _, pw = decoded.partition(":")
+        return secrets.compare_digest(user, expected_user) and secrets.compare_digest(pw, expected_pw)
+    except Exception:
+        return False
+
+
 def is_allowed_origin(origin: str) -> bool:
     """Valida exatamente scheme, host e porta do header Origin (evita bypass localhost.evil.com)."""
     try:
@@ -96,12 +138,17 @@ def is_allowed_origin(origin: str) -> bool:
 
 
 # -----------------------------------------------------------------------------
-# Segurança: Validação de Host (contra DNS Rebinding), Origin exata, CSP e CSRF
+# Segurança: Validação de Host (contra DNS Rebinding), Origin exata, Auth Nuvem, CSP e CSRF
 # -----------------------------------------------------------------------------
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
+    # Healthcheck público para Railway / Render / Docker
+    if request.url.path == "/healthz":
+        return JSONResponse({"status": "ok"})
+
     host = (request.headers.get("host") or "").lower().strip()
-    if not host or host not in ALLOWED_HOSTS:
+    host_no_port = host.split(":")[0]
+    if not host or (host not in ALLOWED_HOSTS and host_no_port not in ALLOWED_HOSTS):
         return JSONResponse(
             status_code=403,
             content={"detail": f"Host '{host}' não autorizado (proteção contra DNS Rebinding)."},
@@ -112,6 +159,13 @@ async def security_middleware(request: Request, call_next):
         return JSONResponse(
             status_code=403,
             content={"detail": f"Origem '{origin}' bloqueada (mesma origem exigida)."},
+        )
+
+    if not _check_basic_auth(request):
+        return JSONResponse(
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="FyNex Quant AI"'},
+            content={"detail": "Autenticação obrigatória para acessar o dashboard."},
         )
 
     response = await call_next(request)
@@ -636,7 +690,7 @@ def get_ai_learning_history(limit: int = Query(default=15, ge=1, le=100)):
 @app.get("/api/ai/evolution")
 def get_ai_evolution(
     symbol: str = Query(default="BTC/USDT", max_length=20),
-    timeframe: str = Query(default="30m", max_length=10),
+    timeframe: str = Query(default="1h", max_length=10),
 ):
     """Retorna a barra de progresso de evolução da IA e o radar de fatores globais."""
     macro = macro_intelligence.fetch_macro_snapshot()
@@ -656,7 +710,7 @@ def get_ai_train_status():
 @app.post("/api/ai/train", dependencies=[Depends(require_csrf)])
 def start_ai_training(
     symbol: str = Query(default="BTC/USDT", pattern="^[A-Z0-9]{2,10}/[A-Z0-9]{2,10}$"),
-    timeframe: str = Query(default="30m", pattern="^(1m|3m|5m|15m|30m|1h)$"),
+    timeframe: str = Query(default="1h", pattern="^(1m|3m|5m|15m|30m|1h)$"),
     candles: int = Query(default=3000, ge=300, le=15000),
     offline: bool = Query(default=False),
 ):
@@ -889,12 +943,12 @@ def get_recent_logs(lines: int = Query(default=50, ge=1, le=500)):
 @app.post("/api/bot/start", dependencies=[Depends(require_csrf)])
 def start_bot(
     symbol: str = Query(default="BTC/USDT", pattern="^[A-Z0-9]{2,10}/[A-Z0-9]{2,10}$"),
-    timeframe: str = Query(default="1m", pattern="^(1m|3m|5m|15m|30m|1h)$"),
-    retrain: int = Query(default=5, ge=1, le=500),
+    timeframe: str = Query(default="1h", pattern="^(1m|3m|5m|15m|30m|1h)$"),
+    retrain: Optional[int] = Query(default=None, ge=1, le=500),
     trading_mode: Optional[str] = Query(default=None),
     trade_amount: Optional[float] = Query(default=None, ge=10.0, le=10000.0),
 ):
-    """Inicia o processo do robô em segundo plano se já não estiver em execução."""
+    """Inicia o processo do robô supervisionado em segundo plano se já não estiver em execução."""
     running, pid = is_bot_running()
     if running:
         return {"status": "already_running", "pid": pid, "message": "O robô já está ativo em segundo plano."}
@@ -907,7 +961,10 @@ def start_bot(
                 pass
 
         python_exe = sys.executable
-        cmd = [python_exe, BOT_SCRIPT, "--symbol", symbol, "--timeframe", timeframe, "--retrain", str(retrain)]
+        target_script = SUPERVISOR_SCRIPT if os.path.exists(SUPERVISOR_SCRIPT) else BOT_SCRIPT
+        cmd = [python_exe, target_script, "--symbol", symbol, "--timeframe", timeframe]
+        if retrain is not None:
+            cmd.extend(["--retrain", str(retrain)])
         if trading_mode:
             cmd.extend(["--trading-mode", trading_mode])
         if trade_amount:
@@ -1010,4 +1067,6 @@ def serve_index():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=False, app_dir=os.path.dirname(__file__))
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", "8000"))
+    uvicorn.run("server:app", host=host, port=port, reload=False, app_dir=os.path.dirname(__file__))

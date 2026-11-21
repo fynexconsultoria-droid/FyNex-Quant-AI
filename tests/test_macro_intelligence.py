@@ -123,26 +123,31 @@ def test_entry_guard_blocks_unsafe_conditions_and_approves_healthy_setup():
     assert p30.sl_pct == pytest.approx(0.008)
     assert p30.confidence >= 0.62
 
+    p1h = get_strategy_profile("1h")
+    assert p1h.tp_pct == pytest.approx(0.018)
+    assert p1h.sl_pct == pytest.approx(0.011)
+    assert p1h.confidence >= 0.65
+
     # Cenário saudável: aprovado
     ok, reasons = evaluate_entry_safety(
-        features_row={"rsi_14": 54.0, "ema_trend_ratio": 0.002, "atr_pct": 0.006},
+        features_row={"rsi_14": 54.0, "bb_pos": 0.60, "ema_trend_ratio": 0.002, "atr_pct": 0.006},
         macro_snapshot={"regime": "RISK-ON FAVORÁVEL", "macro_score": 25.0},
         last_trade={"reason": "TAKE_PROFIT", "pnl_usd": 1.2, "exit_time": "2026-11-21 12:00:00"},
-        cooldown_seconds=3600,
+        cooldown_seconds=7200,
         now_utc=datetime(2026, 11, 21, 12, 10, 0, tzinfo=timezone.utc),
     )
     assert ok is True and reasons == []
 
-    # Cenário inseguro: RISK-OFF + sobrecompra + tendência de baixa + volatilidade extrema + cooldown pós-stop
+    # Cenário inseguro: RISK-OFF + sobrecompra + Bollinger esticado + tendência de baixa + volatilidade extrema + cooldown pós-stop
     ok2, reasons2 = evaluate_entry_safety(
-        features_row={"rsi_14": 76.0, "ema_trend_ratio": -0.008, "atr_pct": 0.035},
+        features_row={"rsi_14": 76.0, "bb_pos": 0.99, "ema_trend_ratio": -0.008, "atr_pct": 0.035},
         macro_snapshot={"regime": "RISK-OFF SEVERO", "macro_score": -65.0},
         last_trade={"reason": "STOP_LOSS", "pnl_usd": -0.8, "exit_time": "2026-11-21 12:00:00"},
-        cooldown_seconds=3600,
+        cooldown_seconds=7200,
         now_utc=datetime(2026, 11, 21, 12, 20, 0, tzinfo=timezone.utc),
     )
     assert ok2 is False
-    assert len(reasons2) == 5
+    assert len(reasons2) == 6
 
 
 def test_global_factors_and_ai_evolution_progress(tmp_path, monkeypatch):

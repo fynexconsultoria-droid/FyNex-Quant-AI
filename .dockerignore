@@ -1,0 +1,16 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.env
+*.db
+*.db-wal
+*.db-shm
+logs/
+models/
+bot.pid
+bot.stop
+STOP
+*.bat

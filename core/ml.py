@@ -546,8 +546,16 @@ def _compute_recency_weights(n: int, decay_floor: float = 0.25) -> np.ndarray:
 
 
 def _fit_with_weights(estimator: Any, X: Any, y: Any, weights: Optional[np.ndarray]) -> Any:
-    """Treina o estimador aplicando ponderação temporal (com fallback seguro se não suportado)."""
-    if weights is not None and len(weights) == len(y):
+    """
+    Treina o estimador aplicando ponderação temporal (com fallback seguro).
+    Evita passar `sample_weight` para `CalibratedClassifierCV(VotingClassifier)` onde o
+    scikit-learn ignora pesos no estimador base e distorce a calibração Platt.
+    """
+    is_calibrated_voting = (
+        isinstance(estimator, CalibratedClassifierCV)
+        and isinstance(getattr(estimator, "estimator", None), VotingClassifier)
+    )
+    if weights is not None and len(weights) == len(y) and not is_calibrated_voting:
         try:
             estimator.fit(X, y, sample_weight=weights)
             return estimator

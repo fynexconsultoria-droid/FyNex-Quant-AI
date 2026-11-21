@@ -20,10 +20,11 @@ def evaluate_entry_safety(
     features_row: Dict[str, Any],
     macro_snapshot: Optional[Dict[str, Any]] = None,
     last_trade: Optional[Dict[str, Any]] = None,
-    cooldown_seconds: int = 3600,
-    max_rsi_entry: float = 70.0,
-    min_ema_trend_ratio: float = -0.003,
+    cooldown_seconds: int = 7200,
+    max_rsi_entry: float = 68.0,
+    min_ema_trend_ratio: float = -0.002,
     max_atr_pct: float = 0.025,
+    max_bb_pos: float = 0.95,
     now_utc: Optional[datetime] = None,
 ) -> Tuple[bool, List[str]]:
     """
@@ -32,11 +33,11 @@ def evaluate_entry_safety(
     """
     reasons: List[str] = []
 
-    # 1. Proteção Macro (Dólar, Juros EUA, Inflação/Fed e Notícias)
+    # 1. Proteção Macro (Dólar, Juros EUA, Inflação/Fed, Petróleo, Guerras e Notícias)
     if macro_snapshot:
         regime = str(macro_snapshot.get("regime", "")).upper()
         macro_score = float(macro_snapshot.get("macro_score", 0.0))
-        if regime == "RISK-OFF SEVERO" or macro_score <= -50.0:
+        if regime == "RISK-OFF SEVERO" or macro_score <= -45.0:
             reasons.append(
                 f"Regime macro adverso ({regime}, score {macro_score:+.1f}) — compras suspensas para proteger capital."
             )
@@ -46,21 +47,28 @@ def evaluate_entry_safety(
     if rsi is not None and float(rsi) > max_rsi_entry:
         reasons.append(f"RSI 14 em sobrecompra ({float(rsi):.1f} > {max_rsi_entry:.0f}) — risco de comprar no topo.")
 
-    # 3. Filtro de Tendência de Baixa Forte (EMA 12/26)
+    # 3. Anti-Esticamento nas Bandas de Bollinger (%B)
+    bb_pos = features_row.get("bb_pos")
+    if bb_pos is not None and float(bb_pos) > max_bb_pos:
+        reasons.append(
+            f"Preço esticado na Banda Superior de Bollinger (%B={float(bb_pos):.2f} > {max_bb_pos:.2f}) — aguardando recuo."
+        )
+
+    # 4. Filtro de Tendência de Baixa Forte (EMA 12/26)
     ema_ratio = features_row.get("ema_trend_ratio")
     if ema_ratio is not None and float(ema_ratio) < min_ema_trend_ratio:
         reasons.append(
             f"Tendência de baixa ativa (EMA12/26={float(ema_ratio)*100:+.2f}% < {min_ema_trend_ratio*100:+.2f}%) — evitando faca caindo."
         )
 
-    # 4. Filtro de Volatilidade Extrema (ATR %)
+    # 5. Filtro de Volatilidade Extrema (ATR %)
     atr_pct = features_row.get("atr_pct")
     if atr_pct is not None and float(atr_pct) > max_atr_pct:
         reasons.append(
             f"Volatilidade extrema (ATR={float(atr_pct)*100:.2f}% > {max_atr_pct*100:.2f}%) — risco de violino no stop."
         )
 
-    # 5. Cooldown após Stop Loss
+    # 6. Cooldown após Stop Loss
     if last_trade and cooldown_seconds > 0:
         last_reason = str(last_trade.get("reason", "")).upper()
         last_pnl = float(last_trade.get("pnl_usd", 0.0) or 0.0)

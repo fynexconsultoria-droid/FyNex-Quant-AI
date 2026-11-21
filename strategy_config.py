@@ -72,11 +72,11 @@ STRATEGY_PROFILES: Dict[str, StrategyProfile] = {
     ),
     "1h": StrategyProfile(
         timeframe="1h",
-        tp_pct=0.0280,
-        sl_pct=0.0160,
-        horizon_candles=16,
-        confidence=0.55,
-        retrain_every=8,
+        tp_pct=0.0180,
+        sl_pct=0.0110,
+        horizon_candles=18,
+        confidence=0.65,
+        retrain_every=6,
     ),
 }
 

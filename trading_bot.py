@@ -369,6 +369,19 @@ class TradingBotRunner:
                 self.timeframe,
                 extra_meta={"validation": self.champion_metrics},
             )
+            try:
+                self.macro_store.record_learning_cycle(
+                    symbol=self.symbol,
+                    timeframe=self.timeframe,
+                    model_version=self.model_version,
+                    model_type=str((self.champion_metrics or {}).get("model_type", "ensemble")),
+                    metrics=self.champion_metrics or {},
+                    macro_score=float(self.last_macro.get("macro_score", 0.0)),
+                    promoted=True,
+                    notes="Treinamento inicial do modelo",
+                )
+            except Exception:
+                pass
         except InsufficientLabelsError as e:
             self.observation_mode = True
             logger.warning(
@@ -833,6 +846,11 @@ class TradingBotRunner:
         except KeyboardInterrupt:
             logger.info("🛑 Execução interrompida pelo usuário (Ctrl+C).")
         finally:
+            try:
+                if self.positions is not None and self.calib:
+                    self._publish_state()
+            except Exception:
+                pass
             release_single_instance_lock()
             self._log_final_report()
 

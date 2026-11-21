@@ -6,8 +6,9 @@ histórico de operações (Paper / Testnet / Live) e estado em tempo real do rob
 """
 
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 import pandas as pd
 
@@ -48,14 +49,19 @@ class TradingDatabase:
         self.db_path = db_path
         self._init_database()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        """Cria uma conexão com suporte a timeout e concorrência (WAL)."""
+    @contextmanager
+    def _get_connection(self) -> Iterator[sqlite3.Connection]:
+        """Cria uma conexão SQLite (WAL) e garante fechamento imediato ao sair do bloco `with`."""
         conn = sqlite3.connect(self.db_path, timeout=15.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("PRAGMA busy_timeout=15000;")
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_database(self) -> None:
         """Cria as tabelas e índices necessários caso não existam."""

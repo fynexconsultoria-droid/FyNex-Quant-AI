@@ -1363,7 +1363,7 @@ async function toggleBot() {
       const data = await res.json();
       alert(data.message || data.detail || "Robô finalizado.");
     } else {
-      const q = new URLSearchParams({ symbol: activeSymbol, timeframe: activeTimeframe, retrain: "5" });
+      const q = new URLSearchParams({ symbol: activeSymbol, timeframe: activeTimeframe });
       const res = await fetch(`/api/bot/start?${q.toString()}`, {
         method: "POST",
         headers: csrfHeaders(),
@@ -2182,7 +2182,7 @@ async function startAiTraining() {
     return;
   }
   const btn = document.getElementById("btnStartAiTrain");
-  const trainTf = document.getElementById("aiTrainTimeframe")?.value || "30m";
+  const trainTf = document.getElementById("aiTrainTimeframe")?.value || "1h";
   const candles = document.getElementById("aiTrainCandles")?.value || "3000";
   if (btn) btn.disabled = true;
 
@@ -2322,7 +2322,7 @@ async function fetchAiEvolution() {
   try {
     const q = new URLSearchParams({
       symbol: isActiveForex() ? "BTC/USDT" : activeSymbol,
-      timeframe: "30m",
+      timeframe: "1h",
     });
     const res = await fetch(`/api/ai/evolution?${q.toString()}`);
     if (!res.ok) return;
