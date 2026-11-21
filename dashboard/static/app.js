@@ -5,12 +5,114 @@
 
 let tvChart = null;
 let candleSeries = null;
+let volumeSeries = null;
+let ema9Series = null;
+let ema21Series = null;
+let showEmaOverlay = true;
+let loadedCandles = [];
+let positionPriceLines = [];
+let lastPositionKey = "";
+
 let isBotOnline = false;
 let pollingInterval = null;
+let countdownInterval = null;
+let isPolling = false;
 let lastKnownPrice = 0;
 let activeSymbol = "BTC/USDT";
 let activeTimeframe = "1m";
 let chartInitializedWithData = false;
+
+let liveWs = null;
+let liveWsConnected = false;
+let liveWsReconnectTimer = null;
+let liveWsWatchdogTimer = null;
+let liveWsReconnectAttempts = 0;
+let liveWsEndpointIndex = 0;
+let lastWsMessageAt = 0;
+let livePriceResetTimer = null;
+
+let lastDepthFetchAt = 0;
+let lastHealthFetchAt = 0;
+let lastBalanceFetchAt = 0;
+let lastWatchlistFetchAt = 0;
+let lastNewsFetchAt = 0;
+let lastXtbFetchAt = 0;
+let binanceHasKeys = false;
+let marketHigh24h = 0;
+let marketLow24h = 0;
+
+let activeView = "terminal";
+let instrumentsMap = {};
+let watchlistData = [];
+let watchlistCategory = "all";
+let newsCategory = "all";
+let newsCacheItems = [];
+let currentBidPrice = 0;
+let currentAskPrice = 0;
+let xtbFreeMarginUsd = 10000;
+
+const TIMEFRAME_SECONDS = {
+  "1m": 60,
+  "3m": 180,
+  "5m": 300,
+  "15m": 900,
+  "30m": 1800,
+  "1h": 3600,
+};
+
+function getInstrumentMeta(symbol = activeSymbol) {
+  return (
+    instrumentsMap[symbol] || {
+      symbol,
+      name: symbol,
+      category: symbol.endsWith("/USDT") ? "crypto" : "forex",
+      badge: symbol.endsWith("/USDT") ? "CRIPTO" : "FOREX",
+      decimals: symbol.endsWith("/USDT") ? 2 : symbol.includes("JPY") ? 3 : 5,
+      contract_size: symbol.endsWith("/USDT") ? 1 : 100000,
+      default_lot: symbol.endsWith("/USDT") ? 0.01 : 0.1,
+      min_lot: symbol.endsWith("/USDT") ? 0.001 : 0.01,
+      max_leverage: symbol.endsWith("/USDT") ? 10 : 100,
+      typical_spread_pips: 1.0,
+    }
+  );
+}
+
+function isActiveForex() {
+  return getInstrumentMeta(activeSymbol).category === "forex";
+}
+
+function formatPrice(val, symbol = activeSymbol) {
+  const num = Number(val || 0);
+  if (!Number.isFinite(num) || num <= 0) return "--";
+  const meta = getInstrumentMeta(symbol);
+  const decimals = Number.isInteger(meta.decimals) ? meta.decimals : num >= 100 ? 2 : num >= 1 ? 3 : 5;
+  const prefix = meta.category === "crypto" || symbol === "XAU/USD" ? "$" : "";
+  return `${prefix}${num.toLocaleString("en-US", {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  })}`;
+}
+
+function formatCompactUsd(val) {
+  const num = Number(val || 0);
+  if (!Number.isFinite(num) || num <= 0) return "--";
+  if (num >= 1e9) return `$${(num / 1e9).toFixed(2)}B`;
+  if (num >= 1e6) return `$${(num / 1e6).toFixed(2)}M`;
+  if (num >= 1e3) return `$${(num / 1e3).toFixed(1)}K`;
+  return `$${num.toFixed(0)}`;
+}
+
+function showToast(message, type = "info") {
+  const container = document.getElementById("toastContainer");
+  if (!container) return;
+  const el = document.createElement("div");
+  el.className = `toast ${type}`;
+  el.textContent = message;
+  container.appendChild(el);
+  setTimeout(() => {
+    el.remove();
+  }, 4200);
+}
 
 /**
  * Escapa caracteres HTML para impedir XSS em dados vindos da API ou da exchange
@@ -42,11 +144,16 @@ function csrfHeaders(extra = {}) {
 
 // Inicialização ao carregar a página
 document.addEventListener("DOMContentLoaded", () => {
+  bindUIEvents();
   initTradingViewChart();
   fetchInitialData();
+  connectLiveMarketStream();
 
   // Inicia polling periódico a cada 3 segundos (inclui trades!)
   pollingInterval = setInterval(pollDashboardData, 3000);
+  // Atualiza countdown de fechamento do candle a cada 1 segundo
+  updateCandleCountdown();
+  countdownInterval = setInterval(updateCandleCountdown, 1000);
 
   // Redimensionamento responsivo do gráfico
   window.addEventListener("resize", () => {
@@ -60,7 +167,199 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     }
   });
+
+  window.addEventListener("beforeunload", disconnectLiveMarketStream);
 });
+
+/**
+ * Vincula todos os eventos de UI via addEventListener (compatível com CSP estrita sem unsafe-inline)
+ */
+function bindUIEvents() {
+  const on = (id, evt, handler) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener(evt, handler);
+  };
+
+  on("symbolSelect", "change", (e) => onSymbolChange(e.target.value));
+  on("timeframeSelect", "change", (e) => onTimeframeChange(e.target.value));
+  on("btnToggleEma", "click", toggleEmaOverlay);
+  on("btnFitChart", "click", () => {
+    if (tvChart) tvChart.timeScale().fitContent();
+  });
+  on("btnOpenBinance", "click", openBinanceModal);
+  on("binanceWalletCard", "click", openBinanceModal);
+  on("btnToggleBot", "click", toggleBot);
+  on("btnRefreshDashboard", "click", refreshDashboard);
+
+  on("binanceModalOverlay", "click", closeBinanceModalOnOutsideClick);
+  on("btnCloseBinanceModal", "click", closeBinanceModal);
+  on("segTestnet", "click", () => selectEnvironment(true));
+  on("segLive", "click", () => selectEnvironment(false));
+  on("btnPasteApiKey", "click", pasteApiKey);
+  on("btnToggleSecret", "click", toggleSecretVisibility);
+  on("btnModalTest", "click", testBinanceConnectionModal);
+  on("btnModalSave", "click", saveBinanceConnectionModal);
+
+  document.querySelectorAll(".quick-btn[data-amount]").forEach((btn) => {
+    btn.addEventListener("click", () => setQuickAmount(Number(btn.dataset.amount)));
+  });
+
+  // Navegação lateral entre áreas separadas
+  document.querySelectorAll(".sidebar-nav .nav-item[data-view]").forEach((btn) => {
+    btn.addEventListener("click", () => switchView(btn.dataset.view));
+  });
+  on("btnGoToNews", "click", () => switchView("news"));
+
+  // Watchlist filtros & busca
+  document.querySelectorAll("#watchlistTabs .wl-tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      watchlistCategory = btn.dataset.cat || "all";
+      document.querySelectorAll("#watchlistTabs .wl-tab").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      renderWatchlist();
+    });
+  });
+  on("watchlistSearch", "input", renderWatchlist);
+
+  // Boleta XTB
+  on("btnXtbBuy", "click", () => submitXtbOrder("BUY"));
+  on("btnXtbSell", "click", () => submitXtbOrder("SELL"));
+  on("xtbLotsInput", "input", updateXtbMarginEstimate);
+  on("xtbLeverageSelect", "change", updateXtbMarginEstimate);
+  document.querySelectorAll(".quick-lot-btn[data-lot]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const inp = document.getElementById("xtbLotsInput");
+      if (inp) {
+        inp.value = btn.dataset.lot;
+        updateXtbMarginEstimate();
+      }
+    });
+  });
+
+  // Notícias ao vivo
+  document.querySelectorAll("#newsFilterPills .filter-pill").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      newsCategory = btn.dataset.cat || "all";
+      document.querySelectorAll("#newsFilterPills .filter-pill").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      fetchNewsFeed(false);
+    });
+  });
+  on("newsSearchInput", "input", () => fetchNewsFeed(false));
+  on("btnRefreshNews", "click", () => fetchNewsFeed(true));
+
+  // Diagnóstico de saúde na aba Console
+  on("btnRecheckHealth", "click", () => fetchBinanceHealth(true));
+
+  // Centro de Treinamento da IA & Inteligência Macro
+  on("btnStartAiTrain", "click", startAiTraining);
+  on("btnRefreshMacro", "click", () => {
+    fetchMacroIntelligence(true);
+    fetchAiEvolution();
+  });
+  on("sidebarEvoBox", "click", () => switchView("ai"));
+}
+
+function switchView(viewName) {
+  activeView = viewName || "terminal";
+  document.querySelectorAll(".view-section").forEach((sec) => {
+    sec.classList.toggle("active", sec.id === `view-${activeView}`);
+  });
+  document.querySelectorAll(".sidebar-nav .nav-item[data-view]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.view === activeView);
+  });
+
+  if (activeView === "terminal" && tvChart) {
+    setTimeout(() => {
+      const container = document.getElementById("tvChartContainer");
+      if (container && container.clientWidth > 0) {
+        tvChart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
+      }
+    }, 30);
+  }
+  if (activeView === "ai") {
+    fetchMacroIntelligence(false);
+    fetchAiEvolution();
+    pollAiTrainStatus();
+  }
+  if (activeView === "news" && newsCacheItems.length === 0) {
+    fetchNewsFeed(false);
+  }
+  if (activeView === "portfolio") {
+    fetchXtbAccount();
+    if (binanceHasKeys) fetchBinanceBalanceAuto(false);
+  }
+  if (activeView === "system") {
+    fetchBinanceHealth(true);
+    fetchLogs();
+  }
+}
+
+/**
+ * Troca o par ativo no dashboard (Cripto ou Forex) e recarrega gráfico, stream e boleta XTB
+ */
+async function onSymbolChange(newSym) {
+  activeSymbol = newSym || "BTC/USDT";
+  const sel = document.getElementById("symbolSelect");
+  if (sel && sel.value !== activeSymbol) sel.value = activeSymbol;
+
+  lastKnownPrice = 0;
+  currentBidPrice = 0;
+  currentAskPrice = 0;
+  marketHigh24h = 0;
+  marketLow24h = 0;
+  chartInitializedWithData = false;
+  loadedCandles = [];
+  clearPositionPriceLines();
+  syncActiveAssetUI();
+  renderWatchlist();
+  await fetchInitialData();
+  connectLiveMarketStream();
+}
+
+function syncActiveAssetUI() {
+  const meta = getInstrumentMeta(activeSymbol);
+  const isFx = meta.category === "forex";
+
+  const catPill = document.getElementById("activeCategoryPill");
+  if (catPill) {
+    catPill.textContent = meta.badge || (isFx ? "FOREX" : "CRIPTO");
+    catPill.className = `asset-category-pill ${isFx ? "forex" : "crypto"}`;
+  }
+
+  const titleEl = document.getElementById("chartTitle");
+  if (titleEl) {
+    titleEl.textContent = isFx
+      ? `${activeSymbol} • Forex (Modo XTB)`
+      : `${activeSymbol} • Binance Spot`;
+  }
+
+  const tkSym = document.getElementById("xtbTicketSymbol");
+  const tkName = document.getElementById("xtbTicketName");
+  const tkBadge = document.getElementById("xtbTicketBadge");
+  const tkHint = document.getElementById("xtbContractHint");
+  const lotsInp = document.getElementById("xtbLotsInput");
+  const levSel = document.getElementById("xtbLeverageSelect");
+
+  if (tkSym) tkSym.textContent = activeSymbol;
+  if (tkName) tkName.textContent = meta.name || activeSymbol;
+  if (tkBadge) tkBadge.textContent = meta.badge || (isFx ? "FOREX" : "CRIPTO");
+  if (tkHint) {
+    tkHint.textContent = isFx
+      ? `1 lote = ${Number(meta.contract_size).toLocaleString("en-US")} un.`
+      : `1 lote = 1 ${activeSymbol.split("/")[0]}`;
+  }
+  if (lotsInp) {
+    lotsInp.min = String(meta.min_lot || 0.01);
+    lotsInp.step = String(meta.min_lot || 0.01);
+    lotsInp.value = String(meta.default_lot || 0.1);
+  }
+  if (levSel) {
+    const targetLev = isFx ? Math.min(30, meta.max_leverage || 30) : Math.min(10, meta.max_leverage || 10);
+    levSel.value = String(targetLev);
+  }
+  updateXtbMarginEstimate();
+}
 
 /**
  * Troca o timeframe ativo no dashboard e recarrega o gráfico, previsões e métricas
@@ -68,9 +367,272 @@ document.addEventListener("DOMContentLoaded", () => {
 async function onTimeframeChange(newTf) {
   activeTimeframe = newTf || "1m";
   chartInitializedWithData = false;
+  loadedCandles = [];
+  clearPositionPriceLines();
   const tag = document.getElementById("activeTimeframeTag");
   if (tag) tag.textContent = `Candles ${activeTimeframe}`;
+  updateCandleCountdown();
   await fetchInitialData();
+  connectLiveMarketStream();
+}
+
+function updateCandleCountdown() {
+  const el = document.getElementById("mktCandleCountdown");
+  if (!el) return;
+  const tfSec = TIMEFRAME_SECONDS[activeTimeframe] || 60;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const rem = tfSec - (nowSec % tfSec);
+  const mins = Math.floor(rem / 60);
+  const secs = rem % 60;
+  el.textContent = `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+}
+
+/**
+ * Atualiza o preço no cabeçalho com pulso visual suave (verde/vermelho) e faixa 24h
+ */
+function updateLiveTickerPrice(price) {
+  const priceEl = document.getElementById("tickerPrice");
+  if (!priceEl || !price || price <= 0) return;
+
+  priceEl.textContent = formatPrice(price);
+
+  if (lastKnownPrice > 0 && price !== lastKnownPrice) {
+    priceEl.style.color = price > lastKnownPrice ? "#10b981" : "#f43f5e";
+    if (livePriceResetTimer) clearTimeout(livePriceResetTimer);
+    livePriceResetTimer = setTimeout(() => {
+      priceEl.style.color = "var(--accent-cyan)";
+    }, 450);
+  }
+  lastKnownPrice = price;
+  update24hRangeBar(price);
+}
+
+function update24hRangeBar(price) {
+  if (!marketHigh24h || !marketLow24h || marketHigh24h <= marketLow24h || !price) return;
+  const pct = Math.max(0, Math.min(100, ((price - marketLow24h) / (marketHigh24h - marketLow24h)) * 100));
+  const fill = document.getElementById("mktRangeFill");
+  const dot = document.getElementById("mktRangeDot");
+  if (fill) fill.style.width = `${pct.toFixed(1)}%`;
+  if (dot) dot.style.left = `${pct.toFixed(1)}%`;
+}
+
+function update24hStatsUI({ changePct, high, low, quoteVolume }) {
+  const chgEl = document.getElementById("tickerChange24h");
+  if (chgEl && Number.isFinite(changePct)) {
+    chgEl.textContent = `${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%`;
+    chgEl.className = `ticker-change ${changePct >= 0 ? "positive" : "negative"}`;
+  }
+  if (high > 0) {
+    marketHigh24h = high;
+    const highEl = document.getElementById("mktHigh24h");
+    if (highEl) highEl.textContent = formatPrice(high);
+  }
+  if (low > 0) {
+    marketLow24h = low;
+    const lowEl = document.getElementById("mktLow24h");
+    if (lowEl) lowEl.textContent = formatPrice(low);
+  }
+  if (quoteVolume > 0) {
+    const volEl = document.getElementById("mktVol24h");
+    if (volEl) volEl.textContent = formatCompactUsd(quoteVolume);
+  }
+  if (lastKnownPrice > 0) update24hRangeBar(lastKnownPrice);
+}
+
+function updateBidAskUI(bid, ask) {
+  if (!bid || !ask || bid <= 0 || ask <= 0) return;
+  currentBidPrice = bid;
+  currentAskPrice = ask;
+
+  const bidEl = document.getElementById("mktBestBid");
+  const askEl = document.getElementById("mktBestAsk");
+  const spreadEl = document.getElementById("mktSpread");
+  const sellBtnPrice = document.getElementById("xtbSellPrice");
+  const buyBtnPrice = document.getElementById("xtbBuyPrice");
+  const xtbSpreadInfo = document.getElementById("xtbSpreadInfo");
+
+  const bidStr = formatPrice(bid);
+  const askStr = formatPrice(ask);
+  if (bidEl) bidEl.textContent = bidStr;
+  if (askEl) askEl.textContent = askStr;
+  if (sellBtnPrice) sellBtnPrice.textContent = bidStr;
+  if (buyBtnPrice) buyBtnPrice.textContent = askStr;
+
+  const mid = (bid + ask) / 2;
+  const spreadPct = mid > 0 ? ((ask - bid) / mid) * 100 : 0;
+  if (spreadEl) spreadEl.textContent = `${spreadPct.toFixed(3)}%`;
+  if (xtbSpreadInfo) {
+    const meta = getInstrumentMeta(activeSymbol);
+    if (meta.category === "forex" && meta.pip_size > 0) {
+      const pips = (ask - bid) / meta.pip_size;
+      xtbSpreadInfo.textContent = `${pips.toFixed(1)} pips (${spreadPct.toFixed(3)}%)`;
+    } else {
+      xtbSpreadInfo.textContent = `${formatPrice(ask - bid)} (${spreadPct.toFixed(3)}%)`;
+    }
+  }
+  updateXtbMarginEstimate();
+}
+
+function setLiveBadgeState(state) {
+  const badge = document.getElementById("tickerBadge");
+  if (!badge) return;
+  if (state === "ws") {
+    badge.textContent = "Spot Live • WS";
+    badge.style.color = "#10b981";
+  } else if (state === "forex") {
+    badge.textContent = "Forex Live • XTB";
+    badge.style.color = "#38bdf8";
+  } else if (state === "reconnecting") {
+    badge.textContent = "Reconectando...";
+    badge.style.color = "#f59e0b";
+  } else {
+    badge.textContent = "Spot Live • REST";
+    badge.style.color = "#38bdf8";
+  }
+}
+
+function disconnectLiveMarketStream() {
+  if (liveWsReconnectTimer) {
+    clearTimeout(liveWsReconnectTimer);
+    liveWsReconnectTimer = null;
+  }
+  if (liveWsWatchdogTimer) {
+    clearInterval(liveWsWatchdogTimer);
+    liveWsWatchdogTimer = null;
+  }
+  if (liveWs) {
+    try {
+      liveWs.onclose = null;
+      liveWs.onerror = null;
+      liveWs.onmessage = null;
+      liveWs.close();
+    } catch (_) {
+      // ignora erro de fechamento
+    }
+    liveWs = null;
+  }
+  liveWsConnected = false;
+}
+
+/**
+ * Combined Stream WebSocket público da Binance:
+ * kline (candles ao vivo) + ticker (variação/volume 24h) + bookTicker (bid/ask/spread)
+ * com failover automático de porta (9443 <-> 443) e watchdog de inatividade (15s).
+ */
+function connectLiveMarketStream() {
+  disconnectLiveMarketStream();
+  if (isActiveForex()) {
+    setLiveBadgeState("forex");
+    return;
+  }
+  const s = activeSymbol.replace("/", "").toLowerCase();
+  const streams = `${s}@kline_${activeTimeframe}/${s}@ticker/${s}@bookTicker`;
+  const endpoints = [
+    `wss://stream.binance.com:9443/stream?streams=${streams}`,
+    `wss://stream.binance.com:443/stream?streams=${streams}`,
+  ];
+  const wsUrl = endpoints[liveWsEndpointIndex % endpoints.length];
+
+  try {
+    const ws = new WebSocket(wsUrl);
+    liveWs = ws;
+
+    ws.onopen = () => {
+      liveWsConnected = true;
+      liveWsReconnectAttempts = 0;
+      lastWsMessageAt = Date.now();
+      setLiveBadgeState("ws");
+
+      liveWsWatchdogTimer = setInterval(() => {
+        if (liveWsConnected && Date.now() - lastWsMessageAt > 15000) {
+          liveWsEndpointIndex += 1;
+          connectLiveMarketStream();
+        }
+      }, 5000);
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        lastWsMessageAt = Date.now();
+        const envelope = JSON.parse(event.data);
+        const streamName = envelope && envelope.stream ? String(envelope.stream) : "";
+        const payload = envelope && envelope.data ? envelope.data : envelope;
+        if (!payload) return;
+
+        if (streamName.includes("@kline_") || payload.k) {
+          const k = payload.k;
+          if (!k) return;
+          const closePrice = parseFloat(k.c);
+          const openPrice = parseFloat(k.o);
+          const highPrice = parseFloat(k.h);
+          const lowPrice = parseFloat(k.l);
+          const volume = parseFloat(k.v);
+          const candleTime = Math.floor(Number(k.t) / 1000);
+
+          updateLiveTickerPrice(closePrice);
+
+          if (candleSeries && chartInitializedWithData) {
+            const bar = {
+              time: candleTime,
+              open: openPrice,
+              high: highPrice,
+              low: lowPrice,
+              close: closePrice,
+            };
+            candleSeries.update(bar);
+            if (volumeSeries) {
+              volumeSeries.update({
+                time: candleTime,
+                value: volume,
+                color: closePrice >= openPrice ? "rgba(16, 185, 129, 0.35)" : "rgba(244, 63, 94, 0.35)",
+              });
+            }
+            updateLoadedCandlesWithTick(bar);
+          }
+
+          const chartUpdateEl = document.getElementById("chartLastUpdate");
+          if (chartUpdateEl) {
+            const dt = new Date(Number(payload.E || Date.now()));
+            chartUpdateEl.textContent = `Ao vivo (WS): ${dt.toLocaleTimeString("pt-BR")}`;
+          }
+        } else if (streamName.endsWith("@ticker") || payload.e === "24hrTicker") {
+          update24hStatsUI({
+            changePct: parseFloat(payload.P),
+            high: parseFloat(payload.h),
+            low: parseFloat(payload.l),
+            quoteVolume: parseFloat(payload.q),
+          });
+        } else if (streamName.endsWith("@bookTicker") || (payload.b && payload.a)) {
+          updateBidAskUI(parseFloat(payload.b), parseFloat(payload.a));
+        }
+      } catch (_) {
+        // ignora frame malformado
+      }
+    };
+
+    ws.onerror = () => {
+      liveWsConnected = false;
+      setLiveBadgeState("reconnecting");
+    };
+
+    ws.onclose = () => {
+      liveWsConnected = false;
+      if (liveWsWatchdogTimer) {
+        clearInterval(liveWsWatchdogTimer);
+        liveWsWatchdogTimer = null;
+      }
+      setLiveBadgeState("reconnecting");
+      liveWsReconnectAttempts += 1;
+      liveWsEndpointIndex += 1;
+      const delayMs = Math.min(15000, 1000 * Math.pow(2, Math.min(liveWsReconnectAttempts - 1, 4)));
+      liveWsReconnectTimer = setTimeout(() => {
+        connectLiveMarketStream();
+      }, delayMs);
+    };
+  } catch (_) {
+    liveWsConnected = false;
+    setLiveBadgeState("fallback");
+  }
 }
 
 /**
@@ -130,32 +692,345 @@ function initTradingViewChart() {
     wickUpColor: "#10b981",
     wickDownColor: "#f43f5e",
   });
+
+  volumeSeries = tvChart.addHistogramSeries({
+    priceFormat: { type: "volume" },
+    priceScaleId: "",
+  });
+  volumeSeries.priceScale().applyOptions({
+    scaleMargins: { top: 0.82, bottom: 0 },
+  });
+
+  ema9Series = tvChart.addLineSeries({
+    color: "#00f2fe",
+    lineWidth: 1.5,
+    priceLineVisible: false,
+    lastValueVisible: false,
+    crosshairMarkerVisible: false,
+  });
+
+  ema21Series = tvChart.addLineSeries({
+    color: "#f59e0b",
+    lineWidth: 1.5,
+    priceLineVisible: false,
+    lastValueVisible: false,
+    crosshairMarkerVisible: false,
+  });
+}
+
+function computeEma(candles, period) {
+  if (!candles || candles.length < period) return [];
+  const k = 2 / (period + 1);
+  let ema = 0;
+  for (let i = 0; i < period; i += 1) {
+    ema += candles[i].close;
+  }
+  ema /= period;
+  const out = [{ time: candles[period - 1].time, value: ema }];
+  for (let i = period; i < candles.length; i += 1) {
+    ema = candles[i].close * k + ema * (1 - k);
+    out.push({ time: candles[i].time, value: ema });
+  }
+  return out;
+}
+
+function refreshEmaSeries() {
+  if (!ema9Series || !ema21Series) return;
+  if (!showEmaOverlay || loadedCandles.length < 9) {
+    ema9Series.setData([]);
+    ema21Series.setData([]);
+    return;
+  }
+  ema9Series.setData(computeEma(loadedCandles, 9));
+  ema21Series.setData(computeEma(loadedCandles, 21));
+}
+
+function updateLoadedCandlesWithTick(bar) {
+  if (!loadedCandles.length) return;
+  const last = loadedCandles[loadedCandles.length - 1];
+  if (bar.time === last.time) {
+    loadedCandles[loadedCandles.length - 1] = bar;
+  } else if (bar.time > last.time) {
+    loadedCandles.push(bar);
+    if (loadedCandles.length > 300) loadedCandles.shift();
+  }
+  if (showEmaOverlay && ema9Series && ema21Series && loadedCandles.length >= 21) {
+    const e9 = computeEma(loadedCandles, 9);
+    const e21 = computeEma(loadedCandles, 21);
+    if (e9.length) ema9Series.update(e9[e9.length - 1]);
+    if (e21.length) ema21Series.update(e21[e21.length - 1]);
+  }
+}
+
+function toggleEmaOverlay() {
+  showEmaOverlay = !showEmaOverlay;
+  const btn = document.getElementById("btnToggleEma");
+  if (btn) btn.classList.toggle("active", showEmaOverlay);
+  refreshEmaSeries();
+}
+
+function clearPositionPriceLines() {
+  if (candleSeries && positionPriceLines.length) {
+    for (const line of positionPriceLines) {
+      try {
+        candleSeries.removePriceLine(line);
+      } catch (_) {
+        // ignora se já removida
+      }
+    }
+  }
+  positionPriceLines = [];
+  lastPositionKey = "";
+}
+
+function renderOpenPositionLines(pos) {
+  if (!candleSeries) return;
+  if (!pos || !pos.entry_price) {
+    if (positionPriceLines.length) clearPositionPriceLines();
+    return;
+  }
+  const key = `${pos.symbol}|${pos.timeframe}|${pos.entry_price}|${pos.tp_price}|${pos.sl_price}`;
+  if (key === lastPositionKey) return;
+  clearPositionPriceLines();
+  lastPositionKey = key;
+
+  try {
+    positionPriceLines.push(
+      candleSeries.createPriceLine({
+        price: Number(pos.entry_price),
+        color: "#38bdf8",
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `ENTRADA (${(pos.mode || "paper").toUpperCase()})`,
+      })
+    );
+    if (pos.tp_price > 0) {
+      positionPriceLines.push(
+        candleSeries.createPriceLine({
+          price: Number(pos.tp_price),
+          color: "#10b981",
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Solid,
+          axisLabelVisible: true,
+          title: "TAKE PROFIT",
+        })
+      );
+    }
+    if (pos.sl_price > 0) {
+      positionPriceLines.push(
+        candleSeries.createPriceLine({
+          price: Number(pos.sl_price),
+          color: "#f43f5e",
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Solid,
+          axisLabelVisible: true,
+          title: "STOP LOSS",
+        })
+      );
+    }
+  } catch (_) {
+    // ignora erro se gráfico ainda não inicializado
+  }
 }
 
 /**
  * Coleta todos os dados iniciais
  */
 async function fetchInitialData() {
+  if (Object.keys(instrumentsMap).length === 0) {
+    await fetchInstrumentsCatalog();
+    syncActiveAssetUI();
+  }
   await Promise.all([
     fetchStatus(),
     fetchCandles(true),
     fetchPredictions(),
     fetchTrades(),
     fetchLogs(),
+    fetchLiveTickerFallback(),
+    fetchMarketDepth(),
+    fetchBinanceHealth(),
+    fetchWatchlist(),
+    fetchXtbAccount(),
+    fetchNewsFeed(false),
+    fetchAiEvolution(),
   ]);
+  if (binanceHasKeys) {
+    await fetchBinanceBalanceAuto(true);
+  }
 }
 
 /**
- * Loop de polling leve a cada 3 segundos (M8 corrigido: inclui fetchTrades)
+ * Loop de polling leve a cada 3 segundos (sem sobreposição de requisições)
  */
 async function pollDashboardData() {
-  await Promise.all([
-    fetchStatus(),
-    fetchCandles(false),
-    fetchPredictions(),
-    fetchTrades(),
-    fetchLogs(),
-  ]);
+  if (isPolling) return;
+  isPolling = true;
+  try {
+    const now = Date.now();
+    const tasks = [
+      fetchStatus(),
+      fetchPredictions(),
+      fetchTrades(),
+      fetchLogs(),
+    ];
+    // Se o WebSocket não estiver conectado (ou se for par Forex), usa polling de candles + ticker HTTP
+    if (!liveWsConnected || isActiveForex()) {
+      tasks.push(fetchCandles(false));
+      tasks.push(fetchLiveTickerFallback());
+    }
+    if (now - lastDepthFetchAt >= 6000) {
+      tasks.push(fetchMarketDepth());
+    }
+    if (now - lastXtbFetchAt >= 4000) {
+      tasks.push(fetchXtbAccount());
+    }
+    if (now - lastWatchlistFetchAt >= 12000) {
+      tasks.push(fetchWatchlist());
+    }
+    if (now - lastHealthFetchAt >= 15000) {
+      tasks.push(fetchBinanceHealth());
+    }
+    if (now - lastNewsFetchAt >= 90000) {
+      tasks.push(fetchNewsFeed(false));
+    }
+    if (binanceHasKeys && now - lastBalanceFetchAt >= 25000) {
+      tasks.push(fetchBinanceBalanceAuto(false));
+    }
+    await Promise.all(tasks);
+  } finally {
+    isPolling = false;
+  }
+}
+
+async function fetchLiveTickerFallback() {
+  try {
+    const q = new URLSearchParams({ symbol: activeSymbol });
+    const res = await fetch(`/api/market/live?${q.toString()}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data && data.price > 0) {
+      if (!liveWsConnected) updateLiveTickerPrice(data.price);
+      update24hStatsUI({
+        changePct: Number(data.change_24h_pct),
+        high: Number(data.high_24h),
+        low: Number(data.low_24h),
+        quoteVolume: Number(data.volume_24h),
+      });
+      if (data.bid > 0 && data.ask > 0) {
+        updateBidAskUI(Number(data.bid), Number(data.ask));
+      }
+      const latEl = document.getElementById("tickerLatency");
+      if (latEl && data.latency_ms !== undefined) {
+        latEl.textContent = `${Math.round(data.latency_ms)} ms`;
+      }
+    }
+  } catch (_) {
+    // fallback silencioso
+  }
+}
+
+async function fetchMarketDepth() {
+  lastDepthFetchAt = Date.now();
+  try {
+    const q = new URLSearchParams({ symbol: activeSymbol, limit: "15" });
+    const res = await fetch(`/api/market/depth?${q.toString()}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data) return;
+
+    if (data.best_bid > 0 && data.best_ask > 0 && !liveWsConnected) {
+      updateBidAskUI(Number(data.best_bid), Number(data.best_ask));
+    }
+    const buyPct = Number(data.buy_pressure_pct ?? 50);
+    const sellPct = Number(data.sell_pressure_pct ?? (100 - buyPct));
+    const buyEl = document.getElementById("mktBuyPressure");
+    const sellEl = document.getElementById("mktSellPressure");
+    const barEl = document.getElementById("mktPressureBar");
+    if (buyEl) buyEl.textContent = `${buyPct.toFixed(0)}% C`;
+    if (sellEl) sellEl.textContent = `${sellPct.toFixed(0)}% V`;
+    if (barEl) barEl.style.width = `${Math.max(5, Math.min(95, buyPct)).toFixed(1)}%`;
+  } catch (_) {
+    // silencioso
+  }
+}
+
+async function fetchBinanceHealth() {
+  lastHealthFetchAt = Date.now();
+  try {
+    const res = await fetch("/api/binance/health");
+    if (!res.ok) return;
+    const h = await res.json();
+    const dot = document.getElementById("mktHealthDot");
+    const statusEl = document.getElementById("mktConnStatus");
+    const detailEl = document.getElementById("mktConnDetail");
+    const latBadge = document.getElementById("tickerLatency");
+
+    const lat = h.latency_ms !== null && h.latency_ms !== undefined ? `${Math.round(h.latency_ms)} ms` : "-- ms";
+    if (latBadge) latBadge.textContent = lat;
+
+    if (h.ok) {
+      if (dot) dot.className = `health-dot ${h.clock_synced ? "healthy" : "degraded"}`;
+      if (statusEl) statusEl.textContent = h.clock_synced ? "Conectado" : "Clock Desinc.";
+      const driftStr =
+        h.clock_drift_ms !== null && h.clock_drift_ms !== undefined
+          ? `${h.clock_drift_ms >= 0 ? "+" : ""}${h.clock_drift_ms}ms`
+          : "--";
+      const mirrorHost = String(h.active_mirror || "api.binance.com").replace(/^https?:\/\//, "");
+      if (detailEl) detailEl.textContent = `${lat} • Clock ${driftStr} • ${mirrorHost}`;
+
+      // Atualiza painel detalhado da aba Console & APIs
+      const sysLat = document.getElementById("sysHealthLatency");
+      const sysSt = document.getElementById("sysHealthStatus");
+      const sysCd = document.getElementById("sysClockDrift");
+      const sysMir = document.getElementById("sysActiveMirror");
+      const sysSw = document.getElementById("sysMirrorSwitches");
+      const sysReq = document.getElementById("sysTotalReqs");
+      const sysFail = document.getElementById("sysFailRetries");
+      const m = h.metrics || {};
+
+      if (sysLat) sysLat.textContent = lat;
+      if (sysSt) sysSt.textContent = h.clock_synced ? "🟢 Operacional (Healthy)" : "🟡 Alerta de Relógio";
+      if (sysCd) sysCd.textContent = driftStr;
+      if (sysMir) sysMir.textContent = mirrorHost;
+      if (sysSw) sysSw.textContent = `Failovers: ${m.mirror_switches || 0}`;
+      if (sysReq) sysReq.textContent = String(m.total_requests || 0);
+      if (sysFail) sysFail.textContent = `Falhas: ${m.failed_requests || 0} • Retries: ${m.retries || 0}`;
+    } else {
+      if (dot) dot.className = "health-dot offline";
+      if (statusEl) statusEl.textContent = "Offline";
+      if (detailEl) detailEl.textContent = h.error ? String(h.error).slice(0, 42) : "Sem resposta da Binance";
+      const sysSt = document.getElementById("sysHealthStatus");
+      if (sysSt) sysSt.textContent = "🔴 Sem resposta da Binance";
+    }
+  } catch (_) {
+    // silencioso
+  }
+}
+
+async function fetchBinanceBalanceAuto(force = false) {
+  if (!force && Date.now() - lastBalanceFetchAt < 20000) return;
+  lastBalanceFetchAt = Date.now();
+  try {
+    const res = await fetch("/api/binance/balance");
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data && data.success) {
+      const kpiBalance = document.getElementById("kpiBinanceBalance");
+      const kpiBtc = document.getElementById("kpiBinanceBtc");
+      if (kpiBalance) {
+        kpiBalance.innerHTML = `$${escapeHtml(
+          Number(data.usdt_free || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+        )} <span class="kpi-currency">USDT</span>`;
+      }
+      if (kpiBtc) {
+        kpiBtc.textContent = `${Number(data.btc_total || 0).toFixed(6)} BTC`;
+      }
+    }
+  } catch (_) {
+    // silencioso
+  }
 }
 
 /**
@@ -172,26 +1047,10 @@ async function fetchStatus() {
     const tfTag = document.getElementById("activeTimeframeTag");
     if (tfTag) tfTag.textContent = `Candles ${activeTimeframe}`;
 
-    // 1. Preço e Ticker
-    const priceEl = document.getElementById("tickerPrice");
+    // 1. Preço e Ticker (só sobrescreve via SQLite se o WebSocket ao vivo não estiver conectado)
     const currentPrice = data.latest_price || 0;
-    if (priceEl && currentPrice > 0) {
-      priceEl.textContent = `$${currentPrice.toLocaleString("en-US", {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      })}`;
-
-      if (lastKnownPrice > 0) {
-        if (currentPrice > lastKnownPrice) {
-          priceEl.style.color = "#10b981";
-        } else if (currentPrice < lastKnownPrice) {
-          priceEl.style.color = "#f43f5e";
-        }
-        setTimeout(() => {
-          priceEl.style.color = "var(--accent-cyan)";
-        }, 600);
-      }
-      lastKnownPrice = currentPrice;
+    if (!liveWsConnected && currentPrice > 0) {
+      updateLiveTickerPrice(currentPrice);
     }
 
     // 2. Status do Robô (Online / Offline)
@@ -276,11 +1135,15 @@ async function fetchStatus() {
     }
 
     const chartUpdateEl = document.getElementById("chartLastUpdate");
-    if (chartUpdateEl && data.latest_update) {
+    if (chartUpdateEl && data.latest_update && !liveWsConnected) {
       chartUpdateEl.textContent = `Último candle (UTC): ${data.latest_update}`;
     }
 
-    // 8. Informações da Binance
+    // 8. Linhas da posição aberta no gráfico (Entrada, TP, SL)
+    renderOpenPositionLines(data.open_position);
+
+    // 9. Informações da Binance
+    binanceHasKeys = Boolean(data.binance && data.binance.has_keys);
     updateBinanceStatusUI(data.binance);
   } catch (err) {
     console.error("Erro ao buscar status do robô:", err);
@@ -306,11 +1169,30 @@ async function fetchCandles(fullReload = false) {
     if (!candles || candles.length === 0) return;
 
     if (fullReload || !chartInitializedWithData) {
+      loadedCandles = candles.slice();
       candleSeries.setData(candles);
+      if (volumeSeries) {
+        volumeSeries.setData(
+          candles.map((c) => ({
+            time: c.time,
+            value: c.volume || 0,
+            color: c.close >= c.open ? "rgba(16, 185, 129, 0.35)" : "rgba(244, 63, 94, 0.35)",
+          }))
+        );
+      }
+      refreshEmaSeries();
       chartInitializedWithData = true;
     } else {
       for (const c of candles) {
         candleSeries.update(c);
+        if (volumeSeries) {
+          volumeSeries.update({
+            time: c.time,
+            value: c.volume || 0,
+            color: c.close >= c.open ? "rgba(16, 185, 129, 0.35)" : "rgba(244, 63, 94, 0.35)",
+          });
+        }
+        updateLoadedCandlesWithTick(c);
       }
     }
   } catch (err) {
@@ -481,7 +1363,7 @@ async function toggleBot() {
       const data = await res.json();
       alert(data.message || data.detail || "Robô finalizado.");
     } else {
-      const q = new URLSearchParams({ timeframe: activeTimeframe, retrain: "5" });
+      const q = new URLSearchParams({ symbol: activeSymbol, timeframe: activeTimeframe, retrain: "5" });
       const res = await fetch(`/api/bot/start?${q.toString()}`, {
         method: "POST",
         headers: csrfHeaders(),
@@ -762,11 +1644,21 @@ async function testBinanceConnectionModal(silent = false) {
           )} BTC</strong>
         </div>
         ${balancesHtml}
-        <div style="font-size: 0.725rem; color: var(--text-dim); display: flex; gap: 0.75rem;">
+        <div style="font-size: 0.725rem; color: var(--text-dim); display: flex; gap: 0.75rem; flex-wrap: wrap;">
           <span>Trading Spot: ${data.can_trade ? "✅ Ativo" : "❌ Inativo"}</span>
           <span>Saques: ${
             data.can_withdraw ? "⚠️ Permitido" : "🔒 Bloqueado (Segurança Máxima)"
           }</span>
+          ${
+            data.clock_drift_ms !== null && data.clock_drift_ms !== undefined
+              ? `<span>Clock Drift: ${escapeHtml(String(data.clock_drift_ms))} ms</span>`
+              : ""
+          }
+          ${
+            data.active_mirror
+              ? `<span>Endpoint: ${escapeHtml(String(data.active_mirror).replace(/^https?:\/\//, ""))}</span>`
+              : ""
+          }
         </div>
       `;
 
@@ -867,5 +1759,632 @@ async function saveBinanceConnectionModal() {
   } finally {
     saveBtn.disabled = false;
     saveBtnText.textContent = "💾 Salvar e Aplicar";
+  }
+}
+
+
+/* ==========================================================================
+   Watchlist Multi-Ativos, Mesa Forex/Cripto (Estilo XTB) & Notícias Ao Vivo
+   ========================================================================== */
+
+async function fetchInstrumentsCatalog() {
+  try {
+    const res = await fetch("/api/market/instruments");
+    if (!res.ok) return;
+    const data = await res.json();
+    const map = {};
+    for (const inst of data.instruments || []) {
+      map[inst.symbol] = inst;
+    }
+    instrumentsMap = map;
+  } catch (_) {
+    // fallback silencioso
+  }
+}
+
+async function fetchWatchlist() {
+  lastWatchlistFetchAt = Date.now();
+  try {
+    const res = await fetch("/api/market/watchlist?category=all");
+    if (!res.ok) return;
+    const data = await res.json();
+    watchlistData = data.items || [];
+    renderWatchlist();
+  } catch (_) {
+    // silencioso
+  }
+}
+
+function renderWatchlist() {
+  const container = document.getElementById("watchlistContainer");
+  if (!container) return;
+
+  const qInput = document.getElementById("watchlistSearch");
+  const query = (qInput ? qInput.value : "").trim().toLowerCase();
+
+  const filtered = watchlistData.filter((item) => {
+    if (watchlistCategory !== "all" && item.category !== watchlistCategory) return false;
+    if (query) {
+      return (
+        item.symbol.toLowerCase().includes(query) ||
+        (item.name || "").toLowerCase().includes(query) ||
+        (item.badge || "").toLowerCase().includes(query)
+      );
+    }
+    return true;
+  });
+
+  if (!filtered.length) {
+    container.innerHTML = '<div class="empty-state">Nenhum instrumento encontrado.</div>';
+    return;
+  }
+
+  container.innerHTML = filtered
+    .map((item) => {
+      const isAct = item.symbol === activeSymbol;
+      const chg = Number(item.change_24h_pct || 0);
+      const chgCls = chg >= 0 ? "pos" : "neg";
+      const priceStr = item.price > 0 ? formatPrice(item.price, item.symbol) : "--";
+      return `
+        <div class="wl-row ${isAct ? "active" : ""}" data-symbol="${escapeHtml(item.symbol)}">
+          <div class="wl-left">
+            <span class="wl-sym">
+              ${escapeHtml(item.symbol)}
+              <span class="asset-category-pill ${item.category === "forex" ? "forex" : "crypto"}" style="font-size:0.56rem;padding:0.06rem 0.3rem;">
+                ${escapeHtml(item.badge || "")}
+              </span>
+            </span>
+            <span class="wl-name">${escapeHtml(item.name || "")}</span>
+          </div>
+          <div class="wl-right">
+            <span class="wl-price">${escapeHtml(priceStr)}</span>
+            <span class="wl-chg ${chgCls}">${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%</span>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+
+  container.querySelectorAll(".wl-row[data-symbol]").forEach((row) => {
+    row.addEventListener("click", () => {
+      const sym = row.dataset.symbol;
+      if (sym && sym !== activeSymbol) onSymbolChange(sym);
+    });
+  });
+}
+
+function updateXtbMarginEstimate() {
+  const lotsEl = document.getElementById("xtbLotsInput");
+  const levEl = document.getElementById("xtbLeverageSelect");
+  const marginEl = document.getElementById("xtbEstMargin");
+  if (!lotsEl || !levEl || !marginEl) return;
+
+  const lots = parseFloat(lotsEl.value) || 0;
+  const lev = Math.max(1, parseInt(levEl.value, 10) || 1);
+  const price = currentAskPrice || lastKnownPrice || 0;
+  const meta = getInstrumentMeta(activeSymbol);
+  const contractSize = Number(meta.contract_size || 1);
+
+  if (lots <= 0 || price <= 0) {
+    marginEl.textContent = "$0.00";
+    return;
+  }
+
+  const [base, quote] = activeSymbol.split("/");
+  const units = lots * contractSize;
+  let notional = units * price;
+  if (quote !== "USD" && quote !== "USDT") {
+    notional = base === "USD" ? units : units * 1.08;
+  }
+  const margin = notional / lev;
+  marginEl.textContent = `$${margin.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+async function submitXtbOrder(side) {
+  const lots = parseFloat(document.getElementById("xtbLotsInput")?.value || "0");
+  const leverage = parseInt(document.getElementById("xtbLeverageSelect")?.value || "10", 10);
+  const slRaw = document.getElementById("xtbSlInput")?.value?.trim();
+  const tpRaw = document.getElementById("xtbTpInput")?.value?.trim();
+
+  if (!lots || lots <= 0) {
+    showToast("Informe um volume (lotes) válido.", "error");
+    return;
+  }
+
+  const payload = {
+    symbol: activeSymbol,
+    side,
+    lots,
+    leverage,
+    sl_price: slRaw ? parseFloat(slRaw) : null,
+    tp_price: tpRaw ? parseFloat(tpRaw) : null,
+  };
+
+  try {
+    const res = await fetch("/api/xtb/order", {
+      method: "POST",
+      headers: csrfHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      showToast(data.detail || "Não foi possível abrir a ordem.", "error");
+      return;
+    }
+    showToast(`✅ ${data.message}`, "success");
+    const slEl = document.getElementById("xtbSlInput");
+    const tpEl = document.getElementById("xtbTpInput");
+    if (slEl) slEl.value = "";
+    if (tpEl) tpEl.value = "";
+    await fetchXtbAccount();
+  } catch (err) {
+    showToast(`Erro ao enviar ordem: ${err}`, "error");
+  }
+}
+
+async function closeXtbPosition(posId) {
+  try {
+    const res = await fetch(`/api/xtb/close/${posId}`, {
+      method: "POST",
+      headers: csrfHeaders(),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      showToast(data.detail || "Erro ao fechar posição.", "error");
+      return;
+    }
+    showToast(`💰 ${data.message}`, "success");
+    await fetchXtbAccount();
+  } catch (err) {
+    showToast(`Erro ao fechar posição: ${err}`, "error");
+  }
+}
+
+async function fetchXtbAccount() {
+  lastXtbFetchAt = Date.now();
+  try {
+    const res = await fetch("/api/xtb/account");
+    if (!res.ok) return;
+    const acc = await res.json();
+
+    xtbFreeMarginUsd = Number(acc.free_margin_usd || 0);
+    const fmtUsd = (v) =>
+      `$${Number(v || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const fmtSignedUsd = (v) =>
+      `${Number(v || 0) >= 0 ? "+$" : "-$"}${Math.abs(Number(v || 0)).toLocaleString("en-US", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })}`;
+
+    const positions = acc.open_positions || [];
+    const trades = acc.recent_trades || [];
+    const floatPnl = Number(acc.floating_pnl_usd || 0);
+
+    // Sidebar & Boleta
+    const sideEq = document.getElementById("sideXtbEquity");
+    const sideFl = document.getElementById("sideXtbFloating");
+    const sideFm = document.getElementById("sideXtbFreeMargin");
+    const navBadge = document.getElementById("navOpenPosBadge");
+    const tkFm = document.getElementById("xtbFreeMarginTicket");
+    const termPnl = document.getElementById("terminalFloatingPnl");
+    const openCount = document.getElementById("openPositionsCount");
+
+    if (sideEq) sideEq.textContent = fmtUsd(acc.equity_usd);
+    if (sideFl) {
+      sideFl.textContent = fmtSignedUsd(floatPnl);
+      sideFl.className = `mono-val ${floatPnl >= 0 ? "text-up" : "text-down"}`;
+    }
+    if (sideFm) sideFm.textContent = fmtUsd(acc.free_margin_usd);
+    if (navBadge) navBadge.textContent = String(positions.length);
+    if (tkFm) tkFm.textContent = fmtUsd(acc.free_margin_usd);
+    if (openCount) openCount.textContent = `${positions.length} aberta(s)`;
+    if (termPnl) {
+      termPnl.textContent = `PnL Aberto: ${fmtSignedUsd(floatPnl)}`;
+      termPnl.className = `mono-val ${floatPnl >= 0 ? "text-up" : "text-down"}`;
+    }
+
+    // Aba Portfólio
+    const pBal = document.getElementById("portXtbBalance");
+    const pReal = document.getElementById("portXtbRealized");
+    const pEq = document.getElementById("portXtbEquity");
+    const pFl = document.getElementById("portXtbFloating");
+    const pMar = document.getElementById("portXtbMargin");
+    const pFm = document.getElementById("portXtbFreeMargin");
+    if (pBal) pBal.textContent = fmtUsd(acc.balance_usd);
+    if (pReal) pReal.textContent = `Realizado: ${fmtSignedUsd(acc.realized_pnl_usd)}`;
+    if (pEq) pEq.textContent = fmtUsd(acc.equity_usd);
+    if (pFl) pFl.textContent = `PnL Flutuante: ${fmtSignedUsd(floatPnl)}`;
+    if (pMar) pMar.textContent = fmtUsd(acc.used_margin_usd);
+    if (pFm) pFm.textContent = `Livre: ${fmtUsd(acc.free_margin_usd)}`;
+
+    // Tabela de Posições Abertas (Terminal)
+    const posBody = document.getElementById("xtbPositionsBody");
+    if (posBody) {
+      if (!positions.length) {
+        posBody.innerHTML =
+          '<tr><td colspan="9" class="empty-cell">Nenhuma posição aberta. Use a boleta ao lado para operar Forex ou Cripto!</td></tr>';
+      } else {
+        posBody.innerHTML = positions
+          .map((p) => {
+            const isUp = Number(p.pnl_usd) >= 0;
+            const slStr = p.sl_price ? formatPrice(p.sl_price, p.symbol) : "--";
+            const tpStr = p.tp_price ? formatPrice(p.tp_price, p.symbol) : "--";
+            return `
+              <tr>
+                <td><strong>${escapeHtml(p.symbol)}</strong></td>
+                <td><span class="side-pill ${p.side === "BUY" ? "buy" : "sell"}">${escapeHtml(p.side)} ${escapeHtml(p.leverage)}x</span></td>
+                <td>${escapeHtml(p.lots)}</td>
+                <td>${escapeHtml(formatPrice(p.entry_price, p.symbol))}</td>
+                <td>${escapeHtml(formatPrice(p.current_price, p.symbol))}</td>
+                <td class="dim">${escapeHtml(slStr)} / ${escapeHtml(tpStr)}</td>
+                <td>${escapeHtml(fmtUsd(p.margin_usd))}</td>
+                <td class="${isUp ? "text-up" : "text-down"}">
+                  <strong>${escapeHtml(fmtSignedUsd(p.pnl_usd))}</strong> (${Number(p.pnl_pct) >= 0 ? "+" : ""}${Number(p.pnl_pct).toFixed(2)}%)
+                </td>
+                <td>
+                  <button type="button" class="btn-close-pos" data-close-id="${escapeHtml(p.id)}">Fechar</button>
+                </td>
+              </tr>
+            `;
+          })
+          .join("");
+
+        posBody.querySelectorAll(".btn-close-pos[data-close-id]").forEach((btn) => {
+          btn.addEventListener("click", () => closeXtbPosition(Number(btn.dataset.closeId)));
+        });
+      }
+    }
+
+    // Tabela de Histórico XTB (Portfólio)
+    const histBody = document.getElementById("xtbTradesHistoryBody");
+    const histCount = document.getElementById("xtbTradesCount");
+    if (histCount) histCount.textContent = `${trades.length} encerrada(s)`;
+    if (histBody) {
+      if (!trades.length) {
+        histBody.innerHTML = '<tr><td colspan="9" class="empty-cell">Nenhuma operação manual encerrada ainda.</td></tr>';
+      } else {
+        histBody.innerHTML = trades
+          .map((t) => {
+            const isWin = Number(t.pnl_usd) >= 0;
+            return `
+              <tr>
+                <td class="dim">${escapeHtml(t.closed_at)}</td>
+                <td><strong>${escapeHtml(t.symbol)}</strong></td>
+                <td><span class="side-pill ${t.side === "BUY" ? "buy" : "sell"}">${escapeHtml(t.side)}</span></td>
+                <td>${escapeHtml(t.lots)}</td>
+                <td>${escapeHtml(formatPrice(t.entry_price, t.symbol))}</td>
+                <td>${escapeHtml(formatPrice(t.exit_price, t.symbol))}</td>
+                <td>${escapeHtml(t.reason)}</td>
+                <td class="${isWin ? "text-up" : "text-down"}"><strong>${escapeHtml(fmtSignedUsd(t.pnl_usd))}</strong></td>
+                <td class="${isWin ? "text-up" : "text-down"}">${Number(t.pnl_pct) >= 0 ? "+" : ""}${Number(t.pnl_pct).toFixed(2)}%</td>
+              </tr>
+            `;
+          })
+          .join("");
+      }
+    }
+  } catch (_) {
+    // silencioso
+  }
+}
+
+async function fetchNewsFeed(forceRefresh = false) {
+  lastNewsFetchAt = Date.now();
+  try {
+    const qInput = document.getElementById("newsSearchInput");
+    const qVal = qInput ? qInput.value.trim() : "";
+    const params = new URLSearchParams({
+      category: newsCategory,
+      q: qVal,
+      limit: "36",
+      refresh: forceRefresh ? "true" : "false",
+    });
+    const res = await fetch(`/api/news?${params.toString()}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    newsCacheItems = data.items || [];
+
+    const updEl = document.getElementById("newsLastUpdated");
+    if (updEl && data.updated_at) updEl.textContent = `Atualizado ${data.updated_at}`;
+
+    renderMiniNews(newsCacheItems.slice(0, 4));
+    renderFullNews(newsCacheItems);
+  } catch (_) {
+    // silencioso
+  }
+}
+
+function sentimentBadgeHtml(sent) {
+  if (sent === "positivo") return '<span class="sent-chip" style="color:#10b981;">🟢 Alta</span>';
+  if (sent === "negativo") return '<span class="sent-chip" style="color:#f43f5e;">🔴 Baixa</span>';
+  return '<span class="sent-chip" style="color:#94a3b8;">⚪ Neutro</span>';
+}
+
+function renderMiniNews(items) {
+  const container = document.getElementById("miniNewsList");
+  if (!container) return;
+  if (!items || !items.length) {
+    container.innerHTML = '<div class="empty-state">Sem manchetes disponíveis no momento.</div>';
+    return;
+  }
+  container.innerHTML = items
+    .map(
+      (n) => `
+      <a class="mini-news-item" href="${escapeHtml(n.link || "#")}" target="_blank" rel="noopener noreferrer">
+        <span class="mini-news-title">${escapeHtml(n.title)}</span>
+        <div class="mini-news-meta">
+          <span>${escapeHtml(n.source)} • ${escapeHtml((n.category || "").toUpperCase())}</span>
+          <span>${escapeHtml(n.published_at)}</span>
+        </div>
+      </a>
+    `
+    )
+    .join("");
+}
+
+function renderFullNews(items) {
+  const grid = document.getElementById("fullNewsGrid");
+  if (!grid) return;
+
+  let pos = 0;
+  let neg = 0;
+  let neu = 0;
+  for (const n of items) {
+    if (n.sentiment === "positivo") pos += 1;
+    else if (n.sentiment === "negativo") neg += 1;
+    else neu += 1;
+  }
+  const elPos = document.getElementById("sentCountPos");
+  const elNeg = document.getElementById("sentCountNeg");
+  const elNeu = document.getElementById("sentCountNeu");
+  if (elPos) elPos.textContent = `🟢 ${pos} Alta`;
+  if (elNeg) elNeg.textContent = `🔴 ${neg} Baixa`;
+  if (elNeu) elNeu.textContent = `⚪ ${neu} Neutro`;
+
+  if (!items || !items.length) {
+    grid.innerHTML = '<div class="empty-state">Nenhuma notícia encontrada para esse filtro.</div>';
+    return;
+  }
+
+  grid.innerHTML = items
+    .map(
+      (n) => `
+      <a class="news-card" href="${escapeHtml(n.link || "#")}" target="_blank" rel="noopener noreferrer">
+        <div class="news-card-top">
+          <span class="news-source-tag">${escapeHtml(n.source)} • ${escapeHtml((n.category || "").toUpperCase())}</span>
+          ${sentimentBadgeHtml(n.sentiment)}
+        </div>
+        <div class="news-card-title">${escapeHtml(n.title)}</div>
+        ${n.summary ? `<div class="news-card-summary">${escapeHtml(n.summary)}</div>` : ""}
+        <div class="news-card-footer">
+          <span>${escapeHtml(n.published_at)}</span>
+          <span style="color: var(--accent-cyan); font-weight: 600;">Ler matéria ↗</span>
+        </div>
+      </a>
+    `
+    )
+    .join("");
+}
+
+
+/* ==========================================================================
+   Centro de Treinamento da IA (Walk-Forward + Comparativo de Arquiteturas)
+   ========================================================================== */
+
+let aiTrainPollTimer = null;
+
+async function startAiTraining() {
+  if (isActiveForex()) {
+    showToast("Selecione um par Cripto (ex: BTC/USDT) para treinar o modelo da Binance.", "error");
+    return;
+  }
+  const btn = document.getElementById("btnStartAiTrain");
+  const trainTf = document.getElementById("aiTrainTimeframe")?.value || "30m";
+  const candles = document.getElementById("aiTrainCandles")?.value || "3000";
+  if (btn) btn.disabled = true;
+
+  try {
+    const q = new URLSearchParams({
+      symbol: activeSymbol,
+      timeframe: trainTf,
+      candles: String(candles),
+    });
+    const res = await fetch(`/api/ai/train?${q.toString()}`, {
+      method: "POST",
+      headers: csrfHeaders(),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      showToast(data.detail || "Falha ao iniciar treinamento.", "error");
+      if (btn) btn.disabled = false;
+      return;
+    }
+    showToast(`🧠 ${data.message}`, "success");
+    pollAiTrainStatus();
+    if (aiTrainPollTimer) clearInterval(aiTrainPollTimer);
+    aiTrainPollTimer = setInterval(pollAiTrainStatus, 2000);
+  } catch (err) {
+    showToast(`Erro ao iniciar treino: ${err}`, "error");
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function pollAiTrainStatus() {
+  try {
+    const res = await fetch("/api/ai/train/status");
+    if (!res.ok) return;
+    const st = await res.json();
+
+    const stageEl = document.getElementById("aiTrainStage");
+    const progEl = document.getElementById("aiTrainProgress");
+    const btn = document.getElementById("btnStartAiTrain");
+    const tbody = document.getElementById("aiTrainResultsBody");
+
+    if (stageEl) {
+      stageEl.textContent = st.error ? `Erro: ${st.error}` : st.stage || "Pronto";
+    }
+    if (progEl) {
+      progEl.style.width = `${Math.max(0, Math.min(100, Number(st.progress_pct || 0)))}%`;
+    }
+    if (btn) {
+      btn.disabled = Boolean(st.running);
+      btn.textContent = st.running ? "⏳ Treinando..." : "🧠 Treinar IA Agora";
+    }
+
+    if (!st.running && aiTrainPollTimer) {
+      clearInterval(aiTrainPollTimer);
+      aiTrainPollTimer = null;
+      if (st.last_result) {
+        showToast(`✅ Treinamento concluído! ${st.stage}`, "success");
+        fetchStatus();
+      } else if (st.error) {
+        showToast(`❌ ${st.error}`, "error");
+      }
+    }
+
+    if (tbody && st.last_result && Array.isArray(st.last_result.candidates)) {
+      const winnerType = st.last_result.winner?.model_type || "";
+      tbody.innerHTML = st.last_result.candidates
+        .map((c) => {
+          const isWin = c.model_type === winnerType;
+          const pnl = Number(c.sim_pnl_pct || 0);
+          return `
+            <tr>
+              <td><strong>${escapeHtml(String(c.model_type).toUpperCase())}</strong></td>
+              <td>${isWin ? '<span class="xtb-tag">🏆 CAMPEÃO</span>' : '<span class="dim">Candidato</span>'}</td>
+              <td>${(Number(c.precision_buy || 0) * 100).toFixed(1)}%</td>
+              <td>${Number(c.profit_factor || 0).toFixed(2)}</td>
+              <td>${Number(c.roc_auc || 0.5).toFixed(3)}</td>
+              <td class="${pnl >= 0 ? "text-up" : "text-down"}"><strong>${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}%</strong></td>
+              <td>${(Number(c.optimal_threshold || 0.55) * 100).toFixed(0)}%</td>
+              <td>${escapeHtml(c.buy_signals)}</td>
+            </tr>
+          `;
+        })
+        .join("");
+    }
+  } catch (_) {
+    // silencioso
+  }
+}
+
+
+async function fetchMacroIntelligence(forceRefresh = false) {
+  try {
+    const res = await fetch(`/api/macro/live?refresh=${forceRefresh ? "true" : "false"}`);
+    if (!res.ok) return;
+    const m = await res.json();
+
+    const set = (id, text, cls = null) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.textContent = text;
+      if (cls !== null) el.className = cls;
+    };
+
+    set("macroRegimeBadge", `${m.badge || "⚖️"} ${m.regime || "MACRO NEUTRO"}`);
+    set("macroRegimeDesc", m.description || "Contexto macro atualizado.");
+
+    set("macroDxyVal", m.dxy_price > 0 ? Number(m.dxy_price).toFixed(2) : "--");
+    const dxyChg = Number(m.dxy_change_pct || 0);
+    set("macroDxyChg", `${dxyChg >= 0 ? "+" : ""}${dxyChg.toFixed(2)}% (hoje)`, `market-metric-sub ${dxyChg <= 0 ? "text-up" : "text-down"}`);
+
+    set("macroUs10yVal", m.us10y_yield > 0 ? `${Number(m.us10y_yield).toFixed(2)}%` : "--");
+    const yChg = Number(m.us10y_change_pct || 0);
+    set("macroUs10yChg", `${yChg >= 0 ? "+" : ""}${yChg.toFixed(2)}%`, `market-metric-sub ${yChg <= 0 ? "text-up" : "text-down"}`);
+
+    set("macroSp500Val", m.sp500_price > 0 ? Number(m.sp500_price).toLocaleString("en-US", { maximumFractionDigits: 0 }) : "--");
+    const spChg = Number(m.sp500_change_pct || 0);
+    set("macroSp500Chg", `${spChg >= 0 ? "+" : ""}${spChg.toFixed(2)}%`, `market-metric-sub ${spChg >= 0 ? "text-up" : "text-down"}`);
+
+    set("macroFngVal", m.fear_greed_value !== null && m.fear_greed_value !== undefined ? `${m.fear_greed_value}/100` : "--");
+    set("macroFngLabel", m.fear_greed_label || "N/D");
+
+    const ns = Number(m.news_sentiment_score || 0);
+    set("macroNewsScore", `${ns >= 0 ? "+" : ""}${(ns * 100).toFixed(0)}%`);
+    const fb = Number(m.inflation_fed_bias || 0);
+    set("macroFedBias", `Fed/Inflação: ${fb >= 0 ? "+" : ""}${(fb * 100).toFixed(0)}% (${m.inflation_fed_mentions || 0}x)`);
+
+    const sc = Number(m.macro_score || 0);
+    set("macroTotalScore", `${sc >= 0 ? "+" : ""}${sc.toFixed(1)}`, `market-metric-value ${sc >= 0 ? "text-up" : "text-down"}`);
+    const adj = Math.round(Number(m.confidence_adjustment || 0) * 100);
+    set("macroAdjFilter", `Ajuste filtro: ${adj >= 0 ? "+" : ""}${adj}%`);
+  } catch (_) {
+    // silencioso
+  }
+}
+
+
+async function fetchAiEvolution() {
+  try {
+    const q = new URLSearchParams({
+      symbol: isActiveForex() ? "BTC/USDT" : activeSymbol,
+      timeframe: "30m",
+    });
+    const res = await fetch(`/api/ai/evolution?${q.toString()}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const evo = data.evolution || {};
+    const m = data.macro || {};
+    const p = evo.pillars || {};
+
+    const pct = Math.max(0, Math.min(100, Number(evo.progress_pct || 0)));
+    const set = (id, text, cls = null) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.textContent = text;
+      if (cls !== null) el.className = cls;
+    };
+
+    // Sidebar
+    set("sideEvoPct", `${pct.toFixed(0)}%`);
+    set("sideEvoLevel", `Nível ${evo.level || 1} • ${evo.stage_name || ""}`);
+    set("sideEvoStatus", evo.adaptation_tone === "warning" ? "Adaptando..." : "Sincronizada");
+    const sideBar = document.getElementById("sideEvoBar");
+    if (sideBar) sideBar.style.width = `${pct}%`;
+
+    // Card Principal
+    const mainBar = document.getElementById("evoMainBar");
+    if (mainBar) mainBar.style.width = `${pct}%`;
+    set("evoLevelBadge", `Nível ${evo.level || 1} • ${evo.stage_name || ""} (${pct.toFixed(0)}%)`);
+    set("evoAdaptationBadge", evo.adaptation_status || "🟢 Sincronizada");
+    set("evoNextMilestone", `Próximo marco: ${evo.next_milestone || "Evolução contínua"}`);
+
+    set("evoCandlesVal", `${Number(p.candles_count || 0).toLocaleString("pt-BR")} / ${Number(p.candles_target || 3000).toLocaleString("pt-BR")}`);
+    set("evoMacroVal", `${p.macro_snapshots || 0} / ${p.macro_target || 100}`);
+    set("evoCyclesVal", `${p.learning_cycles || 0} ciclo(s) (v${p.model_version || 1})`);
+    set("evoAccVal", p.eval_total > 0 ? `${Number(p.eval_accuracy_pct || 0).toFixed(1)}% (${p.eval_total})` : "Coletando...");
+
+    // Radar Global: Petróleo, Ouro/Prata, Terras Raras, Cobre, Guerras & Clima
+    const oilChg = Number(m.oil_change_pct || 0);
+    set("globOilVal", m.oil_price > 0 ? `$${Number(m.oil_price).toFixed(2)}` : "--");
+    set("globOilChg", `${oilChg >= 0 ? "+" : ""}${oilChg.toFixed(2)}%`, `market-metric-sub ${oilChg <= 2.0 ? "text-up" : "text-down"}`);
+
+    const goldChg = Number(m.gold_change_pct || 0);
+    const silChg = Number(m.silver_change_pct || 0);
+    set("globGoldVal", m.gold_price > 0 ? `$${Number(m.gold_price).toLocaleString("en-US", { maximumFractionDigits: 0 })}` : "--");
+    set("globSilverChg", `Ouro ${goldChg >= 0 ? "+" : ""}${goldChg.toFixed(1)}% • Prata ${silChg >= 0 ? "+" : ""}${silChg.toFixed(1)}%`);
+
+    const reChg = Number(m.rare_earth_change_pct || 0);
+    set("globRareVal", m.rare_earth_price > 0 ? `$${Number(m.rare_earth_price).toFixed(2)}` : "--");
+    set("globRareChg", `${reChg >= 0 ? "+" : ""}${reChg.toFixed(2)}%`, `market-metric-sub ${reChg >= 0 ? "text-up" : "text-down"}`);
+
+    const copChg = Number(m.copper_change_pct || 0);
+    set("globCopperVal", m.copper_price > 0 ? `$${Number(m.copper_price).toFixed(2)}` : "--");
+    set("globCopperChg", `${copChg >= 0 ? "+" : ""}${copChg.toFixed(2)}%`, `market-metric-sub ${copChg >= 0 ? "text-up" : "text-down"}`);
+
+    const warM = Number(m.war_geopolitics_mentions || 0);
+    set("globWarVal", `${warM} notícia(s)`, `market-metric-value ${warM >= 3 ? "text-down" : "text-up"}`);
+    set("globWarNote", warM >= 3 ? "Atenção geopolítica elevada" : "Estável nas manchetes");
+
+    const cliM = Number(m.climate_energy_mentions || 0);
+    const minM = Number(m.rare_earth_minerals_mentions || 0);
+    set("globClimateVal", `${cliM} clima/energia`);
+    set("globMineralsNote", `Minérios/Terras Raras: ${minM}`);
+  } catch (_) {
+    // silencioso
   }
 }

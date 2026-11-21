@@ -12,9 +12,7 @@ if exist ".venv\Scripts\python.exe" (
     set "PY_EXE=python"
 )
 
-"%PY_EXE%" -c "import os,time,trading_bot as tb; pid=tb.get_running_bot_pid(); print('Robô não está em execução.' if not pid else f'Enviando sinal de parada limpa ao PID {pid}...'); tb.request_bot_stop() if pid else None"
-timeout /t 3 /nobreak >nul
-"%PY_EXE%" -c "import psutil,trading_bot as tb; pid=tb.get_running_bot_pid(); (psutil.Process(pid).terminate(), print(f'Processo encerrado: PID {pid}')) if pid else print('Robô encerrado de forma limpa.')"
+"%PY_EXE%" -c "import time,psutil,trading_bot as tb; pid=tb.get_running_bot_pid(); print('Robô não está em execução.' if not pid else f'Enviando sinal de parada limpa ao PID {pid}...'); tb.request_bot_stop() if pid else None; [time.sleep(0.5) for _ in range(60) if pid and tb.is_pid_alive_bot(pid)]; db=tb.TradingDatabase(); in_flight=db.is_order_in_flight() if pid else False; pid2=tb.get_running_bot_pid(); print('Ordem em andamento; aguardando encerramento seguro sem forçar.' if (pid2 and in_flight) else ('Robô encerrado de forma limpa.' if not pid2 else (psutil.Process(pid2).terminate(), f'Processo encerrado: PID {pid2}')[1]))"
 
 echo.
 echo Verificação concluída.

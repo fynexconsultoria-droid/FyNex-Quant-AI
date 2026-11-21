@@ -44,7 +44,9 @@ def test_tail_lines_reads_only_end_of_log(tmp_path):
     assert tail == ["linha-195", "linha-196", "linha-197", "linha-198", "linha-199"]
 
 
-def test_rotating_file_handler_is_configured():
+def test_rotating_file_handler_is_configured(tmp_path):
+    log_path = str(tmp_path / "test_bot.log")
+    tb.setup_logging(log_path=log_path, console=False)
     handlers = tb.logger.handlers + tb.logging.getLogger().handlers
     assert any(isinstance(h, RotatingFileHandler) for h in handlers)
 

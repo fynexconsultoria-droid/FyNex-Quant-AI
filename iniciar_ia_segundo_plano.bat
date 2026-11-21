@@ -25,7 +25,7 @@ echo O robô continuará aprendendo e operando mesmo se você fechar esta janela
 echo Todos os registros são salvos em 'trading_bot.log' e 'trading_data.db'.
 echo.
 
-start "" "%PYW_EXE%" trading_bot.py
+start "" "%PYW_EXE%" supervisor.py --timeframe 30m
 
 echo [OK] Robô iniciado com sucesso em segundo plano!
 echo Para acompanhar o robô ao vivo, execute: ver_logs.bat

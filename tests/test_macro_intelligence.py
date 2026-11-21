@@ -1,0 +1,179 @@
+"""
+Testes da Inteligência Macroeconômica (Dólar DXY, Juros EUA 10Y, Inflação/Fed,
+Notícias e Fear & Greed) e Persistência Contínua de Aprendizado no SQLite.
+"""
+
+import os
+import sys
+
+import pytest
+from fastapi.testclient import TestClient
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, ROOT)
+
+from core import macro_intelligence  # noqa: E402
+from dashboard import server  # noqa: E402
+
+
+def test_analyze_news_and_inflation_detects_fed_and_inflation_bias():
+    items = [
+        {"title": "Fed sinaliza corte de juros com queda da inflação", "summary": "CPI desacelera", "sentiment": "positivo"},
+        {"title": "Bitcoin sobe forte após alívio no FOMC", "summary": "Mercado otimista", "sentiment": "positivo"},
+    ]
+    res = macro_intelligence.analyze_news_and_inflation(items)
+    assert res["news_total"] == 2
+    assert res["news_sentiment_score"] == pytest.approx(1.0)
+    assert res["inflation_fed_mentions"] >= 1
+    assert res["inflation_fed_bias"] > 0
+
+
+def test_compute_macro_decision_risk_on_vs_risk_off():
+    risk_on = macro_intelligence.compute_macro_decision({
+        "dxy_change_pct": -0.60,
+        "us10y_change_pct": -2.0,
+        "sp500_change_pct": 1.1,
+        "news_sentiment_score": 0.6,
+        "inflation_fed_mentions": 2,
+        "inflation_fed_bias": 0.5,
+        "fear_greed_value": 58,
+    })
+    assert risk_on["macro_score"] >= 20.0
+    assert risk_on["regime"] == "RISK-ON FAVORÁVEL"
+    assert risk_on["confidence_adjustment"] < 0
+
+    risk_off = macro_intelligence.compute_macro_decision({
+        "dxy_change_pct": 0.90,
+        "us10y_change_pct": 3.5,
+        "sp500_change_pct": -1.5,
+        "news_sentiment_score": -0.7,
+        "inflation_fed_mentions": 3,
+        "inflation_fed_bias": -0.8,
+        "fear_greed_value": 18,
+    })
+    assert risk_off["macro_score"] <= -50.0
+    assert risk_off["regime"] == "RISK-OFF SEVERO"
+    assert risk_off["confidence_adjustment"] >= 0.08
+
+
+def test_macro_learning_store_persists_snapshots_and_learning_cycles(tmp_path):
+    db_path = str(tmp_path / "macro_learn.db")
+    store = macro_intelligence.MacroLearningStore(db_path=db_path)
+
+    store.save_macro_snapshot("BTC/USDT", "30m", 1_700_000_000_000, {
+        "dxy_price": 104.2, "dxy_change_pct": -0.35,
+        "us10y_yield": 4.25, "us10y_change_pct": -1.1,
+        "sp500_change_pct": 0.8, "fear_greed_value": 60,
+        "news_sentiment_score": 0.4, "inflation_fed_bias": 0.3,
+        "macro_score": 32.5, "regime": "RISK-ON FAVORÁVEL",
+    })
+    snaps = store.get_recent_macro_snapshots(limit=5)
+    assert len(snaps) == 1
+    assert snaps[0]["timeframe"] == "30m"
+    assert snaps[0]["dxy_price"] == pytest.approx(104.2)
+
+    store.record_learning_cycle(
+        symbol="BTC/USDT",
+        timeframe="30m",
+        model_version=3,
+        model_type="ensemble",
+        metrics={"samples": 2400, "precision_buy": 0.61, "profit_factor": 1.45, "sim_pnl_pct": 4.2, "optimal_threshold": 0.58},
+        macro_score=32.5,
+        promoted=True,
+        notes="Ciclo de teste 30m",
+    )
+    hist = store.get_learning_history(limit=5)
+    assert len(hist) == 1
+    assert hist[0]["model_version"] == 3
+    assert hist[0]["promoted"] == 1
+
+
+def test_macro_and_learning_endpoints(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "DB_PATH", str(tmp_path / "macro_api.db"))
+    monkeypatch.setattr(
+        macro_intelligence,
+        "fetch_macro_snapshot",
+        lambda: {
+            "dxy_price": 103.5, "dxy_change_pct": -0.2, "us10y_yield": 4.15,
+            "us10y_change_pct": -0.5, "sp500_price": 5950.0, "sp500_change_pct": 0.6,
+            "fear_greed_value": 62, "fear_greed_label": "Greed",
+            "news_sentiment_score": 0.35, "inflation_fed_bias": 0.25, "inflation_fed_mentions": 2,
+            "macro_score": 28.0, "regime": "RISK-ON FAVORÁVEL", "badge": "🟢", "confidence_adjustment": -0.02,
+            "description": "Favorável",
+        },
+    )
+
+    client = TestClient(server.app)
+    r1 = client.get("/api/macro/live")
+    assert r1.status_code == 200
+    assert r1.json()["regime"] == "RISK-ON FAVORÁVEL"
+
+    r2 = client.get("/api/ai/learning-history")
+    assert r2.status_code == 200
+    assert isinstance(r2.json()["items"], list)
+
+
+def test_entry_guard_blocks_unsafe_conditions_and_approves_healthy_setup():
+    from datetime import datetime, timezone
+    from core.entry_guard import evaluate_entry_safety
+    from strategy_config import get_strategy_profile
+
+    p30 = get_strategy_profile("30m")
+    assert p30.tp_pct == pytest.approx(0.012)
+    assert p30.sl_pct == pytest.approx(0.008)
+    assert p30.confidence >= 0.62
+
+    # Cenário saudável: aprovado
+    ok, reasons = evaluate_entry_safety(
+        features_row={"rsi_14": 54.0, "ema_trend_ratio": 0.002, "atr_pct": 0.006},
+        macro_snapshot={"regime": "RISK-ON FAVORÁVEL", "macro_score": 25.0},
+        last_trade={"reason": "TAKE_PROFIT", "pnl_usd": 1.2, "exit_time": "2026-11-21 12:00:00"},
+        cooldown_seconds=3600,
+        now_utc=datetime(2026, 11, 21, 12, 10, 0, tzinfo=timezone.utc),
+    )
+    assert ok is True and reasons == []
+
+    # Cenário inseguro: RISK-OFF + sobrecompra + tendência de baixa + volatilidade extrema + cooldown pós-stop
+    ok2, reasons2 = evaluate_entry_safety(
+        features_row={"rsi_14": 76.0, "ema_trend_ratio": -0.008, "atr_pct": 0.035},
+        macro_snapshot={"regime": "RISK-OFF SEVERO", "macro_score": -65.0},
+        last_trade={"reason": "STOP_LOSS", "pnl_usd": -0.8, "exit_time": "2026-11-21 12:00:00"},
+        cooldown_seconds=3600,
+        now_utc=datetime(2026, 11, 21, 12, 20, 0, tzinfo=timezone.utc),
+    )
+    assert ok2 is False
+    assert len(reasons2) == 5
+
+
+def test_global_factors_and_ai_evolution_progress(tmp_path, monkeypatch):
+    items = [
+        {"title": "Guerra no Oriente Medio eleva petroleo Brent e alerta geopolitico", "summary": "Conflito e sancoes", "sentiment": "negativo"},
+        {"title": "Seca severa afeta safra e energia global", "summary": "Clima extremo", "sentiment": "negativo"},
+        {"title": "Demanda por terras raras, litio e ouro bate recorde", "summary": "Minerios estrategicos", "sentiment": "positivo"},
+    ]
+    news_stats = macro_intelligence.analyze_news_and_inflation(items)
+    assert news_stats["war_geopolitics_mentions"] >= 1
+    assert news_stats["climate_energy_mentions"] >= 1
+    assert news_stats["rare_earth_minerals_mentions"] >= 1
+
+    db_path = str(tmp_path / "evo.db")
+    evo = macro_intelligence.compute_ai_evolution_progress(
+        db_path=db_path,
+        symbol="BTC/USDT",
+        timeframe="30m",
+        macro_snapshot={"macro_score": -55.0, "war_geopolitics_mentions": 3, "oil_change_pct": 3.2},
+    )
+    assert 5.0 <= evo["progress_pct"] <= 100.0
+    assert evo["level"] >= 1
+    assert evo["adaptation_tone"] == "warning"
+
+    monkeypatch.setattr(server, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        macro_intelligence,
+        "fetch_macro_snapshot",
+        lambda: {"macro_score": 15.0, "oil_price": 72.5, "oil_change_pct": 0.4, "gold_price": 2650.0, "gold_change_pct": 0.5, "silver_change_pct": 0.3, "rare_earth_price": 45.2, "rare_earth_change_pct": 1.1, "copper_price": 4.2, "copper_change_pct": 0.6, "war_geopolitics_mentions": 1, "climate_energy_mentions": 1, "rare_earth_minerals_mentions": 2},
+    )
+    client = TestClient(server.app)
+    r = client.get("/api/ai/evolution?symbol=BTC/USDT&timeframe=30m")
+    assert r.status_code == 200
+    assert "evolution" in r.json() and "macro" in r.json()

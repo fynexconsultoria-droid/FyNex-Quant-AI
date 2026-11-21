@@ -14,17 +14,15 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import Optional, Tuple, Dict, Any
 
-import binance_client
 import alerts
+import binance_client
+from core.database import timeframe_to_seconds
+from strategy_config import PAPER_FEE_PCT, PAPER_SLIPPAGE_PCT
 
 logger = logging.getLogger("QuantTradingBot")
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 KILL_SWITCH_PATH = os.path.join(BASE_DIR, "STOP")
-
-# Taxa Spot padrão da Binance (0.1% = 0.001 por lado) e slippage estimado no paper trading
-PAPER_FEE_PCT = 0.001
-PAPER_SLIPPAGE_PCT = 0.0002
 
 # Se o preço cair este percentual ABAIXO do stop e a OCO ainda não executou
 # (ex.: gap que pulou o stop-limit), o robô cancela a OCO e vende a mercado.
@@ -48,6 +46,8 @@ class Position:
     sl_price: float
     tp_price: float
     oco_list_id: str = ""
+    base_balance_before: float = 0.0
+    status: str = "OPEN"
 
 
 # -----------------------------------------------------------------------------
@@ -70,10 +70,20 @@ class PositionStore:
                     sl_price REAL NOT NULL,
                     tp_price REAL NOT NULL,
                     oco_list_id TEXT DEFAULT '',
+                    base_balance_before REAL DEFAULT 0.0,
+                    status TEXT DEFAULT 'OPEN',
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (symbol, timeframe, mode)
                 );
             """)
+            for col_sql in [
+                "ALTER TABLE open_positions ADD COLUMN base_balance_before REAL DEFAULT 0.0;",
+                "ALTER TABLE open_positions ADD COLUMN status TEXT DEFAULT 'OPEN';",
+            ]:
+                try:
+                    conn.execute(col_sql)
+                except Exception:
+                    pass
             conn.commit()
 
     def save(self, pos: Position) -> None:
@@ -131,7 +141,7 @@ class RiskManager:
     def kill_switch_active(self) -> bool:
         return os.path.exists(self.kill_switch_path)
 
-    def can_open(self, amount_usdt: float) -> Tuple[bool, str]:
+    def can_open(self, amount_usdt: float, unrealized_pnl_usd: float = 0.0) -> Tuple[bool, str]:
         if self.kill_switch_active():
             return False, f"Kill-switch ativo (arquivo '{self.kill_switch_path}' existe)."
         if amount_usdt > self.max_trade_amount_usdt:
@@ -140,8 +150,9 @@ class RiskManager:
         trades_today, pnl_today = self._today_stats()
         if trades_today >= self.max_trades_per_day:
             return False, f"Limite diário de trades atingido ({trades_today}/{self.max_trades_per_day})."
-        if pnl_today <= -self.max_daily_loss_usdt:
-            return False, (f"Limite de perda diária atingido (PnL hoje ${pnl_today:+.2f} | "
+        effective_pnl = pnl_today + min(0.0, float(unrealized_pnl_usd))
+        if effective_pnl <= -self.max_daily_loss_usdt:
+            return False, (f"Limite de perda diária atingido (PnL efetivo hoje ${effective_pnl:+.2f} | "
                            f"limite -${self.max_daily_loss_usdt:.2f}).")
         return True, "OK"
 
@@ -152,7 +163,8 @@ class RiskManager:
 class PositionManager:
     def __init__(self, db, exchange, mode: str, symbol: str, timeframe: str,
                  stop_loss_pct: float, take_profit_pct: float, trade_amount_usdt: float,
-                 use_exchange_oco: bool = True, risk: Optional[RiskManager] = None):
+                 use_exchange_oco: bool = True, risk: Optional[RiskManager] = None,
+                 horizon_candles: Optional[int] = None):
         self.db = db
         self.exchange = exchange
         self.mode = mode
@@ -163,6 +175,7 @@ class PositionManager:
         self.trade_amount_usdt = trade_amount_usdt
         self.use_exchange_oco = use_exchange_oco and mode in ("live", "testnet")
         self.risk = risk
+        self.horizon_candles = horizon_candles
         self.store = PositionStore(db)
         self.position: Optional[Position] = None
         self.consecutive_sell_failures = 0
@@ -185,14 +198,28 @@ class PositionManager:
         self.position = None
         self.consecutive_sell_failures = 0
 
+    def _set_order_in_flight(self, active: bool) -> None:
+        setter = getattr(self.db, "set_order_in_flight", None)
+        if callable(setter):
+            try:
+                setter(active)
+            except Exception:
+                pass
+
+    def unrealized_pnl_usd(self, current_price: float) -> float:
+        if not self.position or current_price <= 0:
+            return 0.0
+        return (current_price - self.position.entry_price) * self.position.quantity
+
     def _record_exit(self, exit_price: float, reason: str, exit_order_id: str = "",
                      quantity: Optional[float] = None) -> Dict[str, Any]:
         pos = self.position
         qty = quantity if quantity is not None else pos.quantity
         if not self.is_real:
-            # No modo paper, aplica slippage na saída e desconta taxa Spot de compra + venda (0.1% cada lado)
+            # No modo paper, aplica slippage na entrada e na saída + taxa Spot (0.1% cada lado)
+            effective_entry = pos.entry_price * (1.0 + PAPER_SLIPPAGE_PCT)
             effective_exit = exit_price * (1.0 - PAPER_SLIPPAGE_PCT)
-            gross_entry_cost = pos.entry_price * qty
+            gross_entry_cost = effective_entry * qty
             gross_exit_proceeds = effective_exit * qty
             total_fees = (gross_entry_cost + gross_exit_proceeds) * PAPER_FEE_PCT
             pnl_usd = (gross_exit_proceeds - gross_entry_cost) - total_fees
@@ -232,6 +259,29 @@ class PositionManager:
         if not self.is_real:
             return
 
+        # 0. Reconciliação de ordem PENDING caso o robô tenha encerrado durante o envio da compra
+        if pos.status == "PENDING" and pos.order_id and pos.order_id != "PENDING":
+            reconciled = binance_client.reconcile_order_by_client_id(self.exchange, self.symbol, pos.order_id)
+            if reconciled and float(reconciled.get("filled") or 0.0) > 0:
+                base = self.symbol.split("/")[0]
+                net_qty = binance_client.net_filled_quantity(reconciled, base, float(reconciled["filled"]))
+                avg_price = float(reconciled.get("average") or pos.entry_price)
+                pos.order_id = str(reconciled.get("id") or pos.order_id)
+                pos.entry_price = avg_price
+                pos.quantity = net_qty
+                pos.sl_price = avg_price * (1.0 - self.stop_loss_pct)
+                pos.tp_price = avg_price * (1.0 + self.take_profit_pct)
+                pos.status = "OPEN"
+                self._persist()
+                logger.warning(
+                    f"   ✅ [RECONCILIAÇÃO PENDING] Compra confirmada na Binance! "
+                    f"Entrada ${avg_price:,.2f} | Qtd {net_qty:.6f}"
+                )
+            else:
+                logger.warning("   ℹ️ Ordem PENDING não foi executada na Binance. Limpando registro local.")
+                self._clear()
+                return
+
         # 1. A OCO pode ter executado enquanto o robô estava desligado
         if pos.oco_list_id:
             status = binance_client.get_oco_status(self.exchange, self.symbol, pos.oco_list_id)
@@ -252,9 +302,11 @@ class PositionManager:
             logger.error(f"   Não foi possível conferir o saldo para reconciliar a posição: {e}")
             return
 
-        if total_base < pos.quantity * 0.98:
+        expected_total_base = pos.base_balance_before + pos.quantity
+        if total_base < expected_total_base * 0.98:
             logger.error(
-                f"   ⚠️ Saldo de {base} ({total_base:.6f}) menor que a posição registrada ({pos.quantity:.6f}). "
+                f"   ⚠️ Saldo de {base} ({total_base:.6f}) menor que o esperado "
+                f"({expected_total_base:.6f} = antes {pos.base_balance_before:.6f} + posição {pos.quantity:.6f}). "
                 f"A posição foi provavelmente encerrada manualmente. Removendo o registro local SEM gravar trade."
             )
             self._clear()
@@ -281,15 +333,44 @@ class PositionManager:
             return False
 
         if self.risk:
-            allowed, reason = self.risk.can_open(self.trade_amount_usdt)
+            allowed, reason = self.risk.can_open(
+                self.trade_amount_usdt,
+                unrealized_pnl_usd=self.unrealized_pnl_usd(current_price),
+            )
             if not allowed:
                 logger.warning(f"   ⛔ [RISCO] Entrada bloqueada: {reason}")
                 alerts.send_alert(f"Entrada bloqueada pelo RiskManager: {reason}", level="RISK_LIMIT")
                 return False
 
+        base_before = 0.0
         if self.is_real:
-            buy = binance_client.execute_spot_buy(self.exchange, self.symbol, self.trade_amount_usdt)
+            base = self.symbol.split("/")[0]
+            try:
+                base_before = binance_client.get_free_balance(self.exchange, base)
+            except Exception:
+                base_before = 0.0
+
+            # M6: Persiste intenção PENDING com client_order_id e marca order_in_flight ANTES do envio à exchange
+            cid = binance_client.generate_client_order_id("fynexb")
+            pending_pos = Position(
+                symbol=self.symbol, timeframe=self.timeframe, mode=self.mode,
+                model_version=model_version, entry_time=utc_now_str(),
+                entry_price=current_price, quantity=0.0, order_id=cid,
+                sl_price=current_price * (1.0 - self.stop_loss_pct),
+                tp_price=current_price * (1.0 + self.take_profit_pct),
+                base_balance_before=base_before, status="PENDING",
+            )
+            self.store.save(pending_pos)
+            self._set_order_in_flight(True)
+            try:
+                buy = binance_client.execute_spot_buy(
+                    self.exchange, self.symbol, self.trade_amount_usdt, client_order_id=cid
+                )
+            finally:
+                self._set_order_in_flight(False)
+
             if not buy.get("success"):
+                self.store.delete(self.symbol, self.timeframe, self.mode)
                 logger.error(f"   ❌ [FALHA AO ENVIAR ORDEM NA BINANCE] {buy.get('message')}")
                 return False
             entry_price, qty, order_id = buy["price"], buy["quantity"], buy["order_id"]
@@ -306,6 +387,7 @@ class PositionManager:
             entry_price=entry_price, quantity=qty, order_id=order_id,
             sl_price=entry_price * (1.0 - self.stop_loss_pct),
             tp_price=entry_price * (1.0 + self.take_profit_pct),
+            base_balance_before=base_before, status="OPEN",
         )
         self._persist()
 
@@ -333,40 +415,65 @@ class PositionManager:
             self._record_exit(current_price, reason)
             return True
 
-        if pos.oco_list_id:
-            cancel = binance_client.cancel_oco(self.exchange, self.symbol, pos.oco_list_id)
-            if not cancel.get("success"):
-                # Pode ter sido executada nesse meio tempo
-                status = binance_client.get_oco_status(self.exchange, self.symbol, pos.oco_list_id)
-                if status.get("success") and status.get("filled"):
-                    self._record_exit(status["price"], status["reason"], status["order_id"], status["quantity"])
-                    return True
-                if not (status.get("success") and status.get("list_status") != "EXECUTING"):
-                    logger.critical("   🆘 Não foi possível cancelar a OCO; a venda será tentada no próximo ciclo.")
-                    return False
-            pos.oco_list_id = ""
-            self._persist()
+        had_oco = bool(pos.oco_list_id)
+        self._set_order_in_flight(True)
+        try:
+            if pos.oco_list_id:
+                cancel = binance_client.cancel_oco(self.exchange, self.symbol, pos.oco_list_id)
+                if not cancel.get("success"):
+                    # Pode ter sido executada nesse meio tempo
+                    status = binance_client.get_oco_status(self.exchange, self.symbol, pos.oco_list_id)
+                    if status.get("success") and status.get("filled"):
+                        self._record_exit(status["price"], status["reason"], status["order_id"], status["quantity"])
+                        return True
+                    if not (status.get("success") and status.get("list_status") != "EXECUTING"):
+                        logger.critical("   🆘 Não foi possível cancelar a OCO; a venda será tentada no próximo ciclo.")
+                        return False
+                pos.oco_list_id = ""
+                self._persist()
 
-        sell = binance_client.execute_spot_sell_with_retry(self.exchange, self.symbol, pos.quantity)
-        if not sell.get("success"):
-            self.consecutive_sell_failures += 1
-            err_msg = (
-                f"🆘 [VENDA FALHOU] {sell.get('message')} | A posição CONTINUA ABERTA e será tentada "
-                f"novamente (falhas consecutivas: {self.consecutive_sell_failures}). Verifique a conta Binance!"
-            )
-            logger.critical("   " + err_msg)
-            alerts.send_alert(err_msg, level="CRITICAL")
+            sell = binance_client.execute_spot_sell_with_retry(self.exchange, self.symbol, pos.quantity)
+            if not sell.get("success"):
+                self.consecutive_sell_failures += 1
+                err_msg = (
+                    f"🆘 [VENDA FALHOU] {sell.get('message')} | A posição CONTINUA ABERTA e será tentada "
+                    f"novamente (falhas consecutivas: {self.consecutive_sell_failures}). Verifique a conta Binance!"
+                )
+                logger.critical("   " + err_msg)
+                # M5: Recoloca OCO imediatamente se ela foi cancelada antes da venda falhar
+                if had_oco and self.use_exchange_oco:
+                    logger.warning("   🛡️ Recolocando OCO de proteção após falha na venda...")
+                    self._place_oco()
+                alerts.send_alert(err_msg, level="CRITICAL")
+                return False
+
+            self._record_exit(sell["price"], reason, sell["order_id"], sell["quantity"])
+            return True
+        finally:
+            self._set_order_in_flight(False)
+
+    @staticmethod
+    def _timeframe_seconds(timeframe: str) -> int:
+        return timeframe_to_seconds(timeframe)
+
+    def _is_time_barrier_expired(self, pos: Position, now_utc: Optional[datetime] = None) -> bool:
+        if not self.horizon_candles or self.horizon_candles <= 0:
             return False
-
-        self._record_exit(sell["price"], reason, sell["order_id"], sell["quantity"])
-        return True
+        try:
+            entry_dt = datetime.strptime(pos.entry_time, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            now_dt = now_utc or datetime.now(timezone.utc)
+            max_seconds = self.horizon_candles * self._timeframe_seconds(self.timeframe)
+            return (now_dt - entry_dt).total_seconds() >= max_seconds
+        except Exception:
+            return False
 
     # ------------------------------------------------------------ check exits
     def check_exits(
         self,
         current_price: float,
         candle_high: Optional[float] = None,
-        candle_low: Optional[float] = None
+        candle_low: Optional[float] = None,
+        now_utc: Optional[datetime] = None,
     ) -> None:
         if not self.in_position:
             return
@@ -388,6 +495,10 @@ class PositionManager:
                     logger.warning("   O preço ultrapassou o stop-limit sem execução. Saída a mercado (fallback).")
                     self.close("STOP_LOSS_FALLBACK", current_price)
                     return
+                elif self._is_time_barrier_expired(pos, now_utc=now_utc):
+                    logger.info(f"   ⏱️ Barreira de tempo atingida ({self.horizon_candles} candles). Cancelando OCO e encerrando.")
+                    self.close("TIME_BARRIER", current_price)
+                    return
                 else:
                     return
             else:
@@ -399,11 +510,14 @@ class PositionManager:
 
         # Conservador: se um mesmo candle tocou tanto SL quanto TP, prioriza STOP_LOSS
         if low_check <= pos.sl_price:
-            exit_p = pos.sl_price if not self.is_real else current_price
+            # M7: No paper, se houve gap abaixo do stop, preenche no pior preço real
+            exit_p = min(pos.sl_price, current_price) if not self.is_real else current_price
             self.close("STOP_LOSS", exit_p)
         elif high_check >= pos.tp_price:
             exit_p = pos.tp_price if not self.is_real else current_price
             self.close("TAKE_PROFIT", exit_p)
+        elif self._is_time_barrier_expired(pos, now_utc=now_utc):
+            self.close("TIME_BARRIER", current_price)
 
     def status_label(self) -> str:
         if not self.position:
