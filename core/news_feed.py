@@ -26,19 +26,24 @@ NEWS_SOURCES: List[Dict[str, str]] = [
         "url": "https://www.infomoney.com.br/mercados/feed/",
     },
     {
+        "name": "InfoMoney Economia",
+        "category": "forex",
+        "url": "https://www.infomoney.com.br/economia/feed/",
+    },
+    {
         "name": "Cointelegraph BR",
         "category": "cripto",
         "url": "https://br.cointelegraph.com/rss",
     },
     {
-        "name": "FXStreet Forex",
+        "name": "Investing.com BR",
         "category": "forex",
-        "url": "https://www.fxstreet.com/rss/news",
+        "url": "https://br.investing.com/rss/news.rss",
     },
     {
-        "name": "Yahoo Finance",
+        "name": "Money Times",
         "category": "macro",
-        "url": "https://finance.yahoo.com/news/rssindex",
+        "url": "https://www.moneytimes.com.br/feed/",
     },
 ]
 
