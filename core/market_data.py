@@ -49,6 +49,16 @@ def fetch_live_ohlcv(
             logger.error(f"Rate limit persistente na Binance após {max_retries} tentativas: {e}")
             return pd.DataFrame()
         except (ccxt.NetworkError, ccxt.RequestTimeout, ccxt.ExchangeNotAvailable) as e:
+            err_str = str(e).lower()
+            if ("451" in err_str or "restricted location" in err_str) and attempt < max_retries:
+                try:
+                    import binance_client
+                    binance_client._apply_mirror_to_exchange(exchange, binance_client.BINANCE_PUBLIC_FALLBACK_MIRROR)
+                    logger.warning("🌎 Geo-block 451 na coleta OHLCV: alternando para data-api.binance.vision...")
+                except Exception:
+                    pass
+                time.sleep(0.5)
+                continue
             if attempt < max_retries:
                 backoff = 0.5 * (2 ** (attempt - 1))
                 logger.warning(f"Instabilidade na Binance (tentativa {attempt}/{max_retries}): {e}. Tentando em {backoff:.1f}s...")

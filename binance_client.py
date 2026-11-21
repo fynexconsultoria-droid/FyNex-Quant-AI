@@ -37,13 +37,16 @@ _HEALTH_CACHE_LOCK = threading.Lock()
 _HEALTH_CACHE: Dict[bool, Tuple[float, Dict[str, Any]]] = {}
 
 # Mirrors oficiais públicos/Spot da Binance para failover automático em produção
+# (data-api.binance.vision fornece dados públicos sem restrição geográfica HTTP 451)
 BINANCE_SPOT_MIRRORS: Tuple[str, ...] = (
     "https://api.binance.com",
     "https://api1.binance.com",
     "https://api2.binance.com",
     "https://api3.binance.com",
     "https://api4.binance.com",
+    "https://data-api.binance.vision",
 )
+BINANCE_PUBLIC_FALLBACK_MIRROR = "https://data-api.binance.vision"
 
 _METRICS_LOCK = threading.Lock()
 _ACTIVE_MIRROR_IDX = 0
@@ -324,14 +327,17 @@ def _rotate_mirror(reason: str = "") -> str:
     return new_mirror
 
 
+_BINANCE_HOST_RE = re.compile(r"https://(?:api[0-9]?\.binance\.com|data-api\.binance\.vision)")
+
+
 def _apply_mirror_to_exchange(exchange: ccxt.binance, mirror_base: str) -> None:
-    """Aplica o mirror base (ex.: https://api1.binance.com) às URLs Spot públicas/privadas do CCXT."""
+    """Aplica o mirror base (ex.: https://api1.binance.com ou data-api.binance.vision) às URLs Spot do CCXT."""
     try:
         api_urls = exchange.urls.get("api")
         if isinstance(api_urls, dict):
             for key, val in list(api_urls.items()):
-                if isinstance(val, str) and "api.binance.com" in val:
-                    api_urls[key] = val.replace("https://api.binance.com", mirror_base)
+                if isinstance(val, str) and _BINANCE_HOST_RE.search(val):
+                    api_urls[key] = _BINANCE_HOST_RE.sub(mirror_base, val)
     except Exception:
         pass
 
@@ -414,7 +420,19 @@ def call_with_retry(
             last_exc = e
             _record_request_result(None, error=str(e), retried=(attempt > 1))
             if not testnet and allow_mirror_failover and attempt < max_attempts:
-                new_mirror = _rotate_mirror(type(e).__name__)
+                err_str = str(e).lower()
+                if "451" in err_str or "restricted location" in err_str:
+                    global _ACTIVE_MIRROR_IDX
+                    with _METRICS_LOCK:
+                        _ACTIVE_MIRROR_IDX = BINANCE_SPOT_MIRRORS.index(BINANCE_PUBLIC_FALLBACK_MIRROR)
+                        _CONNECTION_METRICS["mirror_switches"] += 1
+                    with _EXCHANGE_CACHE_LOCK:
+                        for k in [k for k in _EXCHANGE_CACHE if not k[2]]:
+                            _EXCHANGE_CACHE.pop(k, None)
+                    new_mirror = BINANCE_PUBLIC_FALLBACK_MIRROR
+                    logger.warning(f"🌎 Geo-block HTTP 451 detectado! Alternando para mirror público global {new_mirror}.")
+                else:
+                    new_mirror = _rotate_mirror(type(e).__name__)
                 if exchange is not None:
                     _apply_mirror_to_exchange(exchange, new_mirror)
             if attempt < max_attempts:
