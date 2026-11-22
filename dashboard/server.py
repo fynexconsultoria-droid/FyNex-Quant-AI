@@ -362,23 +362,53 @@ def _build_calibration_status(
     }
 
 
-def is_bot_running() -> Tuple[bool, Optional[int]]:
+_BOT_STATUS_CACHE_LOCK = threading.Lock()
+_BOT_STATUS_CACHE: Tuple[float, bool, Optional[int]] = (0.0, False, None)
+
+
+def _invalidate_bot_status_cache() -> None:
+    global _BOT_STATUS_CACHE
+    with _BOT_STATUS_CACHE_LOCK:
+        _BOT_STATUS_CACHE = (0.0, False, None)
+
+
+def is_bot_running(use_cache: bool = True) -> Tuple[bool, Optional[int]]:
     """
     Verifica se o robô está ativo usando prioritariamente o arquivo `bot.pid`
     e confirmando que o PID pertence a um interpretador Python executando `trading_bot.py`
-    (nunca confunde com editores como Notepad ou VS Code).
+    (com cache curto de 2.5s para evitar varredura pesada de processos no Windows a cada 3s).
     """
+    global _BOT_STATUS_CACHE
+    now = time.monotonic()
+    if use_cache:
+        with _BOT_STATUS_CACHE_LOCK:
+            ts, cached_running, cached_pid = _BOT_STATUS_CACHE
+            if (now - ts) < 2.5:
+                return cached_running, cached_pid
+
     pid = get_running_bot_pid(PID_FILE_PATH)
     if pid:
+        with _BOT_STATUS_CACHE_LOCK:
+            _BOT_STATUS_CACHE = (now, True, pid)
         return True, pid
 
+    found_pid: Optional[int] = None
     for proc in psutil.process_iter(["pid", "name", "cmdline"]):
         try:
-            if is_pid_alive_bot(proc.info["pid"]):
-                return True, proc.info["pid"]
+            name = (proc.info.get("name") or "").lower()
+            if "python" not in name:
+                continue
+            cmdline = proc.info.get("cmdline") or []
+            if any("trading_bot.py" in str(arg).lower() for arg in cmdline):
+                found_pid = proc.info["pid"]
+                break
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
-    return False, None
+
+    running = found_pid is not None
+    with _BOT_STATUS_CACHE_LOCK:
+        _BOT_STATUS_CACHE = (now, running, found_pid)
+    return running, found_pid
 
 
 def _tail_lines(file_path: str, max_lines: int = 50, max_bytes: int = 65536) -> list[str]:
@@ -1045,6 +1075,7 @@ def start_bot(
     trade_amount: Optional[float] = Query(default=None, ge=10.0, le=10000.0),
 ):
     """Inicia o processo do robô supervisionado em segundo plano se já não estiver em execução."""
+    _invalidate_bot_status_cache()
     running, pid = is_bot_running()
     if running:
         return {"status": "already_running", "pid": pid, "message": "O robô já está ativo em segundo plano."}
@@ -1076,6 +1107,7 @@ def start_bot(
             creationflags=DETACHED_PROCESS if os.name == "nt" else 0,
             close_fds=True,
         )
+        _invalidate_bot_status_cache()
         return {
             "status": "started",
             "pid": proc.pid,
@@ -1105,6 +1137,7 @@ def stop_bot():
     final e libere o lock. Aguarda até 45s e NUNCA encerra forçadamente enquanto houver
     uma ordem em andamento (`order_in_flight == 1`).
     """
+    _invalidate_bot_status_cache()
     running, pid = is_bot_running()
     if not running or not pid:
         return {"status": "not_running", "message": "O robô não está em execução."}
@@ -1114,6 +1147,7 @@ def stop_bot():
         p = psutil.Process(pid)
         for _ in range(180):  # até 45s (180 * 0.25s)
             if not p.is_running():
+                _invalidate_bot_status_cache()
                 return {"status": "stopped", "message": f"Robô (PID {pid}) encerrado de forma limpa."}
             time.sleep(0.25)
 
@@ -1125,8 +1159,10 @@ def stop_bot():
 
         p.terminate()
         p.wait(timeout=3.0)
+        _invalidate_bot_status_cache()
         return {"status": "stopped", "message": f"Robô (PID {pid}) encerrado com sucesso."}
     except psutil.NoSuchProcess:
+        _invalidate_bot_status_cache()
         return {"status": "stopped", "message": f"Robô (PID {pid}) encerrado com sucesso."}
     except Exception:
         if _is_order_in_flight():

@@ -12,6 +12,7 @@ Fornece:
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -340,6 +341,8 @@ _FOREX_QUOTE_CACHE_LOCK = threading.Lock()
 _FOREX_QUOTE_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _FOREX_CANDLES_CACHE_LOCK = threading.Lock()
 _FOREX_CANDLES_CACHE: Dict[Tuple[str, str, int], Tuple[float, List[Dict[str, Any]]]] = {}
+_WATCHLIST_CACHE_LOCK = threading.Lock()
+_WATCHLIST_CACHE: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
 
 _YAHOO_TF_MAP: Dict[str, Tuple[str, str]] = {
     "1m": ("1m", "1d"),
@@ -372,6 +375,8 @@ def clear_forex_caches() -> None:
         _FOREX_QUOTE_CACHE.clear()
     with _FOREX_CANDLES_CACHE_LOCK:
         _FOREX_CANDLES_CACHE.clear()
+    with _WATCHLIST_CACHE_LOCK:
+        _WATCHLIST_CACHE.clear()
 
 
 def _http_get_json(url: str, timeout: float = 6.0) -> Dict[str, Any]:
@@ -400,7 +405,7 @@ def _fetch_yahoo_chart(yahoo_ticker: str, interval: str = "1m", range_str: str =
     return results[0]
 
 
-def fetch_forex_quote(symbol: str, ttl_seconds: float = 5.0) -> Dict[str, Any]:
+def fetch_forex_quote(symbol: str, ttl_seconds: float = 15.0) -> Dict[str, Any]:
     """Retorna cotação ao vivo de um ativo Forex/Commodity/Índice com Bid/Ask, spread em pips e estatísticas 24h."""
     sym = symbol.upper()
     info = MARKET_INSTRUMENTS.get(sym)
@@ -536,9 +541,16 @@ def fetch_any_quote(symbol: str) -> Dict[str, Any]:
     return ticker
 
 
-def fetch_watchlist(category: str = "all") -> List[Dict[str, Any]]:
-    """Retorna cotações resumidas para a Watchlist estilo XTB (em paralelo)."""
-    instruments = list_instruments(category if category in ("crypto", "forex", "commodities", "indices") else None)
+def fetch_watchlist(category: str = "all", ttl_seconds: float = 15.0) -> List[Dict[str, Any]]:
+    """Retorna cotações resumidas para a Watchlist estilo XTB (em paralelo, com cache curto)."""
+    cat_key = category if category in ("crypto", "forex", "commodities", "indices") else "all"
+    now = time.monotonic()
+    with _WATCHLIST_CACHE_LOCK:
+        cached = _WATCHLIST_CACHE.get(cat_key)
+        if cached and (now - cached[0]) < ttl_seconds:
+            return cached[1]
+
+    instruments = list_instruments(cat_key if cat_key != "all" else None)
     results: Dict[str, Dict[str, Any]] = {}
 
     def _load_one(inst: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
@@ -573,14 +585,17 @@ def fetch_watchlist(category: str = "all") -> List[Dict[str, Any]]:
                 "ok": False,
             }
 
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=10) as pool:
         futures = [pool.submit(_load_one, inst) for inst in instruments]
         for fut in as_completed(futures):
             sym, item = fut.result()
             results[sym] = item
 
     # Preserva ordem original do catálogo
-    return [results[i["symbol"]] for i in instruments if i["symbol"] in results]
+    ordered = [results[i["symbol"]] for i in instruments if i["symbol"] in results]
+    with _WATCHLIST_CACHE_LOCK:
+        _WATCHLIST_CACHE[cat_key] = (now, ordered)
+    return ordered
 
 
 # -----------------------------------------------------------------------------
@@ -593,6 +608,9 @@ def _utc_now_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
+_INITIALIZED_XTB_DBS: set = set()
+
+
 class XTBDeskStore:
     """
     Gerencia posições abertas e histórico de operações manuais estilo corretora XTB
@@ -601,7 +619,9 @@ class XTBDeskStore:
 
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self._init_tables()
+        if db_path not in _INITIALIZED_XTB_DBS or not os.path.exists(db_path):
+            self._init_tables()
+            _INITIALIZED_XTB_DBS.add(db_path)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:

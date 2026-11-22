@@ -12,6 +12,7 @@ Operador Autônomo de Pares de Moedas (Forex) com Confluência Técnica + Macro 
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -226,19 +227,32 @@ class ForexAITrader:
         open_syms = {p["symbol"] for p in open_forex}
 
         opportunities: List[Dict[str, Any]] = []
-        for sym in self.pairs:
+
+        def _analyze_one(sym: str) -> Optional[Dict[str, Any]]:
             try:
                 raw_candles = forex_market.fetch_forex_candles(sym, timeframe="1h", limit=80)
                 if not raw_candles or len(raw_candles) < 35:
-                    continue
+                    return None
                 df = pd.DataFrame(raw_candles)
                 df["timestamp"] = pd.to_datetime(df["time"], unit="s")
-                opp = evaluate_forex_opportunity(sym, df, macro_snapshot=macro_snapshot)
-                if opp is not None:
-                    opportunities.append(opp)
+                return evaluate_forex_opportunity(sym, df, macro_snapshot=macro_snapshot)
             except Exception as e:
                 logger.debug(f"[FOREX IA] Falha ao analisar {sym}: {e}")
-                continue
+                return None
+
+        max_workers = max(1, min(6, len(self.pairs)))
+        if max_workers == 1:
+            for sym in self.pairs:
+                opp = _analyze_one(sym)
+                if opp is not None:
+                    opportunities.append(opp)
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = [pool.submit(_analyze_one, sym) for sym in self.pairs]
+                for fut in as_completed(futures):
+                    opp = fut.result()
+                    if opp is not None:
+                        opportunities.append(opp)
 
         opportunities.sort(key=lambda x: x.get("score", 0.0), reverse=True)
         last_action = None

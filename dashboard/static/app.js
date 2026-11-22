@@ -19,7 +19,7 @@ let countdownInterval = null;
 let isPolling = false;
 let lastKnownPrice = 0;
 let activeSymbol = "BTC/USDT";
-let activeTimeframe = "1m";
+let activeTimeframe = "1h";
 let chartInitializedWithData = false;
 
 let liveWs = null;
@@ -169,6 +169,11 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   window.addEventListener("beforeunload", disconnectLiveMarketStream);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      pollDashboardData();
+    }
+  });
 });
 
 /**
@@ -883,7 +888,7 @@ async function fetchInitialData() {
  * Loop de polling leve a cada 3 segundos (sem sobreposição de requisições)
  */
 async function pollDashboardData() {
-  if (isPolling) return;
+  if (isPolling || document.hidden) return;
   isPolling = true;
   try {
     const now = Date.now();

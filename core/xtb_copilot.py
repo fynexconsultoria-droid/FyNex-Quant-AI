@@ -160,12 +160,17 @@ def send_telegram_message(text: str, timeout: float = 8.0) -> Dict[str, Any]:
         return {"sent": False, "error": str(e)}
 
 
+_INITIALIZED_COPILOT_DBS: set = set()
+
+
 class XTBCopilotStore:
     """Armazena e gerencia sinais do Copiloto XTB em SQLite (WAL)."""
 
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self._init_tables()
+        if db_path not in _INITIALIZED_COPILOT_DBS or not os.path.exists(db_path):
+            self._init_tables()
+            _INITIALIZED_COPILOT_DBS.add(db_path)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -197,6 +202,12 @@ class XTBCopilotStore:
                     status TEXT NOT NULL DEFAULT 'NEW',
                     telegram_sent INTEGER NOT NULL DEFAULT 0
                 )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_copilot_dedup
+                ON xtb_copilot_signals(symbol, side, status, created_at)
                 """
             )
             conn.commit()

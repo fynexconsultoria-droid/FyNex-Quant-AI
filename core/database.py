@@ -126,6 +126,10 @@ class TradingDatabase:
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_predictions_candle
                 ON predictions(symbol, timeframe, candle_timestamp);
             """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_pred_resolved
+                ON predictions(symbol, timeframe, is_correct, id DESC);
+            """)
 
             # Colunas para avaliação Triple Barrier ao vivo
             for col_sql in [
@@ -169,6 +173,15 @@ class TradingDatabase:
                     cursor.execute(col_sql)
                 except sqlite3.OperationalError:
                     pass
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_trades_sym_tf
+                ON simulated_trades(symbol, timeframe);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_trades_mode
+                ON simulated_trades(mode);
+            """)
 
             # 4. Tabela de estado vivo do robô (lida pelo dashboard em tempo real)
             cursor.execute("""
