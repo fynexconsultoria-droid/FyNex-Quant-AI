@@ -119,7 +119,7 @@
               <option value="BNB/USDT">BNB/USDT</option>
               <option value="XRP/USDT">XRP/USDT</option>
             </optgroup>
-            <optgroup label="Forex & Metais (Estilo XTB)">
+            <optgroup label="Forex (Pares de Moedas)">
               <option value="EUR/USD">EUR/USD</option>
               <option value="GBP/USD">GBP/USD</option>
               <option value="USD/JPY">USD/JPY</option>
@@ -127,7 +127,20 @@
               <option value="EUR/BRL">EUR/BRL</option>
               <option value="AUD/USD">AUD/USD</option>
               <option value="USD/CHF">USD/CHF</option>
+            </optgroup>
+            <optgroup label="Metais Preciosos, Energia &amp; Terras Raras">
               <option value="XAU/USD">XAU/USD (Ouro)</option>
+              <option value="XAG/USD">XAG/USD (Prata)</option>
+              <option value="XPT/USD">XPT/USD (Platina)</option>
+              <option value="COPPER/USD">COPPER/USD (Cobre)</option>
+              <option value="OIL/USD">OIL/USD (Petróleo WTI)</option>
+              <option value="BRENT/USD">BRENT/USD (Petróleo Brent)</option>
+              <option value="NATGAS/USD">NATGAS/USD (Gás Natural)</option>
+              <option value="REMX/USD">REMX/USD (Terras Raras)</option>
+            </optgroup>
+            <optgroup label="Índices Globais">
+              <option value="US500/USD">US500/USD (S&amp;P 500)</option>
+              <option value="US100/USD">US100/USD (Nasdaq 100)</option>
             </optgroup>
           </select>
           <span class="asset-category-pill crypto" id="activeCategoryPill">CRIPTO</span>
@@ -246,9 +259,10 @@
             <div class="card watchlist-card">
               <div class="watchlist-header">
                 <h3>Mercados</h3>
-                <div class="watchlist-tabs" id="watchlistTabs">
+                <div class="watchlist-tabs four-tabs" id="watchlistTabs">
                   <button type="button" class="wl-tab active" data-cat="all">Todos</button>
                   <button type="button" class="wl-tab" data-cat="forex">Forex</button>
+                  <button type="button" class="wl-tab" data-cat="commodities">Metais</button>
                   <button type="button" class="wl-tab" data-cat="crypto">Cripto</button>
                 </div>
               </div>

@@ -203,11 +203,24 @@ def test_dashboard_xtb_forex_and_news_endpoints(tmp_path, monkeypatch):
 
     client = TestClient(server.app)
 
-    # Instrumentos incluem Forex e Cripto
+    # Instrumentos incluem Forex, Cripto, Metais/Commodities e Índices
     r_inst = client.get("/api/market/instruments")
     assert r_inst.status_code == 200
     syms = {i["symbol"] for i in r_inst.json()["instruments"]}
-    assert "EUR/USD" in syms and "USD/BRL" in syms and "BTC/USDT" in syms
+    assert {"EUR/USD", "USD/BRL", "BTC/USDT", "XAU/USD", "XAG/USD", "OIL/USD", "REMX/USD", "US500/USD"}.issubset(syms)
+
+    # Filtros por categoria commodities e indices
+    r_comm = client.get("/api/market/instruments?category=commodities")
+    assert r_comm.status_code == 200
+    comm_syms = {i["symbol"] for i in r_comm.json()["instruments"]}
+    assert {"XAU/USD", "XAG/USD", "XPT/USD", "COPPER/USD", "OIL/USD", "BRENT/USD", "NATGAS/USD", "REMX/USD"}.issubset(comm_syms)
+    for sym in ("XAU/USD", "XAG/USD", "OIL/USD", "REMX/USD", "US500/USD"):
+        assert forex_market.is_forex_symbol(sym) is True
+
+    r_idx = client.get("/api/market/instruments?category=indices")
+    assert r_idx.status_code == 200
+    idx_syms = {i["symbol"] for i in r_idx.json()["instruments"]}
+    assert {"US500/USD", "US100/USD"}.issubset(idx_syms)
 
     # Candles Forex roteados corretamente
     r_fx_c = client.get("/api/candles?symbol=EUR/USD&timeframe=5m&limit=10")

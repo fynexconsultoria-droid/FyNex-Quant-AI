@@ -197,8 +197,8 @@ MARKET_INSTRUMENTS: Dict[str, Dict[str, Any]] = {
     "XAU/USD": {
         "symbol": "XAU/USD",
         "name": "Ouro Spot / Dólar EUA",
-        "category": "forex",
-        "badge": "METAL",
+        "category": "commodities",
+        "badge": "OURO",
         "yahoo": "GC=F",
         "decimals": 2,
         "pip_size": 0.1,
@@ -207,6 +207,132 @@ MARKET_INSTRUMENTS: Dict[str, Dict[str, Any]] = {
         "min_lot": 0.01,
         "max_leverage": 50,
         "typical_spread_pips": 2.5,
+    },
+    "XAG/USD": {
+        "symbol": "XAG/USD",
+        "name": "Prata Spot / Dólar EUA",
+        "category": "commodities",
+        "badge": "PRATA",
+        "yahoo": "SI=F",
+        "decimals": 3,
+        "pip_size": 0.01,
+        "contract_size": 1000.0,
+        "default_lot": 0.05,
+        "min_lot": 0.01,
+        "max_leverage": 30,
+        "typical_spread_pips": 2.0,
+    },
+    "XPT/USD": {
+        "symbol": "XPT/USD",
+        "name": "Platina / Dólar EUA",
+        "category": "commodities",
+        "badge": "METAL",
+        "yahoo": "PL=F",
+        "decimals": 2,
+        "pip_size": 0.1,
+        "contract_size": 50.0,
+        "default_lot": 0.05,
+        "min_lot": 0.01,
+        "max_leverage": 20,
+        "typical_spread_pips": 3.0,
+    },
+    "COPPER/USD": {
+        "symbol": "COPPER/USD",
+        "name": "Cobre Industrial / USD",
+        "category": "commodities",
+        "badge": "METAL",
+        "yahoo": "HG=F",
+        "decimals": 4,
+        "pip_size": 0.001,
+        "contract_size": 2500.0,
+        "default_lot": 0.10,
+        "min_lot": 0.01,
+        "max_leverage": 20,
+        "typical_spread_pips": 2.0,
+    },
+    "OIL/USD": {
+        "symbol": "OIL/USD",
+        "name": "Petróleo WTI / USD",
+        "category": "commodities",
+        "badge": "ENERGIA",
+        "yahoo": "CL=F",
+        "decimals": 2,
+        "pip_size": 0.01,
+        "contract_size": 100.0,
+        "default_lot": 0.10,
+        "min_lot": 0.01,
+        "max_leverage": 20,
+        "typical_spread_pips": 3.0,
+    },
+    "BRENT/USD": {
+        "symbol": "BRENT/USD",
+        "name": "Petróleo Brent / USD",
+        "category": "commodities",
+        "badge": "ENERGIA",
+        "yahoo": "BZ=F",
+        "decimals": 2,
+        "pip_size": 0.01,
+        "contract_size": 100.0,
+        "default_lot": 0.10,
+        "min_lot": 0.01,
+        "max_leverage": 20,
+        "typical_spread_pips": 3.0,
+    },
+    "NATGAS/USD": {
+        "symbol": "NATGAS/USD",
+        "name": "Gás Natural / USD",
+        "category": "commodities",
+        "badge": "ENERGIA",
+        "yahoo": "NG=F",
+        "decimals": 3,
+        "pip_size": 0.001,
+        "contract_size": 1000.0,
+        "default_lot": 0.10,
+        "min_lot": 0.01,
+        "max_leverage": 10,
+        "typical_spread_pips": 4.0,
+    },
+    "REMX/USD": {
+        "symbol": "REMX/USD",
+        "name": "Terras Raras (ETF REMX)",
+        "category": "commodities",
+        "badge": "R.EARTH",
+        "yahoo": "REMX",
+        "decimals": 2,
+        "pip_size": 0.01,
+        "contract_size": 100.0,
+        "default_lot": 0.10,
+        "min_lot": 0.01,
+        "max_leverage": 10,
+        "typical_spread_pips": 5.0,
+    },
+    "US500/USD": {
+        "symbol": "US500/USD",
+        "name": "Índice S&P 500 (EUA)",
+        "category": "indices",
+        "badge": "ÍNDICE",
+        "yahoo": "^GSPC",
+        "decimals": 2,
+        "pip_size": 0.1,
+        "contract_size": 1.0,
+        "default_lot": 0.50,
+        "min_lot": 0.05,
+        "max_leverage": 20,
+        "typical_spread_pips": 4.0,
+    },
+    "US100/USD": {
+        "symbol": "US100/USD",
+        "name": "Índice Nasdaq 100 (EUA)",
+        "category": "indices",
+        "badge": "ÍNDICE",
+        "yahoo": "^NDX",
+        "decimals": 2,
+        "pip_size": 0.1,
+        "contract_size": 1.0,
+        "default_lot": 0.10,
+        "min_lot": 0.01,
+        "max_leverage": 20,
+        "typical_spread_pips": 6.0,
     },
 }
 
@@ -225,14 +351,18 @@ _YAHOO_TF_MAP: Dict[str, Tuple[str, str]] = {
 }
 
 
+_NON_CRYPTO_CATEGORIES = ("forex", "commodities", "indices")
+
+
 def is_forex_symbol(symbol: str) -> bool:
+    """Retorna True para instrumentos não-cripto operados via feed global (Forex, Metais, Commodities e Índices)."""
     info = MARKET_INSTRUMENTS.get((symbol or "").upper())
-    return bool(info and info.get("category") == "forex")
+    return bool(info and info.get("category") in _NON_CRYPTO_CATEGORIES)
 
 
 def list_instruments(category: Optional[str] = None) -> List[Dict[str, Any]]:
     items = list(MARKET_INSTRUMENTS.values())
-    if category and category.lower() in ("crypto", "forex"):
+    if category and category.lower() in ("crypto", "forex", "commodities", "indices"):
         items = [i for i in items if i["category"] == category.lower()]
     return items
 
@@ -271,11 +401,11 @@ def _fetch_yahoo_chart(yahoo_ticker: str, interval: str = "1m", range_str: str =
 
 
 def fetch_forex_quote(symbol: str, ttl_seconds: float = 5.0) -> Dict[str, Any]:
-    """Retorna cotação ao vivo de um par Forex/Metal com Bid/Ask, spread em pips e estatísticas 24h."""
+    """Retorna cotação ao vivo de um ativo Forex/Commodity/Índice com Bid/Ask, spread em pips e estatísticas 24h."""
     sym = symbol.upper()
     info = MARKET_INSTRUMENTS.get(sym)
-    if not info or info.get("category") != "forex":
-        raise ValueError(f"Par Forex não suportado: {symbol}")
+    if not info or info.get("category") not in _NON_CRYPTO_CATEGORIES:
+        raise ValueError(f"Instrumento de mercado global não suportado: {symbol}")
 
     now = time.monotonic()
     with _FOREX_QUOTE_CACHE_LOCK:
@@ -311,7 +441,7 @@ def fetch_forex_quote(symbol: str, ttl_seconds: float = 5.0) -> Dict[str, Any]:
     result = {
         "symbol": sym,
         "name": info["name"],
-        "category": "forex",
+        "category": info["category"],
         "badge": info["badge"],
         "price": round(price, info["decimals"]),
         "bid": round(bid, info["decimals"]),
@@ -340,11 +470,11 @@ def fetch_forex_candles(
     limit: int = 150,
     ttl_seconds: float = 10.0,
 ) -> List[Dict[str, Any]]:
-    """Retorna candles OHLCV de Forex formatados para o TradingView Lightweight Charts."""
+    """Retorna candles OHLCV de Forex/Commodities/Índices formatados para o TradingView Lightweight Charts."""
     sym = symbol.upper()
     info = MARKET_INSTRUMENTS.get(sym)
-    if not info or info.get("category") != "forex":
-        raise ValueError(f"Par Forex não suportado: {symbol}")
+    if not info or info.get("category") not in _NON_CRYPTO_CATEGORIES:
+        raise ValueError(f"Instrumento de mercado global não suportado: {symbol}")
 
     safe_limit = max(1, min(int(limit), 1000))
     cache_key = (sym, timeframe, safe_limit)
@@ -408,7 +538,7 @@ def fetch_any_quote(symbol: str) -> Dict[str, Any]:
 
 def fetch_watchlist(category: str = "all") -> List[Dict[str, Any]]:
     """Retorna cotações resumidas para a Watchlist estilo XTB (em paralelo)."""
-    instruments = list_instruments(category if category in ("crypto", "forex") else None)
+    instruments = list_instruments(category if category in ("crypto", "forex", "commodities", "indices") else None)
     results: Dict[str, Dict[str, Any]] = {}
 
     def _load_one(inst: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:

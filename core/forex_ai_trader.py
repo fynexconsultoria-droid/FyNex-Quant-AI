@@ -24,13 +24,19 @@ from core.ml import build_features
 logger = logging.getLogger("QuantTradingBot")
 
 FOREX_AI_PAIRS: Tuple[str, ...] = (
+    # Moedas (Forex)
     "EUR/USD",
     "GBP/USD",
     "USD/JPY",
     "USD/BRL",
     "AUD/USD",
     "USD/CHF",
+    # Metais Preciosos, Energia, Terras Raras & Índices
     "XAU/USD",
+    "XAG/USD",
+    "OIL/USD",
+    "COPPER/USD",
+    "US500/USD",
 )
 
 
@@ -215,7 +221,7 @@ class ForexAITrader:
 
         # 1. Atualiza posições existentes (dispara SL/TP automaticamente se atingido)
         snap = self.store.get_account_snapshot()
-        open_forex = [p for p in snap.get("open_positions", []) if p.get("category") == "forex"]
+        open_forex = [p for p in snap.get("open_positions", []) if p.get("category") != "crypto"]
         open_syms = {p["symbol"] for p in open_forex}
 
         opportunities: List[Dict[str, Any]] = []

@@ -78,7 +78,7 @@ function getInstrumentMeta(symbol = activeSymbol) {
 }
 
 function isActiveForex() {
-  return getInstrumentMeta(activeSymbol).category === "forex";
+  return getInstrumentMeta(activeSymbol).category !== "crypto";
 }
 
 function formatPrice(val, symbol = activeSymbol) {
@@ -86,7 +86,7 @@ function formatPrice(val, symbol = activeSymbol) {
   if (!Number.isFinite(num) || num <= 0) return "--";
   const meta = getInstrumentMeta(symbol);
   const decimals = Number.isInteger(meta.decimals) ? meta.decimals : num >= 100 ? 2 : num >= 1 ? 3 : 5;
-  const prefix = meta.category === "crypto" || symbol === "XAU/USD" ? "$" : "";
+  const prefix = meta.category !== "forex" ? "$" : "";
   return `${prefix}${num.toLocaleString("en-US", {
     minimumFractionDigits: decimals,
     maximumFractionDigits: decimals,
@@ -319,19 +319,26 @@ async function onSymbolChange(newSym) {
 
 function syncActiveAssetUI() {
   const meta = getInstrumentMeta(activeSymbol);
-  const isFx = meta.category === "forex";
+  const cat = meta.category || "crypto";
+  const isGlobal = cat !== "crypto";
 
   const catPill = document.getElementById("activeCategoryPill");
   if (catPill) {
-    catPill.textContent = meta.badge || (isFx ? "FOREX" : "CRIPTO");
-    catPill.className = `asset-category-pill ${isFx ? "forex" : "crypto"}`;
+    catPill.textContent = meta.badge || (isGlobal ? "GLOBAL" : "CRIPTO");
+    catPill.className = `asset-category-pill ${isGlobal ? "forex" : "crypto"}`;
   }
 
   const titleEl = document.getElementById("chartTitle");
   if (titleEl) {
-    titleEl.textContent = isFx
-      ? `${activeSymbol} • Forex (Modo XTB)`
-      : `${activeSymbol} • Binance Spot`;
+    if (cat === "commodities") {
+      titleEl.textContent = `${activeSymbol} • Metais & Commodities (Modo XTB)`;
+    } else if (cat === "indices") {
+      titleEl.textContent = `${activeSymbol} • Índice Global (Modo XTB)`;
+    } else if (cat === "forex") {
+      titleEl.textContent = `${activeSymbol} • Forex (Modo XTB)`;
+    } else {
+      titleEl.textContent = `${activeSymbol} • Binance Spot`;
+    }
   }
 
   const tkSym = document.getElementById("xtbTicketSymbol");
@@ -343,9 +350,9 @@ function syncActiveAssetUI() {
 
   if (tkSym) tkSym.textContent = activeSymbol;
   if (tkName) tkName.textContent = meta.name || activeSymbol;
-  if (tkBadge) tkBadge.textContent = meta.badge || (isFx ? "FOREX" : "CRIPTO");
+  if (tkBadge) tkBadge.textContent = meta.badge || (isGlobal ? "GLOBAL" : "CRIPTO");
   if (tkHint) {
-    tkHint.textContent = isFx
+    tkHint.textContent = isGlobal
       ? `1 lote = ${Number(meta.contract_size).toLocaleString("en-US")} un.`
       : `1 lote = 1 ${activeSymbol.split("/")[0]}`;
   }
@@ -355,7 +362,7 @@ function syncActiveAssetUI() {
     lotsInp.value = String(meta.default_lot || 0.1);
   }
   if (levSel) {
-    const targetLev = isFx ? Math.min(30, meta.max_leverage || 30) : Math.min(10, meta.max_leverage || 10);
+    const targetLev = isGlobal ? Math.min(30, meta.max_leverage || 20) : Math.min(10, meta.max_leverage || 10);
     levSel.value = String(targetLev);
   }
   updateXtbMarginEstimate();
@@ -1803,7 +1810,11 @@ function renderWatchlist() {
   const query = (qInput ? qInput.value : "").trim().toLowerCase();
 
   const filtered = watchlistData.filter((item) => {
-    if (watchlistCategory !== "all" && item.category !== watchlistCategory) return false;
+    if (watchlistCategory === "commodities") {
+      if (item.category !== "commodities" && item.category !== "indices") return false;
+    } else if (watchlistCategory !== "all" && item.category !== watchlistCategory) {
+      return false;
+    }
     if (query) {
       return (
         item.symbol.toLowerCase().includes(query) ||
@@ -1830,7 +1841,7 @@ function renderWatchlist() {
           <div class="wl-left">
             <span class="wl-sym">
               ${escapeHtml(item.symbol)}
-              <span class="asset-category-pill ${item.category === "forex" ? "forex" : "crypto"}" style="font-size:0.56rem;padding:0.06rem 0.3rem;">
+              <span class="asset-category-pill ${item.category !== "crypto" ? "forex" : "crypto"}" style="font-size:0.56rem;padding:0.06rem 0.3rem;">
                 ${escapeHtml(item.badge || "")}
               </span>
             </span>

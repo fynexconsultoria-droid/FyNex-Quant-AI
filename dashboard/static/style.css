@@ -2865,3 +2865,7 @@ body {
     display: none;
   }
 }
+
+.watchlist-tabs.four-tabs {
+  grid-template-columns: repeat(4, 1fr);
+}

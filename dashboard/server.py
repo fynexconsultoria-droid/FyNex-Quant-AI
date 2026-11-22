@@ -466,14 +466,14 @@ def get_live_market_ticker(symbol: str = Query(default="BTC/USDT", max_length=20
 
 
 @app.get("/api/market/instruments")
-def get_market_instruments(category: Optional[str] = Query(default=None, pattern="^(crypto|forex)$")):
-    """Lista os instrumentos disponíveis (Cripto Spot + Forex / Moedas estilo XTB)."""
+def get_market_instruments(category: Optional[str] = Query(default=None, pattern="^(crypto|forex|commodities|indices)$")):
+    """Lista os instrumentos disponíveis (Cripto Spot + Forex + Metais/Commodities + Índices)."""
     return {"instruments": forex_market.list_instruments(category=category)}
 
 
 @app.get("/api/market/watchlist")
-def get_market_watchlist(category: str = Query(default="all", pattern="^(all|crypto|forex)$")):
-    """Retorna cotações resumidas ao vivo da Watchlist multi-ativos (Cripto + Forex)."""
+def get_market_watchlist(category: str = Query(default="all", pattern="^(all|crypto|forex|commodities|indices)$")):
+    """Retorna cotações resumidas ao vivo da Watchlist multi-ativos."""
     return {"items": forex_market.fetch_watchlist(category=category)}
 
 
