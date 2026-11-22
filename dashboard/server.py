@@ -35,7 +35,7 @@ if BASE_DIR not in sys.path:
 
 import binance_client  # noqa: E402
 import train_ai  # noqa: E402
-from core import forex_market, macro_intelligence, news_feed  # noqa: E402
+from core import forex_ai_trader, forex_market, macro_intelligence, news_feed  # noqa: E402
 from core.database import TradingDatabase  # noqa: E402
 from strategy_config import get_strategy_profile, DEFAULT_TIMEFRAME  # noqa: E402
 from trading_bot import (  # noqa: E402
@@ -536,6 +536,17 @@ def get_xtb_account():
     """Retorna saldo, equity, margem, posições abertas com PnL ao vivo e histórico da mesa XTB."""
     store = _get_xtb_store()
     return store.get_account_snapshot()
+
+
+@app.get("/api/forex/ai-status")
+def get_forex_ai_status():
+    """Retorna se o mercado Forex está aberto agora e status do scanner autônomo de pares de moedas."""
+    is_open, msg = forex_ai_trader.is_forex_market_open()
+    return {
+        "market_open": is_open,
+        "status_message": msg,
+        "monitored_pairs": list(forex_ai_trader.FOREX_AI_PAIRS),
+    }
 
 
 @app.post("/api/xtb/order", dependencies=[Depends(require_csrf)])

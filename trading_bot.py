@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 import binance_client
-from core import entry_guard, macro_intelligence
+from core import entry_guard, forex_ai_trader, macro_intelligence
 from core.database import TIMEFRAME_MS, TradingDatabase, timeframe_to_ms, timeframe_to_seconds
 from core.logging_setup import (
     BASE_DIR,
@@ -191,6 +191,7 @@ class TradingBotRunner:
         # Estado em runtime (inicializado em `run()`)
         self.db = TradingDatabase(db_path=self.db_path)
         self.macro_store = macro_intelligence.MacroLearningStore(db_path=self.db_path)
+        self.forex_trader = forex_ai_trader.ForexAITrader(db_path=self.db_path)
         self.model_storage = ModelPersistence(models_dir=DEFAULT_MODELS_DIR)
         self.exchange: Any = None
         self.positions: Optional[PositionManager] = None
@@ -691,6 +692,12 @@ class TradingBotRunner:
 
         self._maybe_trigger_retrain()
         self._run_inference(closed_ts, closed_close, current_price)
+
+        # Em paralelo, escaneia pares de moedas (Forex) quando o mercado estiver aberto
+        try:
+            self.forex_trader.run_cycle(macro_snapshot=self.last_macro)
+        except Exception as e:
+            logger.warning(f"   ⚠️ [FOREX IA] Erro no ciclo de pares de moedas: {e}")
 
     def _emit_heartbeat(self, current_price: float) -> None:
         assert self.positions is not None

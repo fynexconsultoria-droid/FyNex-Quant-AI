@@ -239,3 +239,76 @@ def test_dashboard_xtb_forex_and_news_endpoints(tmp_path, monkeypatch):
     r_close = client.post(f"/api/xtb/close/{pos_id}", headers={"X-CSRF-Token": server.CSRF_TOKEN})
     assert r_close.status_code == 200
     assert r_close.json()["status"] == "closed"
+
+
+# ----------------------------------------- 5. Operador Autônomo de Forex (Horário + Melhores Oportunidades)
+def test_forex_market_hours_and_autonomous_trader(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+    import numpy as np
+    from core import forex_ai_trader
+
+    # Sábado -> fechado | Domingo 15h UTC -> fechado | Quarta 14h UTC -> aberto | Sexta 22h UTC -> fechado
+    assert forex_ai_trader.is_forex_market_open(datetime(2026, 11, 21, 14, 0, tzinfo=timezone.utc))[0] is False
+    assert forex_ai_trader.is_forex_market_open(datetime(2026, 11, 22, 15, 0, tzinfo=timezone.utc))[0] is False
+    assert forex_ai_trader.is_forex_market_open(datetime(2026, 11, 25, 14, 0, tzinfo=timezone.utc))[0] is True
+    assert forex_ai_trader.is_forex_market_open(datetime(2026, 11, 27, 22, 0, tzinfo=timezone.utc))[0] is False
+
+    # Gera série de alta realista com pullbacks (RSI ~58-62, sem sobrecompra)
+    base_ts = 1_700_000_000
+    closes = []
+    p = 1.0700
+    for i in range(60):
+        step = 0.0006 if (i % 2 == 0) else -0.0004
+        p += step
+        closes.append(round(p, 5))
+    fake_candles = [
+        {
+            "time": base_ts + i * 3600,
+            "open": c - 0.0002,
+            "high": c + 0.0006,
+            "low": c - 0.0005,
+            "close": c,
+            "volume": 1000.0,
+        }
+        for i, c in enumerate(closes)
+    ]
+
+    monkeypatch.setattr(forex_market, "fetch_forex_candles", lambda sym, timeframe="1h", limit=80: fake_candles)
+    monkeypatch.setattr(
+        forex_market,
+        "fetch_forex_quote",
+        lambda sym: {
+            "symbol": sym, "category": "forex", "price": 1.0840, "bid": 1.0839, "ask": 1.0840,
+            "spread": 0.0001, "spread_pips": 1.0, "spread_pct": 0.009, "change_24h_pct": 0.4,
+            "high_24h": 1.086, "low_24h": 1.078, "volume_24h": 10000, "latency_ms": 20.0, "timestamp": base_ts * 1000,
+        },
+    )
+
+    trader = forex_ai_trader.ForexAITrader(
+        db_path=str(tmp_path / "fx_ai.db"),
+        pairs=("EUR/USD",),
+        min_score=65.0,
+    )
+
+    # No fim de semana não abre nada
+    rep_closed = trader.run_cycle(
+        macro_snapshot={"dxy_change_pct": -0.35},
+        now_utc=datetime(2026, 11, 22, 15, 0, tzinfo=timezone.utc),
+    )
+    assert rep_closed["market_open"] is False
+    assert rep_closed["last_action"] is None
+
+    # Em dia útil com mercado aberto -> identifica oportunidade BUY em EUR/USD e abre na mesa XTB!
+    rep_open = trader.run_cycle(
+        macro_snapshot={"dxy_change_pct": -0.35},
+        now_utc=datetime(2026, 11, 25, 14, 0, tzinfo=timezone.utc),
+    )
+    assert rep_open["market_open"] is True
+    assert rep_open["last_action"] is not None
+    assert "EUR/USD" in rep_open["last_action"]
+
+    # Endpoint /api/forex/ai-status responde 200
+    client = TestClient(server.app)
+    r = client.get("/api/forex/ai-status")
+    assert r.status_code == 200
+    assert "market_open" in r.json()
