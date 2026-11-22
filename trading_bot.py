@@ -179,6 +179,7 @@ class TradingBotRunner:
                 f"Confiança={profile.confidence:.0%}"
             )
 
+        self.profile = profile
         self.stop_loss_pct = profile.sl_pct
         self.take_profit_pct = profile.tp_pct
         self.horizon_candles = profile.horizon_candles
@@ -345,6 +346,13 @@ class TradingBotRunner:
             take_profit_pct=self.take_profit_pct,
             stop_loss_pct=self.stop_loss_pct,
             horizon_candles=self.horizon_candles,
+            use_atr_barriers=self.profile.use_atr_barriers,
+            atr_tp_mult=self.profile.atr_tp_mult,
+            atr_sl_mult=self.profile.atr_sl_mult,
+            min_tp_pct=self.profile.min_tp_pct,
+            max_tp_pct=self.profile.max_tp_pct,
+            min_sl_pct=self.profile.min_sl_pct,
+            max_sl_pct=self.profile.max_sl_pct,
         )
         try:
             self.model, self.current_model_acc = train_model(
@@ -432,6 +440,13 @@ class TradingBotRunner:
                 take_profit_pct=self.take_profit_pct,
                 stop_loss_pct=self.stop_loss_pct,
                 horizon_candles=self.horizon_candles,
+                use_atr_barriers=self.profile.use_atr_barriers,
+                atr_tp_mult=self.profile.atr_tp_mult,
+                atr_sl_mult=self.profile.atr_sl_mult,
+                min_tp_pct=self.profile.min_tp_pct,
+                max_tp_pct=self.profile.max_tp_pct,
+                min_sl_pct=self.profile.min_sl_pct,
+                max_sl_pct=self.profile.max_sl_pct,
             )
             challenger, new_acc = train_model(
                 retrain_dataset,
@@ -605,10 +620,19 @@ class TradingBotRunner:
                 cooldown_seconds=cooldown_sec,
             )
             if safe_to_enter:
+                cur_atr = feat_dict.get("atr_pct")
+                dyn_tp, dyn_sl = resolve_barriers(self.profile, atr_pct=float(cur_atr) if cur_atr is not None else None)
                 logger.info(
-                    f"   🛡️ [ENTRADA APROVADA] IA ({prob_up:.1%} >= {effective_confidence:.1%}) + Confluência Técnica/Macro OK."
+                    f"   🛡️ [ENTRADA APROVADA] IA ({prob_up:.1%} >= {effective_confidence:.1%}) + Confluência OK | "
+                    f"Alvo Dinâmico de Mercado: TP {dyn_tp*100:.2f}% / SL {dyn_sl*100:.2f}%"
                 )
-                self.positions.try_open(current_price, active_ver, prob_up)
+                self.positions.try_open(
+                    current_price,
+                    active_ver,
+                    prob_up,
+                    tp_pct_override=dyn_tp,
+                    sl_pct_override=dyn_sl,
+                )
             else:
                 logger.info(f"   🛡️ [ENTRADA BLOQUEADA POR SEGURANÇA] {' | '.join(guard_reasons)}")
         elif not self.positions.in_position and pred == 1 and prob_up < effective_confidence:

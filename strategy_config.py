@@ -77,6 +77,13 @@ STRATEGY_PROFILES: Dict[str, StrategyProfile] = {
         horizon_candles=18,
         confidence=0.65,
         retrain_every=6,
+        use_atr_barriers=True,
+        atr_tp_mult=2.0,
+        atr_sl_mult=1.3,
+        min_tp_pct=0.0080,
+        max_tp_pct=0.0250,
+        min_sl_pct=0.0050,
+        max_sl_pct=0.0150,
     ),
 }
 

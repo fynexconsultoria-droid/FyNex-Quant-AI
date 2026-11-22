@@ -328,9 +328,19 @@ class PositionManager:
         else:
             logger.error("   ⚠️ Sem proteção OCO na exchange: SL/TP serão geridos apenas pelo robô.")
 
-    def try_open(self, current_price: float, model_version: int, confidence: float) -> bool:
+    def try_open(
+        self,
+        current_price: float,
+        model_version: int,
+        confidence: float,
+        tp_pct_override: Optional[float] = None,
+        sl_pct_override: Optional[float] = None,
+    ) -> bool:
         if self.in_position:
             return False
+
+        eff_tp_pct = float(tp_pct_override) if tp_pct_override is not None and tp_pct_override > 0 else self.take_profit_pct
+        eff_sl_pct = float(sl_pct_override) if sl_pct_override is not None and sl_pct_override > 0 else self.stop_loss_pct
 
         if self.risk:
             allowed, reason = self.risk.can_open(
@@ -356,8 +366,8 @@ class PositionManager:
                 symbol=self.symbol, timeframe=self.timeframe, mode=self.mode,
                 model_version=model_version, entry_time=utc_now_str(),
                 entry_price=current_price, quantity=0.0, order_id=cid,
-                sl_price=current_price * (1.0 - self.stop_loss_pct),
-                tp_price=current_price * (1.0 + self.take_profit_pct),
+                sl_price=current_price * (1.0 - eff_sl_pct),
+                tp_price=current_price * (1.0 + eff_tp_pct),
                 base_balance_before=base_before, status="PENDING",
             )
             self.store.save(pending_pos)
@@ -385,8 +395,8 @@ class PositionManager:
             symbol=self.symbol, timeframe=self.timeframe, mode=self.mode,
             model_version=model_version, entry_time=utc_now_str(),
             entry_price=entry_price, quantity=qty, order_id=order_id,
-            sl_price=entry_price * (1.0 - self.stop_loss_pct),
-            tp_price=entry_price * (1.0 + self.take_profit_pct),
+            sl_price=entry_price * (1.0 - eff_sl_pct),
+            tp_price=entry_price * (1.0 + eff_tp_pct),
             base_balance_before=base_before, status="OPEN",
         )
         self._persist()
@@ -508,11 +518,32 @@ class PositionManager:
         low_check = min(current_price, candle_low) if candle_low is not None else current_price
         high_check = max(current_price, candle_high) if candle_high is not None else current_price
 
+        # Proteção dinâmica de lucro (Breakeven + Trailing):
+        # Ao atingir 60% do alvo, protege no breakeven (+taxas); acima de 80%, trava metade do lucro.
+        tp_dist = pos.tp_price - pos.entry_price
+        if tp_dist > 0 and high_check > pos.entry_price:
+            progress = (high_check - pos.entry_price) / tp_dist
+            new_sl = pos.sl_price
+            if progress >= 0.80:
+                trail_sl = pos.entry_price + (high_check - pos.entry_price) * 0.50
+                new_sl = max(new_sl, trail_sl)
+            elif progress >= 0.60:
+                be_sl = pos.entry_price * 1.0025
+                new_sl = max(new_sl, be_sl)
+            if new_sl > pos.sl_price * 1.0001:
+                pos.sl_price = new_sl
+                self._persist()
+                logger.info(
+                    f"   🛡️ [PROTEÇÃO DE LUCRO] Stop ajustado para ${pos.sl_price:,.2f} "
+                    f"(progresso {progress * 100:.0f}% até o TP ${pos.tp_price:,.2f})."
+                )
+
         # Conservador: se um mesmo candle tocou tanto SL quanto TP, prioriza STOP_LOSS
         if low_check <= pos.sl_price:
             # M7: No paper, se houve gap abaixo do stop, preenche no pior preço real
             exit_p = min(pos.sl_price, current_price) if not self.is_real else current_price
-            self.close("STOP_LOSS", exit_p)
+            reason = "TRAILING_PROFIT" if pos.sl_price > pos.entry_price else "STOP_LOSS"
+            self.close(reason, exit_p)
         elif high_check >= pos.tp_price:
             exit_p = pos.tp_price if not self.is_real else current_price
             self.close("TAKE_PROFIT", exit_p)

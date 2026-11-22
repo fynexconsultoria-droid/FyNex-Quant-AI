@@ -89,6 +89,13 @@ def train_and_select_best_model(
         take_profit_pct=profile.tp_pct,
         stop_loss_pct=profile.sl_pct,
         horizon_candles=profile.horizon_candles,
+        use_atr_barriers=profile.use_atr_barriers,
+        atr_tp_mult=profile.atr_tp_mult,
+        atr_sl_mult=profile.atr_sl_mult,
+        min_tp_pct=profile.min_tp_pct,
+        max_tp_pct=profile.max_tp_pct,
+        min_sl_pct=profile.min_sl_pct,
+        max_sl_pct=profile.max_sl_pct,
     )
 
     storage = ModelPersistence(models_dir=models_dir)

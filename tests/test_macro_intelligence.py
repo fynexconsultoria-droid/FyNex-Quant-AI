@@ -182,3 +182,63 @@ def test_global_factors_and_ai_evolution_progress(tmp_path, monkeypatch):
     r = client.get("/api/ai/evolution?symbol=BTC/USDT&timeframe=30m")
     assert r.status_code == 200
     assert "evolution" in r.json() and "macro" in r.json()
+
+
+def test_dynamic_atr_barriers_training_and_trailing_profit(tmp_path):
+    import numpy as np
+    import pandas as pd
+    import position_manager as pm
+    import trading_bot as tb
+    from core.ml import build_features, create_target
+    from strategy_config import get_strategy_profile, resolve_barriers
+
+    p1h = get_strategy_profile("1h")
+    assert p1h.use_atr_barriers is True
+
+    # Mercado calmo (ATR 0.45%) -> TP razoável ~0.90%, SL ~0.585%
+    tp_calm, sl_calm = resolve_barriers(p1h, atr_pct=0.0045)
+    assert tp_calm == pytest.approx(0.009)
+    assert sl_calm == pytest.approx(0.00585)
+
+    # Mercado agitado (ATR 1.50%) -> respeita teto seguro TP 2.5%, SL 1.5%
+    tp_vol, sl_vol = resolve_barriers(p1h, atr_pct=0.015)
+    assert tp_vol == pytest.approx(0.025)
+    assert sl_vol == pytest.approx(0.015)
+
+    # create_target com use_atr_barriers=True funciona sem erros
+    rng = np.random.default_rng(12)
+    closes = 60000.0 * np.cumprod(1.0 + rng.normal(0.0005, 0.005, size=100))
+    df = pd.DataFrame({
+        "timestamp": pd.to_datetime([1_700_000_000_000 + i * 3_600_000 for i in range(100)], unit="ms"),
+        "open": closes,
+        "high": closes * 1.006,
+        "low": closes * 0.995,
+        "close": closes,
+        "volume": np.full(100, 10.0),
+    })
+    feat, _ = build_features(df)
+    ds = create_target(feat, mode="triple_barrier", use_atr_barriers=True, horizon_candles=8)
+    assert not ds.empty and "Target" in ds.columns
+
+    # Proteção de Lucro (Breakeven + Trailing Profit) no PositionManager
+    db = tb.TradingDatabase(db_path=str(tmp_path / "trail.db"))
+    mgr = pm.PositionManager(
+        db, object(), mode="paper", symbol="BTC/USDT", timeframe="1h",
+        stop_loss_pct=0.011, take_profit_pct=0.018, trade_amount_usdt=50.0, use_exchange_oco=False,
+    )
+    assert mgr.try_open(100_000.0, 1, 0.70, tp_pct_override=0.010, sl_pct_override=0.006)
+    assert mgr.position.tp_price == pytest.approx(101_000.0)
+    assert mgr.position.sl_price == pytest.approx(99_400.0)
+
+    # Preço avança 85% até o alvo (100.850) -> trailing sobe o stop acima da entrada (~100.425)
+    mgr.check_exits(100_850.0, candle_high=100_850.0, candle_low=100_500.0)
+    assert mgr.in_position
+    assert mgr.position.sl_price > 100_400.0
+
+    # Se mercado recuar e bater no stop protegido -> fecha com TRAILING_PROFIT no lucro!
+    mgr.check_exits(100_400.0, candle_high=100_500.0, candle_low=100_400.0)
+    assert not mgr.in_position
+    with db._get_connection() as conn:
+        t = dict(conn.execute("SELECT * FROM simulated_trades ORDER BY id DESC LIMIT 1").fetchone())
+    assert t["reason"] == "TRAILING_PROFIT"
+    assert t["pnl_usd"] > 0
