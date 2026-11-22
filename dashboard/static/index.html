@@ -655,6 +655,54 @@
             </div>
           </div>
 
+          <!-- Copiloto XTB (Modo Híbrido: Binance Automática + Sinais Prontos para xStation 5) -->
+          <div class="card copilot-card" id="xtbCopilotCard">
+            <div class="card-header">
+              <div>
+                <h3>🧭 Copiloto XTB — Sinais Prontos para xStation 5 (Modo Híbrido)</h3>
+                <span class="ticket-sub" id="copilotMarketStatus">Binance: Cripto Automático • XTB: Sinais prontos de Forex, Ouro, Prata, Petróleo e Índices</span>
+              </div>
+              <div class="copilot-actions">
+                <span class="xtb-tag" id="copilotModeBadge">⚡ HÍBRIDO ATIVO</span>
+                <button type="button" class="btn btn-secondary" id="btnCopilotSound" title="Ativar/Desativar alerta sonoro quando surgir novo sinal">🔊 Som: ON</button>
+                <button type="button" class="btn btn-secondary" id="btnToggleTelegramBox" title="Receber alertas no celular via Telegram">📲 Telegram</button>
+                <button type="button" class="btn btn-primary" id="btnScanXtbNow">🔎 Escanear XTB Agora</button>
+              </div>
+            </div>
+
+            <!-- Configuração Opcional do Telegram (Colapsável) -->
+            <div class="copilot-telegram-box" id="copilotTelegramBox" style="display:none;">
+              <div class="copilot-tg-grid">
+                <input type="password" id="tgBotTokenInput" class="search-input" placeholder="Bot Token do @BotFather (ex: 123456:ABC...)" autocomplete="off">
+                <input type="text" id="tgChatIdInput" class="search-input" placeholder="Seu Chat ID (ex: 987654321)" autocomplete="off">
+                <button type="button" class="btn btn-primary" id="btnSaveTelegram">💾 Salvar &amp; Testar</button>
+              </div>
+              <span class="ticket-sub" id="tgConfigStatus">Opcional: receba alertas instantâneos no Telegram quando a IA encontrar uma entrada forte para a XTB.</span>
+            </div>
+
+            <div class="table-scroll" style="margin-top:0.65rem;">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Horário</th>
+                    <th>Ticker xStation 5</th>
+                    <th>Direção</th>
+                    <th>Score IA</th>
+                    <th>Entrada</th>
+                    <th>Stop Loss</th>
+                    <th>Take Profit</th>
+                    <th>Lote / Alav.</th>
+                    <th>Motivo</th>
+                    <th>Ações</th>
+                  </tr>
+                </thead>
+                <tbody id="xtbCopilotBody">
+                  <tr><td colspan="10" class="empty-cell">Nenhum sinal XTB gerado ainda. Clique em "Escanear XTB Agora" quando o mercado global estiver aberto.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
           <!-- Centro de Treinamento da IA -->
           <div class="card">
             <div class="card-header">

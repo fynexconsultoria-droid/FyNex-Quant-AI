@@ -2869,3 +2869,72 @@ body {
 .watchlist-tabs.four-tabs {
   grid-template-columns: repeat(4, 1fr);
 }
+
+.copilot-card {
+  border-color: rgba(56, 189, 248, 0.22);
+}
+
+.copilot-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.copilot-actions .btn {
+  height: 32px;
+  padding: 0 0.7rem;
+  font-size: 0.78rem;
+}
+
+.copilot-telegram-box {
+  margin-top: 0.65rem;
+  padding: 0.75rem;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(56, 189, 248, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.copilot-tg-grid {
+  display: grid;
+  grid-template-columns: 1fr 220px auto;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.copilot-btn-row {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.copilot-mini-btn {
+  padding: 0.22rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-main);
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.copilot-mini-btn:hover {
+  background: rgba(0, 242, 254, 0.14);
+  border-color: rgba(0, 242, 254, 0.4);
+}
+
+.copilot-mini-btn.done {
+  background: rgba(16, 185, 129, 0.16);
+  border-color: rgba(16, 185, 129, 0.4);
+  color: #34d399;
+}
+
+@media (max-width: 900px) {
+  .copilot-tg-grid {
+    grid-template-columns: 1fr;
+  }
+}

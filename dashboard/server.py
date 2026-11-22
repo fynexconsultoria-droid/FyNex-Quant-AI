@@ -35,7 +35,7 @@ if BASE_DIR not in sys.path:
 
 import binance_client  # noqa: E402
 import train_ai  # noqa: E402
-from core import forex_ai_trader, forex_market, macro_intelligence, news_feed  # noqa: E402
+from core import forex_ai_trader, forex_market, macro_intelligence, news_feed, xtb_copilot  # noqa: E402
 from core.database import TradingDatabase  # noqa: E402
 from strategy_config import get_strategy_profile, DEFAULT_TIMEFRAME  # noqa: E402
 from trading_bot import (  # noqa: E402
@@ -547,6 +547,91 @@ def get_forex_ai_status():
         "status_message": msg,
         "monitored_pairs": list(forex_ai_trader.FOREX_AI_PAIRS),
     }
+
+
+class CopilotStatusPayload(BaseModel):
+    status: str
+
+
+class TelegramConfigPayload(BaseModel):
+    bot_token: str = ""
+    chat_id: str = ""
+    send_test: bool = False
+
+
+def _get_xtb_copilot() -> xtb_copilot.XTBCopilotStore:
+    return xtb_copilot.XTBCopilotStore(db_path=DB_PATH)
+
+
+@app.get("/api/xtb/copilot/signals")
+def get_xtb_copilot_signals(limit: int = Query(default=25, ge=1, le=100)):
+    """Retorna os sinais prontos do Copiloto XTB (xStation 5) e status do mercado global."""
+    is_open, msg = forex_ai_trader.is_forex_market_open()
+    store = _get_xtb_copilot()
+    signals = store.list_signals(limit=limit)
+    new_count = sum(1 for s in signals if s.get("status") == "NEW")
+    tg = xtb_copilot.get_telegram_config()
+    return {
+        "mode": "HYBRID",
+        "binance_mode": "AUTO_CRYPTO",
+        "xtb_mode": "COPILOT_XSTATION5",
+        "market_open": is_open,
+        "status_message": msg,
+        "monitored_pairs": list(forex_ai_trader.FOREX_AI_PAIRS),
+        "new_count": new_count,
+        "telegram": tg,
+        "signals": signals,
+    }
+
+
+@app.post("/api/xtb/copilot/scan", dependencies=[Depends(require_csrf)])
+def trigger_xtb_copilot_scan():
+    """Executa uma varredura imediata de oportunidades Forex, Metais, Energia e Índices para o Copiloto XTB."""
+    try:
+        macro_snap = macro_intelligence.fetch_macro_snapshot()
+    except Exception:
+        macro_snap = None
+    trader = forex_ai_trader.ForexAITrader(db_path=DB_PATH)
+    report = trader.run_cycle(macro_snapshot=macro_snap)
+    signals = _get_xtb_copilot().list_signals(limit=25)
+    return {
+        "status": "scanned",
+        "market_open": report.get("market_open", False),
+        "status_message": report.get("status_message", ""),
+        "last_action": report.get("last_action"),
+        "opportunities": report.get("opportunities", []),
+        "signals": signals,
+    }
+
+
+@app.post("/api/xtb/copilot/signals/{signal_id}/status", dependencies=[Depends(require_csrf)])
+def update_xtb_copilot_signal_status(signal_id: int, payload: CopilotStatusPayload):
+    """Marca um sinal do Copiloto XTB como EXECUTED_XTB ou DISMISSED."""
+    store = _get_xtb_copilot()
+    try:
+        updated = store.update_status(signal_id=signal_id, status=payload.status)
+        return {"status": "updated", "signal": updated}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/xtb/copilot/telegram")
+def get_xtb_copilot_telegram():
+    """Retorna se os alertas do Copiloto XTB via Telegram estão configurados."""
+    return xtb_copilot.get_telegram_config()
+
+
+@app.post("/api/xtb/copilot/telegram", dependencies=[Depends(require_csrf)])
+def save_xtb_copilot_telegram(payload: TelegramConfigPayload):
+    """Salva configurações opcionais do Telegram para alertas do Copiloto XTB e envia mensagem de teste."""
+    cfg = xtb_copilot.save_telegram_config(bot_token=payload.bot_token, chat_id=payload.chat_id)
+    test_result = None
+    if payload.send_test:
+        test_result = xtb_copilot.send_telegram_message(
+            "✅ FyNex Quant AI — Copiloto XTB conectado com sucesso! "
+            "Você receberá aqui os alertas de Forex, Ouro, Prata, Petróleo e Índices prontos para a xStation 5."
+        )
+    return {"status": "saved", "telegram": cfg, "test_result": test_result}
 
 
 @app.post("/api/xtb/order", dependencies=[Depends(require_csrf)])

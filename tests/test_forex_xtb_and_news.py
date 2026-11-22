@@ -320,8 +320,79 @@ def test_forex_market_hours_and_autonomous_trader(tmp_path, monkeypatch):
     assert rep_open["last_action"] is not None
     assert "EUR/USD" in rep_open["last_action"]
 
+    # Verifica que o Copiloto XTB registrou o sinal com ticker oficial xStation 5
+    copilot_sigs = trader.copilot.list_signals()
+    assert len(copilot_sigs) == 1
+    assert copilot_sigs[0]["xtb_symbol"] == "EURUSD"
+    assert copilot_sigs[0]["side"] == "BUY"
+    assert copilot_sigs[0]["status"] == "NEW"
+
     # Endpoint /api/forex/ai-status responde 200
     client = TestClient(server.app)
     r = client.get("/api/forex/ai-status")
     assert r.status_code == 200
     assert "market_open" in r.json()
+
+
+# ----------------------------------------- 6. Copiloto XTB (Modo Híbrido: Sinais, Deduplicação, Status e API)
+def test_xtb_copilot_store_and_endpoints(tmp_path, monkeypatch):
+    from core import xtb_copilot
+
+    db_file = str(tmp_path / "copilot_test.db")
+    monkeypatch.setattr(server, "DB_PATH", db_file)
+
+    assert xtb_copilot.to_xtb_symbol("XAU/USD") == "GOLD"
+    assert xtb_copilot.to_xtb_symbol("XAG/USD") == "SILVER"
+    assert xtb_copilot.to_xtb_symbol("OIL/USD") == "OIL.WTI"
+    assert xtb_copilot.to_xtb_symbol("US500/USD") == "US500"
+
+    store = xtb_copilot.XTBCopilotStore(db_path=db_file)
+    s1 = store.record_signal(
+        symbol="XAU/USD",
+        side="BUY",
+        score=84.0,
+        entry_price=2650.5,
+        sl_price=2625.0,
+        tp_price=2700.0,
+        suggested_lots=0.05,
+        leverage=20,
+        reason="EMA alta, DXY -0.35%",
+        notify_telegram=False,
+    )
+    assert s1["xtb_symbol"] == "GOLD"
+    assert s1["deduplicated"] is False
+
+    # Deduplicação dentro da janela de 2h
+    s2 = store.record_signal(
+        symbol="XAU/USD",
+        side="BUY",
+        score=86.0,
+        entry_price=2652.0,
+        sl_price=2626.0,
+        tp_price=2702.0,
+        suggested_lots=0.05,
+        leverage=20,
+        notify_telegram=False,
+    )
+    assert s2["deduplicated"] is True
+    assert s2["id"] == s1["id"]
+
+    client = TestClient(server.app)
+    r_list = client.get("/api/xtb/copilot/signals")
+    assert r_list.status_code == 200
+    body = r_list.json()
+    assert body["mode"] == "HYBRID"
+    assert body["new_count"] == 1
+    assert body["signals"][0]["xtb_symbol"] == "GOLD"
+
+    # CSRF exigido ao atualizar status
+    r_no_csrf = client.post(f"/api/xtb/copilot/signals/{s1['id']}/status", json={"status": "EXECUTED_XTB"})
+    assert r_no_csrf.status_code == 403
+
+    r_ok = client.post(
+        f"/api/xtb/copilot/signals/{s1['id']}/status",
+        headers={"X-CSRF-Token": server.CSRF_TOKEN},
+        json={"status": "EXECUTED_XTB"},
+    )
+    assert r_ok.status_code == 200
+    assert r_ok.json()["signal"]["status"] == "EXECUTED_XTB"

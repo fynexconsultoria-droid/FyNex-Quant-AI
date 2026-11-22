@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from core import forex_market
+from core import forex_market, xtb_copilot
 from core.ml import build_features
 
 logger = logging.getLogger("QuantTradingBot")
@@ -196,6 +196,7 @@ class ForexAITrader:
         self.max_open_forex_positions = max_open_forex_positions
         self.leverage = leverage
         self.store = forex_market.XTBDeskStore(db_path=db_path)
+        self.copilot = xtb_copilot.XTBCopilotStore(db_path=db_path)
         self.last_scan_report: Dict[str, Any] = {
             "market_open": False,
             "status_message": "Aguardando primeiro ciclo",
@@ -284,6 +285,23 @@ class ForexAITrader:
                         tp_price=tp_price,
                         quote_override=q,
                     )
+                    # Registra sinal pronto no Copiloto XTB (com ticker exato da xStation 5 + alerta Telegram opcional)
+                    try:
+                        self.copilot.record_signal(
+                            symbol=sym,
+                            side=best["side"],
+                            score=best["score"],
+                            entry_price=pos["entry_price"],
+                            sl_price=sl_price,
+                            tp_price=tp_price,
+                            suggested_lots=safe_lot,
+                            leverage=min(self.leverage, int(inst.get("max_leverage", 30))),
+                            reason=best.get("reason", "Confluência técnica + macro"),
+                            notify_telegram=True,
+                        )
+                    except Exception as cop_err:
+                        logger.debug(f"[COPILOTO XTB] Falha ao gravar sinal para {sym}: {cop_err}")
+
                     last_action = (
                         f"Ordem {pos['side']} {pos['lots']} lote(s) em {sym} @ {pos['entry_price']} "
                         f"(Score {best['score']:.0f}/100 | TP {tp_price} | SL {sl_price})"
