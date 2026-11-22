@@ -485,6 +485,7 @@ def get_binance_exchange(
         "timeout": timeout,
         "options": {
             "defaultType": "spot",
+            "fetchMarkets": ["spot"],
             "adjustForTimeDifference": True,
             "recvWindow": 10000,
         },
