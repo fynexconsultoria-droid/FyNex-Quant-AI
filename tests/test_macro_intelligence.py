@@ -279,3 +279,42 @@ def test_real_mode_updates_binance_oco_on_trailing_profit(tmp_path, monkeypatch)
     assert ("cancel", "OCO_OLD") in events
     assert mgr.position.oco_list_id == "OCO_NEW"
     assert mgr.position.sl_price > 100_600.0
+
+
+def test_cash_management_chop_block_and_dynamic_sizing():
+    from core.entry_guard import compute_safe_position_size, evaluate_entry_safety
+
+    # Lateralização severa + 3 perdas seguidas -> bloqueado
+    ok, reasons = evaluate_entry_safety(
+        features_row={"rsi_14": 50.0, "bb_pos": 0.5, "ema_trend_ratio": 0.001, "atr_pct": 0.005, "adx_14": 0.10, "bb_width": 0.005},
+        consecutive_losses=3,
+    )
+    assert ok is False
+    assert any("lateralizado" in r for r in reasons)
+    assert any("Circuit breaker" in r for r in reasons)
+
+    # Cenário normal -> 100% do caixa ($100)
+    amt_ok, mult_ok, notes_ok = compute_safe_position_size(
+        base_amount_usdt=100.0,
+        features_row={"atr_pct": 0.007, "adx_14": 0.25},
+        macro_snapshot={"regime": "MACRO NEUTRO"},
+        consecutive_losses=0,
+        daily_pnl_usd=0.0,
+        max_daily_loss_usdt=20.0,
+    )
+    assert amt_ok == pytest.approx(100.0)
+    assert mult_ok == pytest.approx(1.0)
+    assert notes_ok == []
+
+    # Cenário de volatilidade fora do comum + lateralização + 2 perdas seguidas -> reduz caixa ao mínimo seguro (25%)
+    amt_def, mult_def, notes_def = compute_safe_position_size(
+        base_amount_usdt=100.0,
+        features_row={"atr_pct": 0.020, "adx_14": 0.15},
+        macro_snapshot={"regime": "CAUTELA MACRO"},
+        consecutive_losses=2,
+        daily_pnl_usd=-12.0,
+        max_daily_loss_usdt=20.0,
+    )
+    assert mult_def == pytest.approx(0.25)
+    assert amt_def == pytest.approx(25.0)
+    assert len(notes_def) >= 4

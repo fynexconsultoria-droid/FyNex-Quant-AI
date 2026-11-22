@@ -613,18 +613,33 @@ class TradingBotRunner:
                 last_trade = None
 
             cooldown_sec = timeframe_to_seconds(self.timeframe) * 2
+            consec_losses = self.positions.risk.consecutive_losses() if self.positions.risk else 0
+            daily_pnl = self.positions.risk.daily_pnl_usd() if self.positions.risk else 0.0
+            max_daily_loss = self.positions.risk.max_daily_loss_usdt if self.positions.risk else 20.0
+
             safe_to_enter, guard_reasons = entry_guard.evaluate_entry_safety(
                 features_row=feat_dict,
                 macro_snapshot=self.last_macro,
                 last_trade=last_trade,
                 cooldown_seconds=cooldown_sec,
+                consecutive_losses=consec_losses,
             )
             if safe_to_enter:
                 cur_atr = feat_dict.get("atr_pct")
                 dyn_tp, dyn_sl = resolve_barriers(self.profile, atr_pct=float(cur_atr) if cur_atr is not None else None)
+                safe_amount, size_mult, size_notes = entry_guard.compute_safe_position_size(
+                    base_amount_usdt=self.positions.trade_amount_usdt,
+                    features_row=feat_dict,
+                    macro_snapshot=self.last_macro,
+                    consecutive_losses=consec_losses,
+                    daily_pnl_usd=daily_pnl,
+                    max_daily_loss_usdt=max_daily_loss,
+                )
+                size_detail = f" ({'; '.join(size_notes)})" if size_notes else ""
                 logger.info(
-                    f"   🛡️ [ENTRADA APROVADA] IA ({prob_up:.1%} >= {effective_confidence:.1%}) + Confluência OK | "
-                    f"Alvo Dinâmico de Mercado: TP {dyn_tp*100:.2f}% / SL {dyn_sl*100:.2f}%"
+                    f"   🛡️ [ENTRADA APROVADA] IA ({prob_up:.1%} >= {effective_confidence:.1%}) | "
+                    f"Alvo Dinâmico: TP {dyn_tp*100:.2f}% / SL {dyn_sl*100:.2f}% | "
+                    f"Caixa: ${safe_amount:.2f} ({size_mult*100:.0f}%){size_detail}"
                 )
                 self.positions.try_open(
                     current_price,
@@ -632,6 +647,7 @@ class TradingBotRunner:
                     prob_up,
                     tp_pct_override=dyn_tp,
                     sl_pct_override=dyn_sl,
+                    amount_usdt_override=safe_amount,
                 )
             else:
                 logger.info(f"   🛡️ [ENTRADA BLOQUEADA POR SEGURANÇA] {' | '.join(guard_reasons)}")

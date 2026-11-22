@@ -25,6 +25,10 @@ def evaluate_entry_safety(
     min_ema_trend_ratio: float = -0.002,
     max_atr_pct: float = 0.025,
     max_bb_pos: float = 0.95,
+    min_adx_for_chop: float = 0.14,
+    min_bb_width_for_chop: float = 0.008,
+    consecutive_losses: int = 0,
+    max_consecutive_losses: int = 3,
     now_utc: Optional[datetime] = None,
 ) -> Tuple[bool, List[str]]:
     """
@@ -68,7 +72,23 @@ def evaluate_entry_safety(
             f"Volatilidade extrema (ATR={float(atr_pct)*100:.2f}% > {max_atr_pct*100:.2f}%) — risco de violino no stop."
         )
 
-    # 6. Cooldown após Stop Loss
+    # 6. Filtro Anti-Lateralização Severa (mercado morto / chop: ADX baixo + Bollinger comprimido)
+    adx = features_row.get("adx_14")
+    bb_w = features_row.get("bb_width")
+    if adx is not None and bb_w is not None:
+        if float(adx) < min_adx_for_chop and float(bb_w) < min_bb_width_for_chop:
+            reasons.append(
+                f"Mercado muito lateralizado (ADX={float(adx)*100:.1f} < {min_adx_for_chop*100:.0f} e "
+                f"Bollinger={float(bb_w)*100:.2f}%) — evitando ser estopado em ruído."
+            )
+
+    # 7. Proteção de Caixa contra Sequência de Perdas (Circuit Breaker de Drawdown)
+    if max_consecutive_losses > 0 and consecutive_losses >= max_consecutive_losses:
+        reasons.append(
+            f"Circuit breaker de caixa: {consecutive_losses} perdas seguidas — pausando entradas até estabilizar."
+        )
+
+    # 8. Cooldown após Stop Loss
     if last_trade and cooldown_seconds > 0:
         last_reason = str(last_trade.get("reason", "")).upper()
         last_pnl = float(last_trade.get("pnl_usd", 0.0) or 0.0)
@@ -87,3 +107,63 @@ def evaluate_entry_safety(
                 pass
 
     return len(reasons) == 0, reasons
+
+
+def compute_safe_position_size(
+    base_amount_usdt: float,
+    features_row: Dict[str, Any],
+    macro_snapshot: Optional[Dict[str, Any]] = None,
+    consecutive_losses: int = 0,
+    daily_pnl_usd: float = 0.0,
+    max_daily_loss_usdt: float = 20.0,
+    min_order_usdt: float = 10.0,
+) -> Tuple[float, float, List[str]]:
+    """
+    Gerenciamento dinâmico de caixa (Position Sizing defensivo):
+    Reduz automaticamente o tamanho da entrada em cenários de volatilidade fora do comum,
+    lateralização, cautela macro ou após perdas recentes (anti-martingale).
+
+    Retorna `(valor_usdt_final, fator_multiplicador, lista_de_ajustes)`.
+    """
+    mult = 1.0
+    notes: List[str] = []
+
+    # 1. Volatilidade elevada (ATR %)
+    atr_pct = features_row.get("atr_pct")
+    if atr_pct is not None:
+        atr_f = float(atr_pct)
+        if atr_f > 0.018:
+            mult *= 0.45
+            notes.append(f"Volatilidade muito alta (ATR {atr_f*100:.2f}% → 45%)")
+        elif atr_f > 0.011:
+            mult *= 0.65
+            notes.append(f"Volatilidade elevada (ATR {atr_f*100:.2f}% → 65%)")
+
+    # 2. Tendência fraca / Lateralização moderada (ADX < 18)
+    adx = features_row.get("adx_14")
+    if adx is not None and 0 < float(adx) < 0.18:
+        mult *= 0.65
+        notes.append(f"Mercado lateral/tendência fraca (ADX {float(adx)*100:.1f} → 65%)")
+
+    # 3. Cautela Macro (Dólar / Juros / Notícias)
+    if macro_snapshot:
+        regime = str(macro_snapshot.get("regime", "")).upper()
+        if regime == "CAUTELA MACRO":
+            mult *= 0.75
+            notes.append("Cautela Macro (→ 75%)")
+
+    # 4. Anti-Martingale após perdas recentes ou drawdown diário
+    if consecutive_losses >= 2:
+        mult *= 0.50
+        notes.append(f"{consecutive_losses} perdas seguidas (→ 50%)")
+    elif consecutive_losses == 1:
+        mult *= 0.75
+        notes.append("1 perda recente (→ 75%)")
+
+    if max_daily_loss_usdt > 0 and daily_pnl_usd < -(max_daily_loss_usdt * 0.50):
+        mult *= 0.50
+        notes.append(f"Drawdown diário > 50% (${daily_pnl_usd:+.2f} → 50%)")
+
+    mult = max(0.25, min(1.0, round(mult, 2)))
+    final_amount = round(max(min(base_amount_usdt, min_order_usdt), base_amount_usdt * mult), 2)
+    return final_amount, mult, notes

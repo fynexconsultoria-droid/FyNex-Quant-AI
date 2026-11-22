@@ -138,6 +138,25 @@ class RiskManager:
             """, (self.mode, today)).fetchone()
         return int(row["n"] or 0), float(row["pnl"] or 0.0)
 
+    def consecutive_losses(self) -> int:
+        """Conta quantas operações seguidas terminaram no prejuízo no modo atual."""
+        with self.db._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT pnl_usd FROM simulated_trades WHERE mode = ? ORDER BY id DESC LIMIT 10",
+                (self.mode,),
+            ).fetchall()
+        count = 0
+        for r in rows:
+            if float(r["pnl_usd"] or 0.0) < 0:
+                count += 1
+            else:
+                break
+        return count
+
+    def daily_pnl_usd(self) -> float:
+        _, pnl = self._today_stats()
+        return pnl
+
     def kill_switch_active(self) -> bool:
         return os.path.exists(self.kill_switch_path)
 
@@ -335,16 +354,22 @@ class PositionManager:
         confidence: float,
         tp_pct_override: Optional[float] = None,
         sl_pct_override: Optional[float] = None,
+        amount_usdt_override: Optional[float] = None,
     ) -> bool:
         if self.in_position:
             return False
 
         eff_tp_pct = float(tp_pct_override) if tp_pct_override is not None and tp_pct_override > 0 else self.take_profit_pct
         eff_sl_pct = float(sl_pct_override) if sl_pct_override is not None and sl_pct_override > 0 else self.stop_loss_pct
+        eff_amount_usdt = (
+            float(amount_usdt_override)
+            if amount_usdt_override is not None and amount_usdt_override > 0
+            else self.trade_amount_usdt
+        )
 
         if self.risk:
             allowed, reason = self.risk.can_open(
-                self.trade_amount_usdt,
+                eff_amount_usdt,
                 unrealized_pnl_usd=self.unrealized_pnl_usd(current_price),
             )
             if not allowed:
@@ -374,7 +399,7 @@ class PositionManager:
             self._set_order_in_flight(True)
             try:
                 buy = binance_client.execute_spot_buy(
-                    self.exchange, self.symbol, self.trade_amount_usdt, client_order_id=cid
+                    self.exchange, self.symbol, eff_amount_usdt, client_order_id=cid
                 )
             finally:
                 self._set_order_in_flight(False)
@@ -388,7 +413,7 @@ class PositionManager:
             if current_price <= 0:
                 return False
             entry_price = current_price
-            qty = self.trade_amount_usdt / current_price
+            qty = eff_amount_usdt / current_price
             order_id = "SIMULATED_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
 
         self.position = Position(
