@@ -242,3 +242,40 @@ def test_dynamic_atr_barriers_training_and_trailing_profit(tmp_path):
         t = dict(conn.execute("SELECT * FROM simulated_trades ORDER BY id DESC LIMIT 1").fetchone())
     assert t["reason"] == "TRAILING_PROFIT"
     assert t["pnl_usd"] > 0
+
+
+def test_real_mode_updates_binance_oco_on_trailing_profit(tmp_path, monkeypatch):
+    import binance_client
+    import position_manager as pm
+    import trading_bot as tb
+
+    db = tb.TradingDatabase(db_path=str(tmp_path / "real_oco_trail.db"))
+    mgr = pm.PositionManager(
+        db, object(), mode="testnet", symbol="BTC/USDT", timeframe="1h",
+        stop_loss_pct=0.011, take_profit_pct=0.018, trade_amount_usdt=50.0, use_exchange_oco=True,
+    )
+    mgr.position = pm.Position(
+        symbol="BTC/USDT", timeframe="1h", mode="testnet", model_version=1,
+        entry_time="2026-11-22 10:00:00", entry_price=100_000.0, quantity=0.0005,
+        order_id="B1", sl_price=99_000.0, tp_price=101_500.0, oco_list_id="OCO_OLD",
+    )
+
+    events = []
+    monkeypatch.setattr(
+        binance_client, "get_oco_status",
+        lambda *a, **k: {"success": True, "list_status": "EXECUTING", "filled": False},
+    )
+    monkeypatch.setattr(
+        binance_client, "cancel_oco",
+        lambda ex, sym, oid: (events.append(("cancel", oid)) or {"success": True}),
+    )
+    monkeypatch.setattr(
+        binance_client, "place_protective_oco",
+        lambda ex, sym, qty, tp, sl: (events.append(("place", round(sl, 2))) or {"success": True, "order_list_id": "OCO_NEW"}),
+    )
+
+    # Preço avança 85% do alvo (101.275) -> cancela OCO antiga e envia nova OCO com stop protegido no lucro!
+    mgr.check_exits(101_275.0, candle_high=101_275.0, candle_low=100_800.0)
+    assert ("cancel", "OCO_OLD") in events
+    assert mgr.position.oco_list_id == "OCO_NEW"
+    assert mgr.position.sl_price > 100_600.0

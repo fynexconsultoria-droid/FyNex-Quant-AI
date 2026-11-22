@@ -477,6 +477,67 @@ class PositionManager:
         except Exception:
             return False
 
+    def _apply_profit_protection(self, high_check: float, current_price: float) -> bool:
+        """
+        Proteção dinâmica de lucro (Breakeven + Trailing) com paridade total entre Paper e Live/Testnet:
+        - Ao atingir 60% do alvo, protege no breakeven (+0.25% cobrindo taxas)
+        - Ao atingir 80% do alvo, trava 50% do lucro atual
+        - Em modo real com OCO na Binance, substitui a OCO antiga pela nova OCO protegida no lucro.
+        Retorna True se a posição foi fechada durante a verificação da OCO.
+        """
+        pos = self.position
+        if not pos:
+            return False
+        tp_dist = pos.tp_price - pos.entry_price
+        if tp_dist <= 0 or high_check <= pos.entry_price:
+            return False
+
+        progress = (high_check - pos.entry_price) / tp_dist
+        new_sl = pos.sl_price
+        if progress >= 0.80:
+            trail_sl = pos.entry_price + (high_check - pos.entry_price) * 0.50
+            new_sl = max(new_sl, trail_sl)
+        elif progress >= 0.60:
+            be_sl = pos.entry_price * 1.0025
+            new_sl = max(new_sl, be_sl)
+
+        min_step = 1.0015 if (self.is_real and pos.oco_list_id) else 1.0001
+        if new_sl <= pos.sl_price * min_step:
+            return False
+
+        # Em modo real com OCO ativa, só move se houver folga abaixo do preço atual (evita -2010)
+        if self.is_real and pos.oco_list_id:
+            if new_sl >= current_price * 0.998:
+                return False
+            self._set_order_in_flight(True)
+            try:
+                cancel = binance_client.cancel_oco(self.exchange, self.symbol, pos.oco_list_id)
+                if not cancel.get("success"):
+                    st = binance_client.get_oco_status(self.exchange, self.symbol, pos.oco_list_id)
+                    if st.get("success") and st.get("filled"):
+                        self._record_exit(st["price"], st["reason"], st["order_id"], st["quantity"])
+                        return True
+                    return False
+                pos.oco_list_id = ""
+                pos.sl_price = new_sl
+                self._persist()
+                logger.info(
+                    f"   🛡️ [PROTEÇÃO DE LUCRO REAL] OCO atualizada: novo Stop ${pos.sl_price:,.2f} "
+                    f"(progresso {progress * 100:.0f}% até o TP ${pos.tp_price:,.2f})."
+                )
+                self._place_oco()
+            finally:
+                self._set_order_in_flight(False)
+            return False
+
+        pos.sl_price = new_sl
+        self._persist()
+        logger.info(
+            f"   🛡️ [PROTEÇÃO DE LUCRO] Stop ajustado para ${pos.sl_price:,.2f} "
+            f"(progresso {progress * 100:.0f}% até o TP ${pos.tp_price:,.2f})."
+        )
+        return False
+
     # ------------------------------------------------------------ check exits
     def check_exits(
         self,
@@ -488,6 +549,8 @@ class PositionManager:
         if not self.in_position:
             return
         pos = self.position
+        low_check = min(current_price, candle_low) if candle_low is not None else current_price
+        high_check = max(current_price, candle_high) if candle_high is not None else current_price
 
         # Proteção na exchange ativa: ela é a fonte da verdade
         if self.is_real and pos.oco_list_id:
@@ -510,33 +573,15 @@ class PositionManager:
                     self.close("TIME_BARRIER", current_price)
                     return
                 else:
+                    # Atualiza OCO na Binance para Breakeven / Trailing Profit quando houver lucro razoável
+                    self._apply_profit_protection(high_check, current_price)
                     return
             else:
                 logger.warning(f"   Falha ao consultar OCO: {status.get('message')}")
                 return
 
-        low_check = min(current_price, candle_low) if candle_low is not None else current_price
-        high_check = max(current_price, candle_high) if candle_high is not None else current_price
-
-        # Proteção dinâmica de lucro (Breakeven + Trailing):
-        # Ao atingir 60% do alvo, protege no breakeven (+taxas); acima de 80%, trava metade do lucro.
-        tp_dist = pos.tp_price - pos.entry_price
-        if tp_dist > 0 and high_check > pos.entry_price:
-            progress = (high_check - pos.entry_price) / tp_dist
-            new_sl = pos.sl_price
-            if progress >= 0.80:
-                trail_sl = pos.entry_price + (high_check - pos.entry_price) * 0.50
-                new_sl = max(new_sl, trail_sl)
-            elif progress >= 0.60:
-                be_sl = pos.entry_price * 1.0025
-                new_sl = max(new_sl, be_sl)
-            if new_sl > pos.sl_price * 1.0001:
-                pos.sl_price = new_sl
-                self._persist()
-                logger.info(
-                    f"   🛡️ [PROTEÇÃO DE LUCRO] Stop ajustado para ${pos.sl_price:,.2f} "
-                    f"(progresso {progress * 100:.0f}% até o TP ${pos.tp_price:,.2f})."
-                )
+        if self._apply_profit_protection(high_check, current_price):
+            return
 
         # Conservador: se um mesmo candle tocou tanto SL quanto TP, prioriza STOP_LOSS
         if low_check <= pos.sl_price:
