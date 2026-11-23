@@ -273,7 +273,12 @@ function bindUIEvents() {
   });
   on("btnSaveTelegram", "click", saveTelegramConfigUI);
 
-  // Chat da IA (Evolução & Resultados 24h / 7d / 30d)
+  // Chat da IA Flutuante (Evolução & Resultados 24h / 7d / 30d)
+  on("btnOpenAiChatFab", "click", () => toggleAiChatDrawer());
+  on("btnCloseAiChatDrawer", "click", () => toggleAiChatDrawer(false));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") toggleAiChatDrawer(false);
+  });
   on("btnSendAiChat", "click", () => sendAiChatMessage());
   on("aiChatInput", "keydown", (e) => {
     if (e.key === "Enter") {
@@ -2678,6 +2683,22 @@ async function saveTelegramConfigUI() {
    ========================================================================== */
 
 let aiChatInitialized = false;
+let aiChatDrawerOpen = false;
+
+function toggleAiChatDrawer(forceState = null) {
+  const drawer = document.getElementById("aiChatDrawer");
+  if (!drawer) return;
+  aiChatDrawerOpen = forceState !== null ? Boolean(forceState) : !aiChatDrawerOpen;
+  drawer.classList.toggle("open", aiChatDrawerOpen);
+  drawer.setAttribute("aria-hidden", aiChatDrawerOpen ? "false" : "true");
+  if (aiChatDrawerOpen) {
+    fetchAiPerformanceAndWelcome();
+    setTimeout(() => {
+      const inp = document.getElementById("aiChatInput");
+      if (inp) inp.focus();
+    }, 80);
+  }
+}
 
 function formatChatMarkdownSafe(text) {
   let safe = escapeHtml(text || "");

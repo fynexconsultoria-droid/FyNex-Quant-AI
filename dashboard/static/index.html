@@ -655,60 +655,6 @@
             </div>
           </div>
 
-          <!-- Chat da IA: Evolução & Resultados (24h, 1 Semana e 1 Mês) -->
-          <div class="card ai-chat-card" id="aiChatCard">
-            <div class="card-header">
-              <div>
-                <h3>💬 Chat com a FyNex AI — Evolução &amp; Resultados (24h • 7 dias • 30 dias)</h3>
-                <span class="ticket-sub">Pergunte sobre minha evolução, assertividade, resultados por período, sinais XTB ou cenário macro</span>
-              </div>
-              <span class="xtb-tag" id="aiChatStatusBadge">🤖 Online • Dados Reais</span>
-            </div>
-
-            <!-- Faixa de Resultados 24h / 7 dias / 30 dias -->
-            <div class="ai-period-grid">
-              <div class="ai-period-box">
-                <span class="market-metric-label">⏱️ Últimas 24 Horas</span>
-                <strong class="mono-val" id="perf24hPnl">$0.00</strong>
-                <span class="market-metric-sub" id="perf24hSub">0 trades • Acurácia: --%</span>
-              </div>
-              <div class="ai-period-box">
-                <span class="market-metric-label">📅 Última Semana (7d)</span>
-                <strong class="mono-val" id="perf7dPnl">$0.00</strong>
-                <span class="market-metric-sub" id="perf7dSub">0 trades • Acurácia: --%</span>
-              </div>
-              <div class="ai-period-box">
-                <span class="market-metric-label">🗓️ Último Mês (30d)</span>
-                <strong class="mono-val" id="perf30dPnl">$0.00</strong>
-                <span class="market-metric-sub" id="perf30dSub">0 trades • Acurácia: --%</span>
-              </div>
-            </div>
-
-            <!-- Perguntas Rápidas -->
-            <div class="ai-chat-chips" id="aiChatChips">
-              <button type="button" class="copilot-mini-btn" data-chat-q="Resumo geral da sua evolução e resultados">✨ Resumo Geral</button>
-              <button type="button" class="copilot-mini-btn" data-chat-q="Como foram seus resultados nas últimas 24 horas?">📊 24 Horas</button>
-              <button type="button" class="copilot-mini-btn" data-chat-q="Mostre seus resultados na última semana">📅 1 Semana</button>
-              <button type="button" class="copilot-mini-btn" data-chat-q="Mostre seus resultados no último mês">🗓️ 1 Mês</button>
-              <button type="button" class="copilot-mini-btn" data-chat-q="Como está sua evolução e aprendizado?">🧠 Minha Evolução</button>
-              <button type="button" class="copilot-mini-btn" data-chat-q="Quais são os sinais XTB e posições abertas?">🧭 Sinais XTB</button>
-              <button type="button" class="copilot-mini-btn" data-chat-q="Como está o cenário macro agora?">🌎 Cenário Macro</button>
-            </div>
-
-            <!-- Feed de Mensagens -->
-            <div class="ai-chat-messages" id="aiChatMessages">
-              <div class="chat-msg ai">
-                <div class="chat-bubble">Carregando diagnóstico da FyNex AI...</div>
-              </div>
-            </div>
-
-            <!-- Campo de Entrada -->
-            <div class="ai-chat-input-row">
-              <input type="text" id="aiChatInput" class="search-input" placeholder="Pergunte à IA (ex: como foi o lucro em 24h? qual seu nível de evolução?)" autocomplete="off">
-              <button type="button" class="btn btn-primary" id="btnSendAiChat">Enviar →</button>
-            </div>
-          </div>
-
           <!-- Copiloto XTB (Modo Híbrido: Binance Automática + Sinais Prontos para xStation 5) -->
           <div class="card copilot-card" id="xtbCopilotCard">
             <div class="card-header">
@@ -1131,6 +1077,66 @@
       </div>
     </div>
   </div>
+
+  <!-- Widget Flutuante de Acesso Rápido: Chat da FyNex AI -->
+  <button type="button" class="ai-chat-fab" id="btnOpenAiChatFab" title="Abrir Chat da FyNex AI (Evolução & Resultados 24h / 7d / 30d)">
+    <span class="ai-chat-fab-dot"></span>
+    <span class="ai-chat-fab-icon">🤖</span>
+    <span class="ai-chat-fab-label">Chat IA</span>
+  </button>
+
+  <aside class="ai-chat-drawer" id="aiChatDrawer" aria-hidden="true">
+    <div class="ai-chat-drawer-header">
+      <div>
+        <h3>🤖 FyNex AI • Assistente</h3>
+        <span class="ticket-sub" id="aiChatStatusBadge">Online • Evolução &amp; Resultados Reais</span>
+      </div>
+      <button type="button" class="ai-chat-close-btn" id="btnCloseAiChatDrawer" title="Minimizar Chat">✕</button>
+    </div>
+
+    <!-- Faixa Compacta 24h / 7 dias / 30 dias -->
+    <div class="ai-period-grid compact">
+      <div class="ai-period-box">
+        <span class="market-metric-label">⏱️ 24h</span>
+        <strong class="mono-val" id="perf24hPnl">$0.00</strong>
+        <span class="market-metric-sub" id="perf24hSub">0 trades • --%</span>
+      </div>
+      <div class="ai-period-box">
+        <span class="market-metric-label">📅 7 dias</span>
+        <strong class="mono-val" id="perf7dPnl">$0.00</strong>
+        <span class="market-metric-sub" id="perf7dSub">0 trades • --%</span>
+      </div>
+      <div class="ai-period-box">
+        <span class="market-metric-label">🗓️ 30 dias</span>
+        <strong class="mono-val" id="perf30dPnl">$0.00</strong>
+        <span class="market-metric-sub" id="perf30dSub">0 trades • --%</span>
+      </div>
+    </div>
+
+    <!-- Perguntas Rápidas -->
+    <div class="ai-chat-chips" id="aiChatChips">
+      <button type="button" class="copilot-mini-btn" data-chat-q="Resumo geral da sua evolução e resultados">✨ Resumo</button>
+      <button type="button" class="copilot-mini-btn" data-chat-q="Como foram seus resultados nas últimas 24 horas?">📊 24h</button>
+      <button type="button" class="copilot-mini-btn" data-chat-q="Mostre seus resultados na última semana">📅 Semana</button>
+      <button type="button" class="copilot-mini-btn" data-chat-q="Mostre seus resultados no último mês">🗓️ Mês</button>
+      <button type="button" class="copilot-mini-btn" data-chat-q="Como está sua evolução e aprendizado?">🧠 Evolução</button>
+      <button type="button" class="copilot-mini-btn" data-chat-q="Quais são os sinais XTB e posições abertas?">🧭 XTB</button>
+      <button type="button" class="copilot-mini-btn" data-chat-q="Como está o cenário macro agora?">🌎 Macro</button>
+    </div>
+
+    <!-- Feed de Mensagens -->
+    <div class="ai-chat-messages" id="aiChatMessages">
+      <div class="chat-msg ai">
+        <div class="chat-bubble">Carregando diagnóstico da FyNex AI...</div>
+      </div>
+    </div>
+
+    <!-- Campo de Entrada -->
+    <div class="ai-chat-input-row">
+      <input type="text" id="aiChatInput" class="search-input" placeholder="Pergunte sobre 24h, semana, mês ou evolução..." autocomplete="off">
+      <button type="button" class="btn btn-primary" id="btnSendAiChat">Enviar</button>
+    </div>
+  </aside>
 
   <script src="/static/app.js"></script>
 </body>
