@@ -2751,20 +2751,23 @@ body {
   min-width: 0;
 }
 
-/* Tabelas estilo Corretora: texto à esquerda, números à direita, ação no centro */
+/* Tabelas estilo Corretora: alinhamento limpo por conteúdo sem quebrar textos */
 .data-table th,
 .data-table td {
   vertical-align: middle;
+  text-align: left;
 }
 
-.data-table th:nth-child(n+3):not(:last-child),
-.data-table td:nth-child(n+3):not(:last-child) {
-  text-align: right;
+.data-table td.empty-cell {
+  text-align: center !important;
+  white-space: normal;
+  line-height: 1.45;
+  padding: 1.65rem 1rem !important;
 }
 
 .data-table th:last-child,
 .data-table td:last-child {
-  text-align: center;
+  text-align: right;
 }
 
 /* KPI Cards alinhamento fino */
@@ -3192,8 +3195,193 @@ button:focus-visible {
   outline-offset: 1px;
 }
 
+/* ==========================================================================
+   Polimento de Organização, Espaçamento & Alinhamento Global (Todas as Áreas)
+   ========================================================================== */
+.dashboard-container {
+  padding: 1.15rem 1.45rem 5rem 1.45rem;
+  gap: 1.15rem;
+}
+
 .view-section.active {
+  display: flex;
+  flex-direction: column;
+  gap: 1.15rem;
   animation: viewFadeIn 0.18s ease-out;
+}
+
+.view-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding-bottom: 0.2rem;
+}
+
+.view-header h2 {
+  font-size: 1.28rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.25;
+  margin-bottom: 0.18rem;
+}
+
+.view-subtitle {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+/* Cabeçalhos de Cards Padronizados */
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.85rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.85rem;
+  padding-bottom: 0.65rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.09);
+}
+
+.card-header.compact {
+  align-items: center;
+  margin-bottom: 0.65rem;
+  padding-bottom: 0.5rem;
+}
+
+.card-header > div:first-child {
+  min-width: 0;
+  flex: 1 1 260px;
+}
+
+.card-header h3 {
+  font-size: 0.96rem;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+
+.ticket-sub {
+  display: block;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  line-height: 1.38;
+  margin-top: 0.18rem;
+}
+
+/* KPI Grid Simétrico (4 colunas no desktop, 2 no tablet, 1 no mobile) */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+@media (max-width: 1220px) {
+  .kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .kpi-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.kpi-card {
+  min-height: 126px;
+  padding: 1rem 1.15rem;
+  justify-content: space-between;
+  gap: 0.35rem;
+}
+
+.kpi-value {
+  font-size: 1.55rem;
+  margin: 0.25rem 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Topbar alinhada sem estouro em telas de notebook */
+.topbar {
+  padding: 0.68rem 1.45rem;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.ticker-box {
+  padding: 0.38rem 0.9rem;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.topbar-actions {
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+
+select option,
+select optgroup {
+  background-color: #0d1424;
+  color: #f8fafc;
+}
+
+/* Tabelas bem enquadradas e sem texto cortado */
+.table-scroll {
+  overflow-x: auto;
+  border-radius: var(--radius-sm);
+}
+
+.copilot-btn-row {
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+}
+
+/* Radar Global & Macro Strip dentro de Cards */
+.card > .market-strip {
+  padding: 0.55rem 0 0.1rem 0;
+  gap: 0.5rem 0;
+}
+
+.market-metric-sub {
+  font-size: 0.71rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Detalhes do Modelo com respiro uniforme */
+.model-details-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.85rem;
+}
+
+@media (max-width: 1100px) {
+  .model-details-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.model-detail-item {
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(148, 163, 184, 0.09);
+  border-radius: var(--radius-sm);
+  padding: 0.65rem 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.22rem;
+  min-width: 0;
+}
+
+.detail-val {
+  font-size: 0.84rem;
+  line-height: 1.35;
+  word-break: break-word;
 }
 
 @keyframes viewFadeIn {
