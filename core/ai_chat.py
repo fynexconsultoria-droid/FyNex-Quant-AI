@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterator, List, Optional
 
-from core import forex_ai_trader, macro_intelligence, xtb_copilot
+from core import error_learning, forex_ai_trader, macro_intelligence, xtb_copilot
 
 
 @contextmanager
@@ -289,7 +289,47 @@ def answer_ai_chat(
     bs = summary["bot_state"]
 
     # Detecta intenção da pergunta com fronteiras de palavra e prioridade para temas específicos
-    if any(re.search(rf"\b{p}\b", norm) for p in ("xtb", "forex", "ouro", "prata", "sinal", "sinais", "posicao", "posicoes", "aberta", "mesa")):
+    if any(re.search(rf"\b{p}\b", norm) for p in ("erro", "erros", "errou", "falha", "falhou", "licao", "licoes", "autopsia", "postmortem")):
+        intent = "error_lessons"
+        rep = (
+            error_learning.ErrorLearningStore(db_path).get_error_learning_report(
+                symbol=symbol, timeframe=timeframe, limit=4, now_utc=now_utc
+            )
+            if os.path.exists(db_path)
+            else {"total_errors_14d": 0, "top_causes": [], "active_rules": [], "recent_errors": [], "sl_atr_boost": 1.0}
+        )
+        if rep["total_errors_14d"] == 0 and not rep["recent_errors"]:
+            reply = (
+                f"🔬 **Auto-Análise de Erros ({symbol} • {timeframe})**\n\n"
+                f"Nenhum erro registrado nos últimos 14 dias. Assim que ocorrer qualquer previsão de alta incorreta "
+                f"ou operação fechada no prejuízo, eu analiso automaticamente todos os indicadores técnicos, "
+                f"contexto macro, volume e Stop Loss para ajustar meus filtros e reforçar o próximo retreino."
+            )
+        else:
+            causes_lines = [
+                f"  • **{c['label']}** ({c['count']}x) — _{c['advice']}_"
+                for c in rep["top_causes"][:3]
+            ]
+            rules_lines = [
+                f"  • **{r['label']}** → `{r['action']}` ({r['count']}x em 14d)"
+                for r in rep["active_rules"][:4]
+            ]
+            last_err = rep["recent_errors"][0] if rep["recent_errors"] else None
+            last_block = (
+                f"\n• Último erro analisado ({last_err['source']}): **{last_err['primary_label']}**\n  ↳ _{last_err['lesson_text']}_"
+                if last_err
+                else ""
+            )
+            reply = (
+                f"🔬 **Auto-Análise de Erros & Adaptação ({symbol} • {timeframe})**\n\n"
+                f"• Erros analisados (14 dias): **{rep['total_errors_14d']}** | Ajuste SL/ATR: **{rep['sl_atr_boost']:.2f}x**\n"
+                f"• Principais parâmetros causadores de erro:\n"
+                + ("\n".join(causes_lines) if causes_lines else "  • Nenhum padrão recorrente dominante.")
+                + "\n• Travas adaptativas ativas agora:\n"
+                + ("\n".join(rules_lines) if rules_lines else "  • Nenhuma trava extra ativa (monitorando).")
+                + last_block
+            )
+    elif any(re.search(rf"\b{p}\b", norm) for p in ("xtb", "forex", "ouro", "prata", "sinal", "sinais", "posicao", "posicoes", "aberta", "mesa")):
         intent = "xtb_signals"
         is_open, fx_msg = forex_ai_trader.is_forex_market_open(now_utc=now_utc)
         sigs = xtb_copilot.XTBCopilotStore(db_path=db_path).list_signals(limit=3) if os.path.exists(db_path) else []

@@ -2907,6 +2907,45 @@ body {
   align-items: center;
 }
 
+.copilot-wa-box {
+  border-color: rgba(16, 185, 129, 0.28);
+}
+
+.wa-guide-banner {
+  font-size: 0.76rem;
+  color: #cbd5e1;
+  line-height: 1.45;
+  padding: 0.45rem 0.6rem;
+  border-radius: 8px;
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+}
+
+.wa-guide-banner code {
+  color: #34d399;
+  font-family: var(--font-mono);
+  background: rgba(2, 6, 23, 0.55);
+  padding: 0.08rem 0.3rem;
+  border-radius: 4px;
+}
+
+.copilot-wa-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 140px auto auto auto;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.wa-toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--text-main);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
 .copilot-btn-row {
   display: flex;
   gap: 0.35rem;
@@ -2936,7 +2975,8 @@ body {
 }
 
 @media (max-width: 900px) {
-  .copilot-tg-grid {
+  .copilot-tg-grid,
+  .copilot-wa-grid {
     grid-template-columns: 1fr;
   }
 }

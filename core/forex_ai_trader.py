@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+import alerts
 from core import forex_market, xtb_copilot
 from core.ml import build_features
 
@@ -357,9 +358,10 @@ class ForexAITrader:
                     safe_lot = max(float(inst.get("min_lot", 0.01)), safe_lot)
                     eff_lev = min(self.leverage, int(inst.get("max_leverage", 30)))
 
-                    # Sempre registra sinal pronto no Copiloto XTB, mesmo se a mesa simulada estiver cheia
+                    # Sempre registra sinal pronto no Copiloto XTB (notificação unificada feita abaixo via alerts.send_alert)
+                    copilot_sig: Optional[Dict[str, Any]] = None
                     try:
-                        self.copilot.record_signal(
+                        copilot_sig = self.copilot.record_signal(
                             symbol=sym,
                             side=best["side"],
                             score=best["score"],
@@ -369,21 +371,29 @@ class ForexAITrader:
                             suggested_lots=safe_lot,
                             leverage=eff_lev,
                             reason=best.get("reason", "Confluência técnica + macro"),
-                            notify_telegram=True,
+                            notify_telegram=False,
                         )
                     except Exception as cop_err:
                         logger.debug(f"[COPILOTO XTB] Falha ao gravar sinal para {sym}: {cop_err}")
 
                     if open_forex_count < self.max_open_forex_positions and sym not in open_syms:
-                        pos = self.store.open_position(
-                            symbol=sym,
-                            side=best["side"],
-                            lots=safe_lot,
-                            leverage=eff_lev,
-                            sl_price=sl_price,
-                            tp_price=tp_price,
-                            quote_override=q,
-                        )
+                        try:
+                            pos = self.store.open_position(
+                                symbol=sym,
+                                side=best["side"],
+                                lots=safe_lot,
+                                leverage=eff_lev,
+                                sl_price=sl_price,
+                                tp_price=tp_price,
+                                quote_override=q,
+                            )
+                        except Exception as open_err:
+                            logger.warning(f"💱 [FOREX IA] Falha ao abrir posição {sym}: {open_err}")
+                            alerts.send_alert(
+                                f"❌ Falha ao abrir operação Forex/XTB em {sym}: {open_err}",
+                                level="TRADE_FAIL",
+                            )
+                            continue
                         open_forex_count += 1
                         open_syms.add(sym)
                         last_action = (
@@ -391,12 +401,33 @@ class ForexAITrader:
                             f"(Score {best['score']:.0f}/100 | TP {tp_price} | SL {sl_price})"
                         )
                         logger.info(f"💱🚀 [FOREX IA ENTRADA] {last_action} | Motivos: {best['reason']}")
-                        break
-                    elif last_action is None:
-                        last_action = (
-                            f"Sinal Copiloto XTB {best['side']} em {sym} @ {ref_price} "
-                            f"(Score {best['score']:.0f}/100 | TP {tp_price} | SL {sl_price})"
+                        side_pt = "COMPRA (BUY)" if pos["side"] == "BUY" else "VENDA (SELL)"
+                        alerts.send_alert(
+                            (
+                                f"💱 {side_pt} {sym} (Forex/XTB)\n"
+                                f"Entrada: {pos['entry_price']} | Lotes: {pos['lots']} (1:{eff_lev})\n"
+                                f"Take Profit: {tp_price} | Stop Loss: {sl_price}\n"
+                                f"Score IA: {best['score']:.0f}/100 | {best.get('reason', '')}"
+                            ),
+                            level="TRADE_ENTRY",
                         )
+                        break
+                    else:
+                        if last_action is None:
+                            last_action = (
+                                f"Sinal Copiloto XTB {best['side']} em {sym} @ {ref_price} "
+                                f"(Score {best['score']:.0f}/100 | TP {tp_price} | SL {sl_price})"
+                            )
+                        if copilot_sig and not copilot_sig.get("deduplicated"):
+                            side_pt = "COMPRA (BUY)" if best["side"] == "BUY" else "VENDA (SELL)"
+                            alerts.send_alert(
+                                (
+                                    f"🧭 SINAL XTB {side_pt} — {copilot_sig.get('xtb_symbol', sym)}\n"
+                                    f"Entrada: {ref_price} | TP: {tp_price} | SL: {sl_price}\n"
+                                    f"Lote sugerido: {safe_lot} (1:{eff_lev}) | Score: {best['score']:.0f}/100"
+                                ),
+                                level="TRADE_ENTRY",
+                            )
                     if open_forex_count >= self.max_open_forex_positions:
                         break
                 except Exception as e:

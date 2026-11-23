@@ -34,9 +34,10 @@ BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
+import alerts  # noqa: E402
 import binance_client  # noqa: E402
 import train_ai  # noqa: E402
-from core import ai_chat, forex_ai_trader, forex_market, macro_intelligence, news_feed, xtb_copilot  # noqa: E402
+from core import ai_chat, error_learning, forex_ai_trader, forex_market, macro_intelligence, news_feed, xtb_copilot  # noqa: E402
 from core.database import TradingDatabase  # noqa: E402
 from strategy_config import get_strategy_profile, DEFAULT_TIMEFRAME  # noqa: E402
 from trading_bot import (  # noqa: E402
@@ -694,6 +695,14 @@ class TelegramConfigPayload(BaseModel):
     send_test: bool = False
 
 
+class WhatsAppConfigPayload(BaseModel):
+    phone: str = ""
+    apikey: str = ""
+    enabled: bool = True
+    daily_report_hour: int = 21
+    send_test: bool = False
+
+
 def _get_xtb_copilot() -> xtb_copilot.XTBCopilotStore:
     return xtb_copilot.XTBCopilotStore(db_path=DB_PATH)
 
@@ -706,6 +715,7 @@ def get_xtb_copilot_signals(limit: int = Query(default=25, ge=1, le=100)):
     signals = store.list_signals(limit=limit)
     new_count = sum(1 for s in signals if s.get("status") == "NEW")
     tg = xtb_copilot.get_telegram_config()
+    wa = alerts.get_whatsapp_config()
     return {
         "mode": "HYBRID",
         "binance_mode": "AUTO_CRYPTO",
@@ -715,6 +725,7 @@ def get_xtb_copilot_signals(limit: int = Query(default=25, ge=1, le=100)):
         "monitored_pairs": list(forex_ai_trader.FOREX_AI_PAIRS),
         "new_count": new_count,
         "telegram": tg,
+        "whatsapp": wa,
         "signals": signals,
     }
 
@@ -772,6 +783,45 @@ def save_xtb_copilot_telegram(payload: TelegramConfigPayload):
             "Você receberá aqui os alertas de Forex, Ouro, Prata, Petróleo e Índices prontos para a xStation 5."
         )
     return {"status": "saved", "telegram": cfg, "test_result": test_result}
+
+
+@app.get("/api/alerts/whatsapp")
+def get_whatsapp_alert_config():
+    """Retorna o status e configuração do WhatsApp CallMeBot (API Key mascarada)."""
+    return alerts.get_whatsapp_config()
+
+
+@app.post("/api/alerts/whatsapp", dependencies=[Depends(require_csrf)])
+def save_whatsapp_alert_config(payload: WhatsAppConfigPayload):
+    """Salva configurações do WhatsApp CallMeBot no .env e envia mensagem de teste opcional."""
+    try:
+        cfg = alerts.save_whatsapp_config(
+            phone=payload.phone,
+            apikey=payload.apikey,
+            enabled=payload.enabled,
+            daily_report_hour=payload.daily_report_hour,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Falha ao salvar configuração do WhatsApp.")
+
+    test_result = None
+    if payload.send_test and cfg.get("enabled"):
+        test_result = alerts.send_whatsapp_message(
+            "✅ FyNex Quant AI conectada ao seu WhatsApp via CallMeBot!\n"
+            "Você receberá alertas de entradas, saídas (lucro/prejuízo), falhas e resumo diário às "
+            f"{cfg['daily_report_hour']:02d}:00 (Brasília)."
+        )
+    return {"status": "saved", "whatsapp": cfg, "test_result": test_result}
+
+
+@app.post("/api/alerts/whatsapp/daily-summary", dependencies=[Depends(require_csrf)])
+def send_whatsapp_daily_summary_now():
+    """Gera e envia imediatamente o resumo consolidado do dia para o WhatsApp CallMeBot."""
+    summary = alerts.build_daily_summary(db_path=DB_PATH)
+    send_res = alerts.send_whatsapp_message(f"[FyNex IA • RESUMO DO DIA]\n{summary['message']}")
+    return {"status": "sent" if send_res.get("sent") else "failed", "summary": summary, "send_result": send_res}
 
 
 class AiChatPayload(BaseModel):
@@ -908,6 +958,7 @@ def _run_ai_training_job(symbol: str, timeframe: str, candles: int, offline: boo
             models_dir=MODELS_DIR,
             save_winner=True,
             progress_cb=lambda msg, pct: _set_train_state(stage=msg, progress_pct=pct),
+            db_path=DB_PATH,
         )
         winner = summary.get("winner") or {}
         try:
@@ -970,6 +1021,17 @@ def get_ai_evolution(
         db_path=DB_PATH, symbol=symbol, timeframe=timeframe, macro_snapshot=macro
     )
     return {"evolution": evo, "macro": macro}
+
+
+@app.get("/api/ai/error-lessons")
+def get_ai_error_lessons(
+    symbol: str = Query(default="BTC/USDT", pattern=SYMBOL_PATTERN),
+    timeframe: str = Query(default="1h", pattern=TIMEFRAME_PATTERN),
+    limit: int = Query(default=10, ge=1, le=50),
+):
+    """Retorna autópsias de erros recentes, parâmetros problemáticos e travas adaptativas ativas da IA."""
+    store = error_learning.ErrorLearningStore(DB_PATH)
+    return store.get_error_learning_report(symbol=symbol, timeframe=timeframe, limit=limit)
 
 
 @app.get("/api/ai/train/status")

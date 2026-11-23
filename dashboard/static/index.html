@@ -609,6 +609,37 @@
             </div>
           </div>
 
+          <!-- Laboratório de Auto-Análise de Erros & Aprendizado Adaptativo -->
+          <div class="card" id="errorLearningCard">
+            <div class="card-header">
+              <div>
+                <h3>🔬 Auto-Análise de Erros &amp; Aprendizado Adaptativo</h3>
+                <span class="ticket-sub" id="errLearnSummarySub">Quando a IA erra, analisa todos os parâmetros (técnicos, macro, volume e SL) para adaptar filtros e reforçar o retreino</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+                <span class="xtb-tag" id="errLearnCountBadge">0 erros (14d)</span>
+                <span class="badge badge-subtle" id="errLearnRulesBadge">0 travas ativas</span>
+              </div>
+            </div>
+            <div id="errLearnRulesList" class="ai-chat-chips" style="margin-top:0;margin-bottom:0.65rem;"></div>
+            <div class="table-scroll">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Data (UTC)</th>
+                    <th>Origem</th>
+                    <th>Causa Principal</th>
+                    <th>PnL / Prob.</th>
+                    <th>Lição Aprendida pela IA</th>
+                  </tr>
+                </thead>
+                <tbody id="errLearnTableBody">
+                  <tr><td colspan="5" class="empty-cell">Nenhum erro analisado ainda neste par/timeframe. A auto-análise roda automaticamente a cada falha.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
           <!-- Painel de Inteligência Macro & Notícias para Decisão de Entrada -->
           <div class="card">
             <div class="card-header">
@@ -665,9 +696,55 @@
               <div class="copilot-actions">
                 <span class="xtb-tag" id="copilotModeBadge">⚡ HÍBRIDO ATIVO</span>
                 <button type="button" class="btn btn-secondary" id="btnCopilotSound" title="Ativar/Desativar alerta sonoro quando surgir novo sinal">🔊 Som: ON</button>
+                <button type="button" class="btn btn-secondary" id="btnToggleWhatsAppBox" title="Receber entradas, saídas, falhas e resumo do dia no WhatsApp (CallMeBot)">💬 WhatsApp</button>
                 <button type="button" class="btn btn-secondary" id="btnToggleTelegramBox" title="Receber alertas no celular via Telegram">📲 Telegram</button>
                 <button type="button" class="btn btn-primary" id="btnScanXtbNow">🔎 Escanear XTB Agora</button>
               </div>
+            </div>
+
+            <!-- Configuração do WhatsApp via CallMeBot (Colapsável) -->
+            <div class="copilot-telegram-box copilot-wa-box" id="copilotWhatsAppBox" style="display:none;">
+              <div class="wa-guide-banner">
+                <strong>💬 WhatsApp CallMeBot (Gratuito):</strong>
+                Salve <code>+34 644 71 98 39</code> nos contatos e envie no WhatsApp:
+                <code>I allow callmebot to send me messages</code> — cole abaixo a API Key recebida.
+              </div>
+              <div class="copilot-wa-grid">
+                <input type="text" id="waPhoneInput" class="search-input" placeholder="Seu WhatsApp com DDD (ex: +5562986290913)" autocomplete="off">
+                <input type="password" id="waApiKeyInput" class="search-input" placeholder="API Key do CallMeBot (ex: 1234567)" autocomplete="off">
+                <select id="waDailyHourSelect" class="search-input" title="Horário do Resumo Diário (Brasília)">
+                  <option value="0">Resumo 00:00</option>
+                  <option value="1">Resumo 01:00</option>
+                  <option value="2">Resumo 02:00</option>
+                  <option value="3">Resumo 03:00</option>
+                  <option value="4">Resumo 04:00</option>
+                  <option value="5">Resumo 05:00</option>
+                  <option value="6">Resumo 06:00</option>
+                  <option value="7">Resumo 07:00</option>
+                  <option value="8">Resumo 08:00</option>
+                  <option value="9">Resumo 09:00</option>
+                  <option value="10">Resumo 10:00</option>
+                  <option value="11">Resumo 11:00</option>
+                  <option value="12">Resumo 12:00</option>
+                  <option value="13">Resumo 13:00</option>
+                  <option value="14">Resumo 14:00</option>
+                  <option value="15">Resumo 15:00</option>
+                  <option value="16">Resumo 16:00</option>
+                  <option value="17">Resumo 17:00</option>
+                  <option value="18">Resumo 18:00</option>
+                  <option value="19">Resumo 19:00</option>
+                  <option value="20">Resumo 20:00</option>
+                  <option value="21" selected>Resumo 21:00</option>
+                  <option value="22">Resumo 22:00</option>
+                  <option value="23">Resumo 23:00</option>
+                </select>
+                <label class="wa-toggle-label" title="Ativar/Pausar envio no WhatsApp">
+                  <input type="checkbox" id="waEnabledCheck" checked> Ativo
+                </label>
+                <button type="button" class="btn btn-primary" id="btnSaveWhatsApp">💾 Salvar &amp; Testar</button>
+                <button type="button" class="btn btn-secondary" id="btnSendDailySummaryWa" title="Enviar agora o resumo consolidado de hoje para o WhatsApp">📊 Resumo Hoje</button>
+              </div>
+              <span class="ticket-sub" id="waConfigStatus">Receba no WhatsApp: entradas, saídas (lucro/prejuízo), falhas operacionais e resumo diário automático.</span>
             </div>
 
             <!-- Configuração Opcional do Telegram (Colapsável) -->
@@ -1120,6 +1197,7 @@
       <button type="button" class="copilot-mini-btn" data-chat-q="Mostre seus resultados na última semana">📅 Semana</button>
       <button type="button" class="copilot-mini-btn" data-chat-q="Mostre seus resultados no último mês">🗓️ Mês</button>
       <button type="button" class="copilot-mini-btn" data-chat-q="Como está sua evolução e aprendizado?">🧠 Evolução</button>
+      <button type="button" class="copilot-mini-btn" data-chat-q="Onde você errou e o que aprendeu com os erros?">🔬 Erros</button>
       <button type="button" class="copilot-mini-btn" data-chat-q="Quais são os sinais XTB e posições abertas?">🧭 XTB</button>
       <button type="button" class="copilot-mini-btn" data-chat-q="Como está o cenário macro agora?">🌎 Macro</button>
     </div>

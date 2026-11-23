@@ -24,6 +24,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+import alerts
 import binance_client
 
 # -----------------------------------------------------------------------------
@@ -941,6 +942,17 @@ class XTBDeskStore:
                 ),
             )
             trade_id = ins_cur.lastrowid
+
+        icon = "✅" if pnl_usd > 0 else ("❌" if pnl_usd < 0 else "⚪")
+        verdict = "DEU RESULTADO (LUCRO)" if pnl_usd > 0 else ("PREJUÍZO" if pnl_usd < 0 else "EMPATE")
+        alerts.send_alert(
+            (
+                f"{icon} [{reason} • Forex/XTB] {pos['symbol']} ({pos['side']}) — {verdict}\n"
+                f"Entrada: {pos['entry_price']} | Saída: {exit_price}\n"
+                f"PnL: ${pnl_usd:+.2f} ({pnl_pct:+.2f}% sobre margem) | Lotes: {pos['lots']}"
+            ),
+            level="TRADE_EXIT",
+        )
 
         return {
             "closed_id": pos["id"],

@@ -28,6 +28,8 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from dotenv import dotenv_values
 
+import alerts
+
 logger = logging.getLogger("QuantTradingBot")
 
 _DEFAULT_ENV_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
@@ -140,34 +142,8 @@ def save_telegram_config(bot_token: str, chat_id: str, env_path: Optional[str] =
     if env_path is None:
         env_path = _DEFAULT_ENV_PATH
 
-    with _ENV_WRITE_LOCK:
-        lines: List[str] = []
-        if os.path.exists(env_path):
-            with open(env_path, "r", encoding="utf-8") as f:
-                lines = f.read().splitlines()
-
-        seen = set()
-        new_lines: List[str] = []
-        key_re = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")
-        for line in lines:
-            m = key_re.match(line)
-            if m and m.group(1) in updates:
-                k = m.group(1)
-                if k not in seen:
-                    new_lines.append(f"{k}={updates[k]}")
-                    seen.add(k)
-            else:
-                new_lines.append(line)
-
-        for k, v in updates.items():
-            if k not in seen:
-                new_lines.append(f"{k}={v}")
-
-        content = "\n".join(new_lines) + "\n"
-        _atomic_write_text(env_path, content)
-
-        for k, v in updates.items():
-            os.environ[k] = v
+    if updates:
+        alerts._update_env_keys(updates, env_path=env_path)
 
     return get_telegram_config(env_path=env_path)
 

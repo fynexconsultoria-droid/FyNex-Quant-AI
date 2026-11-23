@@ -16,6 +16,7 @@ from typing import Optional, Tuple, Dict, Any
 
 import alerts
 import binance_client
+from core import error_learning
 from core.database import timeframe_to_seconds
 from strategy_config import PAPER_FEE_PCT, PAPER_SLIPPAGE_PCT
 
@@ -262,12 +263,51 @@ class PositionManager:
             utc_now_str(), recorded_exit_price, reason, pnl_pct, pnl_usd,
             mode=self.mode, order_id=exit_order_id or pos.order_id, quantity=qty
         )
-        icon = "🎯" if pnl_usd > 0 else "🚨"
+        lesson_suffix = ""
+        if pnl_usd < 0 and getattr(self.db, "db_path", None):
+            try:
+                el_store = error_learning.ErrorLearningStore(self.db.db_path)
+                snap = el_store.get_snapshot(
+                    self.symbol, self.timeframe, order_id=pos.order_id
+                )
+                params = dict(snap["parameters"]) if snap else {}
+                if pos.entry_price > 0:
+                    actual_sl = max(0.0, (pos.entry_price - pos.sl_price) / pos.entry_price)
+                    actual_tp = max(0.0, (pos.tp_price - pos.entry_price) / pos.entry_price)
+                    params.setdefault("sl_pct", round(actual_sl if actual_sl > 0 else self.stop_loss_pct, 6))
+                    params.setdefault("tp_pct", round(actual_tp if actual_tp > 0 else self.take_profit_pct, 6))
+                else:
+                    params.setdefault("sl_pct", round(self.stop_loss_pct, 6))
+                    params.setdefault("tp_pct", round(self.take_profit_pct, 6))
+                pm_res = el_store.record_error_postmortem(
+                    source="TRADE_LOSS",
+                    symbol=self.symbol,
+                    timeframe=self.timeframe,
+                    params=params,
+                    outcome_reason=reason,
+                    candle_timestamp=snap.get("candle_timestamp") if snap else None,
+                    model_version=pos.model_version,
+                    prob_up=float(snap.get("prob_up") or 0.0) if snap else 0.0,
+                    pnl_usd=pnl_usd,
+                    pnl_pct=pnl_pct,
+                )
+                logger.warning(
+                    f"🔬 [AUTO-ANÁLISE DE ERRO #{pm_res['id']}] Causa principal: {pm_res['primary_label']} | "
+                    f"{pm_res['lesson_text']}"
+                )
+                lesson_suffix = f"\n🔍 Auto-análise: {pm_res['lesson_text']}"
+            except Exception as el_err:
+                logger.debug(f"Falha ao registrar auto-análise de erro: {el_err}")
+
+        icon = "✅" if pnl_usd > 0 else ("❌" if pnl_usd < 0 else "⚪")
+        verdict = "DEU RESULTADO (LUCRO)" if pnl_usd > 0 else ("PREJUÍZO" if pnl_usd < 0 else "EMPATE (0x0)")
         msg = (
-            f"{icon} [{reason} ({self.mode.upper()})] Saída: ${recorded_exit_price:,.2f} | Entrada: ${pos.entry_price:,.2f} "
-            f"| PnL Líquido: {pnl_pct:+.2f}% (${pnl_usd:+.2f}) | Ordem: {exit_order_id or '-'}"
+            f"{icon} [{reason} ({self.mode.upper()})] {self.symbol} — {verdict}\n"
+            f"Entrada: ${pos.entry_price:,.2f} | Saída: ${recorded_exit_price:,.2f}\n"
+            f"PnL Líquido: {pnl_pct:+.2f}% (${pnl_usd:+.2f}) | Ordem: {exit_order_id or '-'}"
+            f"{lesson_suffix}"
         )
-        logger.warning(msg)
+        logger.warning(msg.replace("\n", " | "))
         alerts.send_alert(msg, level="TRADE_EXIT")
         self._clear()
         return {"pnl_pct": pnl_pct, "pnl_usd": pnl_usd}
@@ -302,6 +342,7 @@ class PositionManager:
                 base = self.symbol.split("/")[0]
                 net_qty = binance_client.net_filled_quantity(reconciled, base, float(reconciled["filled"]))
                 avg_price = float(reconciled.get("average") or pos.entry_price)
+                old_cid = pos.order_id
                 pos.order_id = str(reconciled.get("id") or pos.order_id)
                 pos.entry_price = avg_price
                 pos.quantity = net_qty
@@ -309,6 +350,13 @@ class PositionManager:
                 pos.tp_price = avg_price * (1.0 + self.take_profit_pct)
                 pos.status = "OPEN"
                 self._persist()
+                if getattr(self.db, "db_path", None):
+                    try:
+                        error_learning.ErrorLearningStore(self.db.db_path).update_snapshot_order_id(
+                            self.symbol, self.timeframe, old_cid, pos.order_id
+                        )
+                    except Exception:
+                        pass
                 logger.warning(
                     f"   ✅ [RECONCILIAÇÃO PENDING] Compra confirmada na Binance! "
                     f"Entrada ${avg_price:,.2f} | Qtd {net_qty:.6f}"
@@ -380,6 +428,7 @@ class PositionManager:
         tp_pct_override: Optional[float] = None,
         sl_pct_override: Optional[float] = None,
         amount_usdt_override: Optional[float] = None,
+        entry_context: Optional[Dict[str, Any]] = None,
     ) -> bool:
         if self.in_position:
             return False
@@ -424,6 +473,30 @@ class PositionManager:
                 base_balance_before=base_before, status="PENDING",
             )
             self.store.save(pending_pos)
+            # Persiste snapshot com cid ANTES do envio para sobreviver a reconciliação de timeout PENDING
+            if getattr(self.db, "db_path", None):
+                try:
+                    ctx_pre = entry_context if isinstance(entry_context, dict) else {}
+                    error_learning.ErrorLearningStore(self.db.db_path).save_decision_snapshot(
+                        symbol=self.symbol,
+                        timeframe=self.timeframe,
+                        features_row=ctx_pre.get("features"),
+                        macro_snapshot=ctx_pre.get("macro"),
+                        candle_timestamp=ctx_pre.get("candle_timestamp"),
+                        prediction_id=ctx_pre.get("prediction_id"),
+                        order_id=cid,
+                        model_version=model_version,
+                        prob_up=confidence,
+                        extra={
+                            "tp_pct": eff_tp_pct,
+                            "sl_pct": eff_sl_pct,
+                            "amount_usdt": eff_amount_usdt,
+                            "entry_price": current_price,
+                            "mode": self.mode,
+                        },
+                    )
+                except Exception:
+                    pass
             self._set_order_in_flight(True)
             try:
                 buy = binance_client.execute_spot_buy(
@@ -434,14 +507,22 @@ class PositionManager:
 
             if not buy.get("success"):
                 if buy.get("ambiguous_network"):
-                    logger.critical(
-                        f"   ⚠️ [TIMEOUT AMBÍGUO NA COMPRA {cid}] Mantendo registro PENDING para reconciliação "
-                        f"segura no próximo ciclo/restore. Motivo: {buy.get('message')}"
+                    err_txt = (
+                        f"⚠️ TIMEOUT AMBÍGUO NA COMPRA ({self.symbol} / {self.mode.upper()})\n"
+                        f"Ordem {cid} mantida como PENDING para reconciliação segura.\n"
+                        f"Motivo: {buy.get('message')}"
                     )
+                    logger.critical("   " + err_txt.replace("\n", " | "))
                     self.position = pending_pos
+                    alerts.send_alert(err_txt, level="TRADE_FAIL")
                 else:
                     self.store.delete(self.symbol, self.timeframe, self.mode)
-                    logger.error(f"   ❌ [FALHA AO ENVIAR ORDEM NA BINANCE] {buy.get('message')}")
+                    err_txt = (
+                        f"❌ OPERAÇÃO FALHOU NA BINANCE ({self.symbol} / {self.mode.upper()})\n"
+                        f"Motivo: {buy.get('message')}"
+                    )
+                    logger.error("   " + err_txt.replace("\n", " | "))
+                    alerts.send_alert(err_txt, level="TRADE_FAIL")
                 return False
             entry_price, qty, order_id = buy["price"], buy["quantity"], buy["order_id"]
         else:
@@ -461,14 +542,54 @@ class PositionManager:
         )
         self._persist()
 
+        # Prioridade máxima em modo real: posiciona OCO na exchange ANTES de alertas HTTP / logs extras
+        if self.use_exchange_oco:
+            self._place_oco()
+
+        if getattr(self.db, "db_path", None):
+            try:
+                ctx = entry_context if isinstance(entry_context, dict) else {}
+                el_store = error_learning.ErrorLearningStore(self.db.db_path)
+                if self.is_real:
+                    el_store.update_snapshot_order_id(self.symbol, self.timeframe, cid, order_id)
+                else:
+                    el_store.save_decision_snapshot(
+                        symbol=self.symbol,
+                        timeframe=self.timeframe,
+                        features_row=ctx.get("features"),
+                        macro_snapshot=ctx.get("macro"),
+                        candle_timestamp=ctx.get("candle_timestamp"),
+                        prediction_id=ctx.get("prediction_id"),
+                        order_id=order_id,
+                        model_version=model_version,
+                        prob_up=confidence,
+                        extra={
+                            "tp_pct": eff_tp_pct,
+                            "sl_pct": eff_sl_pct,
+                            "amount_usdt": eff_amount_usdt,
+                            "entry_price": entry_price,
+                            "mode": self.mode,
+                        },
+                    )
+            except Exception:
+                pass
+
         logger.info("   ==================================================")
         logger.info(f"   🚀 [COMPRA EXECUTADA ({self.mode.upper()})] Ordem {order_id}")
         logger.info(f"      Entrada: ${entry_price:,.2f} | Qtd líquida: {qty:.6f} | Confiança: {confidence:.1%}")
         logger.info(f"      Stop Loss: ${self.position.sl_price:,.2f} | Take Profit: ${self.position.tp_price:,.2f}")
         logger.info("   ==================================================")
 
-        if self.use_exchange_oco:
-            self._place_oco()
+        alerts.send_alert(
+            (
+                f"🚀 COMPRA {self.symbol} ({self.mode.upper()})\n"
+                f"Entrada: ${entry_price:,.2f} | Valor: ${eff_amount_usdt:,.2f}\n"
+                f"Take Profit: ${self.position.tp_price:,.2f} (+{eff_tp_pct * 100:.2f}%)\n"
+                f"Stop Loss: ${self.position.sl_price:,.2f} (-{eff_sl_pct * 100:.2f}%)\n"
+                f"Confiança IA: {confidence:.1%} | Ordem: {order_id}"
+            ),
+            level="TRADE_ENTRY",
+        )
         return True
 
     # ------------------------------------------------------------------- close

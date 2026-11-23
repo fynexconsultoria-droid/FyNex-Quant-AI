@@ -708,21 +708,39 @@ def _fit_with_weights(estimator: Any, X: Any, y: Any, weights: Optional[np.ndarr
     return estimator
 
 
+def _combine_sample_weights(
+    n: int,
+    extra_sample_weights: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Combina ponderação temporal (recência) com reforço de exemplos difíceis (erros reais)."""
+    w = _compute_recency_weights(n)
+    if extra_sample_weights is not None and len(extra_sample_weights) == n:
+        ext = np.asarray(extra_sample_weights, dtype=float)
+        ext = np.where(np.isfinite(ext) & (ext > 0.0), ext, 1.0)
+        w = w * ext
+        mean_w = float(np.mean(w))
+        if mean_w > 0 and np.isfinite(mean_w):
+            w = w / mean_w
+    return w
+
+
 def _fit_calibrated_pipeline(
     X_fit: pd.DataFrame,
     y_fit: pd.Series,
     model_type: str = "ensemble",
     gap: int = 15,
     calibrate_probabilities: bool = True,
+    extra_sample_weights: Optional[np.ndarray] = None,
 ) -> Any:
     """
     Pipeline único usado tanto na validação walk-forward quanto no modelo final:
-    - Aplica pesos exponenciais de recência no estimador base treinado em 100% de `X_fit`.
+    - Aplica pesos exponenciais de recência + reforço controlado de exemplos difíceis (erros reais)
+      no estimador base treinado em 100% de `X_fit`.
     - Quando `calibrate_probabilities=True` e há amostra suficiente, ajusta um calibrador
       Platt 1D sobre previsões estritamente fora-da-amostra (split cronológico com purge `gap`),
       preservando paridade de escala entre validação e produção sem descartar os candles recentes.
     """
-    w_full = _compute_recency_weights(len(y_fit))
+    w_full = _combine_sample_weights(len(y_fit), extra_sample_weights)
     base_full = _build_estimator(model_type)
     _fit_with_weights(base_full, X_fit, y_fit, w_full)
 
@@ -741,8 +759,18 @@ def _fit_calibrated_pipeline(
         y_cal = y_fit.iloc[cal_split:]
         if y_pre.nunique() >= 2 and y_cal.nunique() >= 2 and int(y_cal.value_counts().min()) >= 3:
             try:
+                pre_extra = (
+                    extra_sample_weights[:cal_train_end]
+                    if (extra_sample_weights is not None and len(extra_sample_weights) == len(y_fit))
+                    else None
+                )
                 pre_model = _build_estimator(model_type)
-                _fit_with_weights(pre_model, X_fit.iloc[:cal_train_end], y_pre, _compute_recency_weights(len(y_pre)))
+                _fit_with_weights(
+                    pre_model,
+                    X_fit.iloc[:cal_train_end],
+                    y_pre,
+                    _combine_sample_weights(len(y_pre), pre_extra),
+                )
                 classes = list(getattr(pre_model, "classes_", []))
                 if 1 in classes:
                     p_cal_raw = pre_model.predict_proba(X_fit.iloc[cal_split:])[:, classes.index(1)]
@@ -918,6 +946,7 @@ def evaluate_walk_forward(
     confidence_threshold: float = 0.55,
     model_type: str = "ensemble",
     calibrate_probabilities: bool = True,
+    extra_sample_weights: Optional[np.ndarray] = None,
 ) -> Dict[str, float]:
     """
     Validação cruzada temporal com purge (`TimeSeriesSplit(gap=horizon_candles)`),
@@ -953,12 +982,18 @@ def evaluate_walk_forward(
         y_tr = y.iloc[train_idx]
         if y_tr.nunique() < 2 or len(X_te) == 0:
             continue
+        fold_extra = (
+            extra_sample_weights[train_idx]
+            if (extra_sample_weights is not None and len(extra_sample_weights) == len(df))
+            else None
+        )
         clf = _fit_calibrated_pipeline(
             X_tr,
             y_tr,
             model_type=model_type,
             gap=gap,
             calibrate_probabilities=calibrate_probabilities,
+            extra_sample_weights=fold_extra,
         )
         classes = list(getattr(clf, "classes_", []))
         if 1 in classes:
@@ -1046,6 +1081,7 @@ def train_model(
     check_balance: bool = True,
     model_type: str = "ensemble",
     run_walk_forward_eval: bool = True,
+    extra_sample_weights: Optional[np.ndarray] = None,
 ) -> Tuple[Any, float]:
     """
     Treina/Retreina o classificador (`ensemble` = RF + ExtraTrees + HistGradientBoosting, `hgb`, `et` ou `rf`)
@@ -1089,6 +1125,9 @@ def train_model(
             f"Ajuste os parâmetros de alvo ou aguarde mais dados."
         )
 
+    # Mantém a validação holdout e walk-forward OOF 100% livre de postmortems futuros;
+    # aplica `extra_sample_weights` (hard-examples) somente no refit final de produção (`refit_full=True`).
+    has_extra_w = extra_sample_weights is not None and len(extra_sample_weights) == len(df)
     if run_walk_forward_eval:
         base_eval_model = _fit_calibrated_pipeline(
             X_train,
@@ -1096,6 +1135,7 @@ def train_model(
             model_type=model_type,
             gap=gap,
             calibrate_probabilities=calibrate_probabilities,
+            extra_sample_weights=None,
         )
         if len(X_test) > 0:
             holdout_m = evaluate_model_on_dataset(
@@ -1110,6 +1150,7 @@ def train_model(
             tp_pct=tp_pct, sl_pct=sl_pct, confidence_threshold=confidence_threshold,
             model_type=model_type,
             calibrate_probabilities=calibrate_probabilities,
+            extra_sample_weights=None,
         )
     else:
         holdout_m = _empty_validation_metrics()
@@ -1129,6 +1170,7 @@ def train_model(
 
     X_fit = X if refit_full else X_train
     y_fit = y if refit_full else y_train
+    fit_extra = extra_sample_weights if (refit_full and has_extra_w) else None
 
     final_model = _fit_calibrated_pipeline(
         X_fit,
@@ -1136,6 +1178,7 @@ def train_model(
         model_type=model_type,
         gap=gap,
         calibrate_probabilities=calibrate_probabilities,
+        extra_sample_weights=fit_extra,
     )
 
     raw_final = getattr(final_model, "base_estimator", final_model)

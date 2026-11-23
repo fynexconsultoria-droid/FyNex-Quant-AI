@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 import binance_client
+from core import error_learning
 from core.database import TradingDatabase, timeframe_to_ms
 from core.logging_setup import DEFAULT_DB_PATH, DEFAULT_MODELS_DIR, setup_logging
 from core.market_data import fetch_live_ohlcv, get_latest_contiguous_segment
@@ -74,6 +75,7 @@ def train_and_select_best_model(
     models_dir: str = DEFAULT_MODELS_DIR,
     save_winner: bool = True,
     progress_cb: Optional[Any] = None,
+    db_path: Optional[str] = DEFAULT_DB_PATH,
 ) -> Dict[str, Any]:
     """
     Treina cada arquitetura candidata sobre o mesmo dataset contíguo (Triple Barrier + purge
@@ -105,6 +107,9 @@ def train_and_select_best_model(
 
     storage = ModelPersistence(models_dir=models_dir)
     next_ver = storage.next_version(symbol, timeframe)
+    hard_weights = error_learning.compute_hard_example_multipliers(
+        dataset, db_path=db_path, symbol=symbol, timeframe=timeframe
+    )
 
     results: List[Dict[str, Any]] = []
     best_model: Optional[Any] = None
@@ -125,6 +130,7 @@ def train_and_select_best_model(
             sl_pct=profile.sl_pct,
             confidence_threshold=profile.confidence,
             model_type=model_type,
+            extra_sample_weights=hard_weights,
         )
         m = getattr(model, "validation_metrics_", {})
         entry = {
@@ -216,7 +222,7 @@ def main() -> None:
     df = db.get_recent_candles(args.symbol, args.timeframe, limit=max(args.candles, 2000))
     print(f"[2/2] Treinando e comparando arquiteturas (RF vs ExtraTrees vs HistGradientBoosting vs Ensemble)...")
 
-    summary = train_and_select_best_model(df, symbol=args.symbol, timeframe=args.timeframe)
+    summary = train_and_select_best_model(df, symbol=args.symbol, timeframe=args.timeframe, db_path=args.db_path)
 
     print("\nResultados na Validação Walk-Forward (com purge e taxas):")
     for c in summary["candidates"]:

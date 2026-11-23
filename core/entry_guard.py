@@ -42,6 +42,7 @@ def evaluate_entry_safety(
     max_consecutive_losses: int = 3,
     circuit_breaker_cooldown_seconds: int = 14400,
     now_utc: Optional[datetime] = None,
+    learned_guard_result: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, List[str]]:
     """
     Avalia se o contexto técnico, macro e de risco está seguro para abrir compra.
@@ -132,6 +133,12 @@ def evaluate_entry_safety(
                 f"Cooldown pós-Stop Loss ativo ({rem_min} min restante(s) para estabilização do mercado)."
             )
 
+    # 9. Travas adaptativas aprendidas automaticamente com erros recentes da IA
+    if isinstance(learned_guard_result, dict):
+        for blk in (learned_guard_result.get("block_reasons") or []):
+            if blk:
+                reasons.append(str(blk))
+
     return len(reasons) == 0, reasons
 
 
@@ -143,6 +150,8 @@ def compute_safe_position_size(
     daily_pnl_usd: float = 0.0,
     max_daily_loss_usdt: float = 20.0,
     min_order_usdt: float = 10.0,
+    learned_size_multiplier: float = 1.0,
+    learned_notes: Optional[List[str]] = None,
 ) -> Tuple[float, float, List[str]]:
     """
     Gerenciamento dinâmico de caixa (Position Sizing defensivo):
@@ -195,6 +204,15 @@ def compute_safe_position_size(
     if max_loss_f > 0 and daily_pnl_f < -(max_loss_f * 0.50):
         mult *= 0.50
         notes.append(f"Drawdown diário > 50% (${daily_pnl_f:+.2f} → 50%)")
+
+    # 5. Redução defensiva aprendida com erros recorrentes recentes
+    l_mult = _finite_float(learned_size_multiplier)
+    if l_mult is not None and 0.0 < l_mult < 0.999:
+        mult *= max(0.50, min(1.0, l_mult))
+        if learned_notes:
+            notes.append(f"Lição de erro ({learned_notes[0]} → {int(round(l_mult * 100))}%)")
+        else:
+            notes.append(f"Ajuste defensivo pós-erro (→ {int(round(l_mult * 100))}%)")
 
     mult = max(0.25, min(1.0, round(mult, 2)))
     final_amount = round(max(min(base_f, min_ord), base_f * mult), 2)

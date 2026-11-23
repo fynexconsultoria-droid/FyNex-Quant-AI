@@ -18,9 +18,12 @@ import alerts  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def isolate_alerts_and_logs(monkeypatch):
-    # Desliga credenciais do Telegram para todos os testes (nenhuma requisição externa)
-    monkeypatch.setattr(alerts, "_load_telegram_credentials", lambda: ("", ""))
+def isolate_alerts_and_logs(monkeypatch, tmp_path):
+    # Desliga credenciais reais de Telegram e WhatsApp para todos os testes (nenhuma requisição externa)
+    monkeypatch.setattr(alerts, "_load_telegram_credentials", lambda *a, **k: ("", ""))
+    monkeypatch.setattr(alerts, "ENV_PATH", str(tmp_path / ".env.pytest_isolated"))
+    for env_key in ("WHATSAPP_PHONE", "WHATSAPP_CALLMEBOT_APIKEY", "WHATSAPP_ENABLED", "WHATSAPP_DAILY_REPORT_HOUR"):
+        monkeypatch.delenv(env_key, raising=False)
     yield
     # Remove eventuais file handlers temporários adicionados por testes
     bot_logger = logging.getLogger("QuantTradingBot")

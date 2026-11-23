@@ -264,9 +264,25 @@ function bindUIEvents() {
   });
   on("sidebarEvoBox", "click", () => switchView("ai"));
 
-  // Copiloto XTB (Modo Híbrido)
+  // Copiloto XTB (Modo Híbrido) & Alertas (WhatsApp CallMeBot / Telegram)
   on("btnScanXtbNow", "click", scanXtbCopilotNow);
   on("btnCopilotSound", "click", toggleCopilotSound);
+  on("btnToggleWhatsAppBox", "click", () => {
+    const box = document.getElementById("copilotWhatsAppBox");
+    if (box) {
+      const opening = box.style.display === "none";
+      box.style.display = opening ? "flex" : "none";
+      if (opening) fetchWhatsAppConfigUI();
+    }
+  });
+  on("btnSaveWhatsApp", "click", saveWhatsAppConfigUI);
+  on("btnSendDailySummaryWa", "click", sendDailySummaryWhatsAppUI);
+  on("waDailyHourSelect", "change", (e) => {
+    if (e.target) e.target.dataset.userEdited = "1";
+  });
+  on("waEnabledCheck", "change", (e) => {
+    if (e.target) e.target.dataset.userEdited = "1";
+  });
   on("btnToggleTelegramBox", "click", () => {
     const box = document.getElementById("copilotTelegramBox");
     if (box) box.style.display = box.style.display === "none" ? "flex" : "none";
@@ -311,6 +327,7 @@ function switchView(viewName) {
   if (activeView === "ai") {
     fetchMacroIntelligence(false);
     fetchAiEvolution();
+    fetchAiErrorLessons();
     fetchXtbCopilotSignals();
     fetchAiPerformanceAndWelcome();
     pollAiTrainStatus();
@@ -904,6 +921,7 @@ async function fetchInitialData() {
     fetchXtbCopilotSignals(),
     fetchNewsFeed(false),
     fetchAiEvolution(),
+    fetchAiErrorLessons(),
   ]);
   if (binanceHasKeys) {
     await fetchBinanceBalanceAuto(true);
@@ -2457,6 +2475,71 @@ async function fetchAiEvolution() {
   }
 }
 
+async function fetchAiErrorLessons() {
+  try {
+    const sym = isActiveForex() ? "BTC/USDT" : activeSymbol;
+    const q = new URLSearchParams({ symbol: sym, timeframe: activeTimeframe, limit: "8" });
+    const res = await fetch(`/api/ai/error-lessons?${q.toString()}`);
+    if (!res.ok) return;
+    const rep = await res.json();
+
+    const countEl = document.getElementById("errLearnCountBadge");
+    const rulesEl = document.getElementById("errLearnRulesBadge");
+    const subEl = document.getElementById("errLearnSummarySub");
+    const chipsEl = document.getElementById("errLearnRulesList");
+    const tbody = document.getElementById("errLearnTableBody");
+
+    const total14 = Number(rep.total_errors_14d || 0);
+    const rules = rep.active_rules || [];
+    if (countEl) countEl.textContent = `${total14} erro(s) (14d)`;
+    if (rulesEl) rulesEl.textContent = `${rules.length} trava(s) ativa(s)`;
+    if (subEl) {
+      const slBoost = Number(rep.sl_atr_boost || 1.0);
+      const pen = Number(rep.base_confidence_penalty_pct || 0);
+      subEl.textContent =
+        rules.length > 0
+          ? `Adaptação ativa: ${rules.length} padrão(ões) de erro protegido(s) • Ajuste SL/ATR: ${slBoost.toFixed(2)}x • Penalidade extra: +${pen.toFixed(1)}%`
+          : "Monitorando cada previsão e trade: se houver erro, todos os parâmetros são analisados automaticamente.";
+    }
+    if (chipsEl) {
+      chipsEl.innerHTML = rules
+        .map(
+          (r) =>
+            `<span class="sent-chip negativo" title="${escapeHtml(r.advice || "")}">🛡️ ${escapeHtml(r.label)} (${escapeHtml(r.count)}x • ${escapeHtml(r.action)})</span>`
+        )
+        .join("");
+    }
+    if (tbody) {
+      const items = rep.recent_errors || [];
+      if (!items.length) {
+        tbody.innerHTML =
+          '<tr><td colspan="5" class="empty-cell">Nenhum erro analisado ainda neste par/timeframe. A auto-análise roda automaticamente a cada falha.</td></tr>';
+      } else {
+        tbody.innerHTML = items
+          .map((e) => {
+            const srcLabel = e.source === "TRADE_LOSS" ? "Trade (Prejuízo)" : "Previsão (Falso +)";
+            const metric =
+              e.source === "TRADE_LOSS"
+                ? `$${Number(e.pnl_usd || 0).toFixed(2)} (${Number(e.pnl_pct || 0).toFixed(2)}%)`
+                : `Prob. ${(Number(e.prob_up || 0) * 100).toFixed(1)}%`;
+            return `
+              <tr>
+                <td class="dim">${escapeHtml(e.created_at || "")}</td>
+                <td><span class="side-pill sell">${escapeHtml(srcLabel)}</span></td>
+                <td><strong>${escapeHtml(e.primary_label || e.primary_cause)}</strong></td>
+                <td class="mono-val text-down">${escapeHtml(metric)}</td>
+                <td class="dim">${escapeHtml(e.lesson_text || "")}</td>
+              </tr>
+            `;
+          })
+          .join("");
+      }
+    }
+  } catch (_) {
+    // silencioso
+  }
+}
+
 /* ==========================================================================
    Copiloto XTB (Modo Híbrido: Binance Automática + Sinais xStation 5)
    ========================================================================== */
@@ -2527,6 +2610,10 @@ async function fetchXtbCopilotSignals() {
       if (tgChatInp && !tgChatInp.value && data.telegram.chat_id) {
         tgChatInp.value = data.telegram.chat_id;
       }
+    }
+
+    if (data.whatsapp) {
+      applyWhatsAppConfigToUI(data.whatsapp);
     }
 
     const signals = data.signals || [];
@@ -2702,6 +2789,141 @@ async function saveTelegramConfigUI() {
     if (btn) {
       btn.disabled = false;
       btn.textContent = "💾 Salvar & Testar";
+    }
+  }
+}
+
+function applyWhatsAppConfigToUI(wa) {
+  if (!wa) return;
+  const statusEl = document.getElementById("waConfigStatus");
+  const phoneInp = document.getElementById("waPhoneInput");
+  const hourSel = document.getElementById("waDailyHourSelect");
+  const enChk = document.getElementById("waEnabledCheck");
+  const btnToggle = document.getElementById("btnToggleWhatsAppBox");
+
+  if (phoneInp && !phoneInp.value && wa.phone) {
+    phoneInp.value = wa.phone;
+  }
+  if (hourSel && wa.daily_report_hour !== undefined && !hourSel.dataset.userEdited) {
+    hourSel.value = String(wa.daily_report_hour);
+  }
+  if (enChk && !enChk.dataset.userEdited) {
+    enChk.checked = Boolean(wa.enabled);
+  }
+  if (btnToggle) {
+    btnToggle.textContent = wa.active ? "💬 WhatsApp: ON" : "💬 WhatsApp";
+  }
+  if (statusEl) {
+    if (wa.active) {
+      statusEl.textContent = `✅ WhatsApp CallMeBot ATIVO (${wa.phone}) • API Key ${wa.apikey_masked} • Resumo diário às ${String(wa.daily_report_hour ?? 21).padStart(2, "0")}:00 (Brasília).`;
+    } else if (wa.configured && !wa.enabled) {
+      statusEl.textContent = `⏸️ WhatsApp configurado (${wa.phone}), mas pausado. Marque "Ativo" e salve para reativar.`;
+    } else if (wa.phone) {
+      statusEl.textContent = `📱 Número ${wa.phone} salvo! Falta apenas colar a API Key recebida do CallMeBot e clicar em "Salvar & Testar".`;
+    } else {
+      statusEl.textContent = "Receba no WhatsApp: entradas, saídas (lucro/prejuízo), falhas operacionais e resumo diário automático.";
+    }
+  }
+}
+
+async function fetchWhatsAppConfigUI() {
+  try {
+    const res = await fetch("/api/alerts/whatsapp");
+    if (!res.ok) return;
+    const wa = await res.json();
+    applyWhatsAppConfigToUI(wa);
+  } catch (_) {
+    // silencioso
+  }
+}
+
+async function saveWhatsAppConfigUI() {
+  const phone = document.getElementById("waPhoneInput")?.value?.trim() || "";
+  const apikey = document.getElementById("waApiKeyInput")?.value?.trim() || "";
+  const dailyHour = Number(document.getElementById("waDailyHourSelect")?.value || 21);
+  const enabled = Boolean(document.getElementById("waEnabledCheck")?.checked ?? true);
+
+  if (!phone) {
+    showToast("Informe o seu número de WhatsApp com DDD (ex.: 62986290913).", "error");
+    return;
+  }
+  const btn = document.getElementById("btnSaveWhatsApp");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Testando...";
+  }
+  try {
+    const res = await fetch("/api/alerts/whatsapp", {
+      method: "POST",
+      headers: csrfHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        phone,
+        apikey,
+        enabled,
+        daily_report_hour: dailyHour,
+        send_test: enabled,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      showToast(data.detail || "Falha ao salvar configuração do WhatsApp.", "error");
+      return;
+    }
+    const hourSel = document.getElementById("waDailyHourSelect");
+    const enChk = document.getElementById("waEnabledCheck");
+    if (hourSel) delete hourSel.dataset.userEdited;
+    if (enChk) delete enChk.dataset.userEdited;
+    if (data.whatsapp) applyWhatsAppConfigToUI(data.whatsapp);
+    if (!enabled) {
+      showToast("⏸️ Alertas do WhatsApp pausados e salvos com sucesso.", "info");
+    } else if (data.test_result && data.test_result.sent) {
+      showToast("✅ WhatsApp conectado! Mensagem de teste enviada para o seu celular.", "success");
+    } else {
+      showToast(
+        `⚠️ Config salva, mas o envio de teste falhou: ${(data.test_result && data.test_result.error) || "verifique a API Key do CallMeBot"}`,
+        "error"
+      );
+    }
+  } catch (err) {
+    showToast(`Erro ao salvar WhatsApp: ${err}`, "error");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "💾 Salvar & Testar";
+    }
+  }
+}
+
+async function sendDailySummaryWhatsAppUI() {
+  const btn = document.getElementById("btnSendDailySummaryWa");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Enviando...";
+  }
+  try {
+    const res = await fetch("/api/alerts/whatsapp/daily-summary", {
+      method: "POST",
+      headers: csrfHeaders(),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      showToast(data.detail || "Falha ao enviar resumo diário.", "error");
+      return;
+    }
+    if (data.send_result && data.send_result.sent) {
+      showToast("📊 Resumo do dia enviado com sucesso para o seu WhatsApp!", "success");
+    } else {
+      showToast(
+        `⚠️ Não foi possível enviar o resumo: ${(data.send_result && data.send_result.error) || "configure a API Key do CallMeBot"}`,
+        "error"
+      );
+    }
+  } catch (err) {
+    showToast(`Erro ao enviar resumo diário: ${err}`, "error");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "📊 Resumo Hoje";
     }
   }
 }

@@ -21,8 +21,9 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+import alerts
 import binance_client
-from core import entry_guard, forex_ai_trader, macro_intelligence
+from core import entry_guard, error_learning, forex_ai_trader, macro_intelligence
 from core.database import TIMEFRAME_MS, TradingDatabase, timeframe_to_ms, timeframe_to_seconds
 from core.logging_setup import (
     BASE_DIR,
@@ -191,6 +192,7 @@ class TradingBotRunner:
         # Estado em runtime (inicializado em `run()`)
         self.db = TradingDatabase(db_path=self.db_path)
         self.macro_store = macro_intelligence.MacroLearningStore(db_path=self.db_path)
+        self.error_learning = error_learning.ErrorLearningStore(db_path=self.db_path)
         self.forex_trader = forex_ai_trader.ForexAITrader(db_path=self.db_path)
         self.model_storage = ModelPersistence(models_dir=DEFAULT_MODELS_DIR)
         self.exchange: Any = None
@@ -357,6 +359,9 @@ class TradingBotRunner:
             max_sl_pct=self.profile.max_sl_pct,
         )
         try:
+            hard_weights = error_learning.compute_hard_example_multipliers(
+                dataset, db_path=self.db_path, symbol=self.symbol, timeframe=self.timeframe
+            )
             self.model, self.current_model_acc = train_model(
                 dataset,
                 self.feature_cols,
@@ -365,6 +370,7 @@ class TradingBotRunner:
                 tp_pct=self.take_profit_pct,
                 sl_pct=self.stop_loss_pct,
                 confidence_threshold=self.confidence_threshold,
+                extra_sample_weights=hard_weights,
             )
             self.champion_metrics = getattr(
                 self.model, "validation_metrics_",
@@ -450,6 +456,9 @@ class TradingBotRunner:
                 min_sl_pct=self.profile.min_sl_pct,
                 max_sl_pct=self.profile.max_sl_pct,
             )
+            hard_weights = error_learning.compute_hard_example_multipliers(
+                retrain_dataset, db_path=self.db_path, symbol=self.symbol, timeframe=self.timeframe
+            )
             # Avalia o desafiante estritamente OUT-OF-SAMPLE (refit_full=False) contra o campeão
             # para evitar vazamento in-sample em eval_slice; só refita em 100% após promoção.
             challenger_oos, new_acc = train_model(
@@ -461,6 +470,7 @@ class TradingBotRunner:
                 sl_pct=self.stop_loss_pct,
                 confidence_threshold=self.confidence_threshold,
                 refit_full=False,
+                extra_sample_weights=hard_weights,
             )
             eval_slice = retrain_dataset.iloc[int(len(retrain_dataset) * 0.8):]
             with self.model_lock:
@@ -498,6 +508,7 @@ class TradingBotRunner:
                     sl_pct=self.stop_loss_pct,
                     confidence_threshold=self.confidence_threshold,
                     refit_full=True,
+                    extra_sample_weights=hard_weights,
                 )
                 chal_metrics = getattr(challenger_final, "validation_metrics_", chal_metrics)
                 with self.model_lock:
@@ -582,6 +593,34 @@ class TradingBotRunner:
         cur_atr = feat_dict.get("atr_pct")
         dyn_tp, dyn_sl = resolve_barriers(self.profile, atr_pct=float(cur_atr) if cur_atr is not None else None)
 
+        # Coleta e persiste contexto macro ANTES de avaliar lições aprendidas e salvar previsão/snapshot
+        macro_adj = 0.0
+        try:
+            macro = macro_intelligence.fetch_macro_snapshot()
+            self.last_macro = macro
+            if macro.get("available", True):
+                self.macro_store.save_macro_snapshot(self.symbol, self.timeframe, closed_ts, macro)
+            macro_adj = float(macro.get("confidence_adjustment", 0.0))
+            logger.info(
+                f"   🌎 [MACRO & NOTÍCIAS] {macro.get('badge', '')} {macro.get('regime')} "
+                f"(Score {macro.get('macro_score', 0):+.1f} | DXY {macro.get('dxy_change_pct', 0):+.2f}% | "
+                f"US10Y {macro.get('us10y_yield', 0):.2f}% | Notícias {macro.get('news_sentiment_score', 0):+.2f} | "
+                f"Ajuste filtro: {macro_adj:+.0%})"
+            )
+        except Exception as e:
+            logger.warning(f"   ⚠️ Contexto macro indisponível neste ciclo (usando apenas IA técnica): {e}")
+
+        # Avalia lições aprendidas e aplica alargamento adaptativo de SL/ATR ANTES de gravar previsão/snapshot
+        learned = self.error_learning.evaluate_setup_against_lessons(
+            symbol=self.symbol,
+            timeframe=self.timeframe,
+            features_row=feat_dict,
+            macro_snapshot=self.last_macro,
+            sl_pct=dyn_sl,
+        )
+        if learned["sl_atr_boost"] > 1.0:
+            dyn_sl = min(self.profile.max_sl_pct, dyn_sl * learned["sl_atr_boost"])
+
         pred, prob_down, prob_up = predict_signal(active_model, closed_features)
         pred_id = self.db.record_prediction(
             symbol=self.symbol,
@@ -602,24 +641,23 @@ class TradingBotRunner:
             f"[Prob. Alta: {prob_up:.1%} | Prob. Baixa: {prob_down:.1%}]"
         )
 
-        # Coleta e persiste contexto macro (Dólar DXY, Juros EUA 10Y, Notícias, Inflação/Fed)
-        macro_adj = 0.0
+        # Salva snapshot completo de parâmetros (já com dyn_sl final ajustado) para auto-análise caso erre
         try:
-            macro = macro_intelligence.fetch_macro_snapshot()
-            self.last_macro = macro
-            if macro.get("available", True):
-                self.macro_store.save_macro_snapshot(self.symbol, self.timeframe, closed_ts, macro)
-            macro_adj = float(macro.get("confidence_adjustment", 0.0))
-            logger.info(
-                f"   🌎 [MACRO & NOTÍCIAS] {macro.get('badge', '')} {macro.get('regime')} "
-                f"(Score {macro.get('macro_score', 0):+.1f} | DXY {macro.get('dxy_change_pct', 0):+.2f}% | "
-                f"US10Y {macro.get('us10y_yield', 0):.2f}% | Notícias {macro.get('news_sentiment_score', 0):+.2f} | "
-                f"Ajuste filtro: {macro_adj:+.0%})"
+            self.error_learning.save_decision_snapshot(
+                symbol=self.symbol,
+                timeframe=self.timeframe,
+                features_row=feat_dict,
+                macro_snapshot=self.last_macro,
+                candle_timestamp=closed_ts,
+                prediction_id=pred_id,
+                model_version=active_ver,
+                prob_up=prob_up,
+                extra={"tp_pct": dyn_tp, "sl_pct": dyn_sl, "prediction": pred, "entry_price": closed_close},
             )
-        except Exception as e:
-            logger.warning(f"   ⚠️ Contexto macro indisponível neste ciclo (usando apenas IA técnica): {e}")
+        except Exception:
+            pass
 
-        effective_confidence = min(0.85, max(0.55, self.active_confidence + macro_adj))
+        effective_confidence = min(0.88, max(0.55, self.active_confidence + macro_adj + learned["confidence_penalty"]))
 
         if not self.positions.in_position and pred == 1 and prob_up >= effective_confidence:
             last_trade = None
@@ -645,6 +683,7 @@ class TradingBotRunner:
                 last_trade=last_trade,
                 cooldown_seconds=cooldown_sec,
                 consecutive_losses=consec_losses,
+                learned_guard_result=learned,
             )
             if safe_to_enter:
                 safe_amount, size_mult, size_notes = entry_guard.compute_safe_position_size(
@@ -654,6 +693,8 @@ class TradingBotRunner:
                     consecutive_losses=consec_losses,
                     daily_pnl_usd=daily_pnl,
                     max_daily_loss_usdt=max_daily_loss,
+                    learned_size_multiplier=learned["size_multiplier"],
+                    learned_notes=learned["matched_lessons"],
                 )
                 size_detail = f" ({'; '.join(size_notes)})" if size_notes else ""
                 logger.info(
@@ -668,6 +709,12 @@ class TradingBotRunner:
                     tp_pct_override=dyn_tp,
                     sl_pct_override=dyn_sl,
                     amount_usdt_override=safe_amount,
+                    entry_context={
+                        "features": feat_dict,
+                        "macro": dict(self.last_macro) if self.last_macro else None,
+                        "candle_timestamp": closed_ts,
+                        "prediction_id": pred_id,
+                    },
                 )
             else:
                 logger.info(f"   🛡️ [ENTRADA BLOQUEADA POR SEGURANÇA] {' | '.join(guard_reasons)}")
@@ -697,6 +744,30 @@ class TradingBotRunner:
                 f"| Realizado={ev['actual_direction']} -> {status} "
                 f"(Entrada: ${ev['entry_price']:,.2f} -> Fechou: ${ev['actual_close']:,.2f})"
             )
+            # Autópsia automática de falsos positivos de compra (sinal 1 que falhou)
+            if ev.get("prediction") == 1 and not ev.get("is_correct"):
+                try:
+                    snap = self.error_learning.get_snapshot(
+                        self.symbol, self.timeframe, prediction_id=ev["id"]
+                    )
+                    params = dict(snap["parameters"]) if snap else {}
+                    params.setdefault("prob_up", float(ev.get("prob_up") or 0.0))
+                    pm_res = self.error_learning.record_error_postmortem(
+                        source="PREDICTION_MISS",
+                        symbol=self.symbol,
+                        timeframe=self.timeframe,
+                        params=params,
+                        outcome_reason=str(ev.get("outcome") or "MISS"),
+                        candle_timestamp=snap.get("candle_timestamp") if snap else None,
+                        model_version=int(snap.get("model_version") or self.model_version) if snap else self.model_version,
+                        prob_up=float(ev.get("prob_up") or 0.0),
+                    )
+                    logger.info(
+                        f"   🔬 [AUTO-ANÁLISE PREVISÃO #{ev['id']}] {pm_res['primary_label']} | "
+                        f"{pm_res['lesson_text']}"
+                    )
+                except Exception as el_err:
+                    logger.debug(f"Falha na auto-análise da previsão #{ev['id']}: {el_err}")
 
         acc_stats = self._refresh_calibration()
         if acc_stats["total"] > 0:
@@ -752,6 +823,10 @@ class TradingBotRunner:
             f"IA: {ia_label} [{self.calib['badge']} {self.calib['mode']}] | "
             f"Posição: {self.positions.status_label()}"
         )
+        try:
+            alerts.maybe_send_scheduled_daily_summary(db_path=self.db.db_path)
+        except Exception:
+            pass
 
     def _sleep_with_stop_check(self, seconds: int) -> bool:
         """Dorme `seconds` segundos checando `bot.stop` e sinal de desligamento a cada 1s. Retorna True se deve parar."""
