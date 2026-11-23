@@ -76,7 +76,7 @@ def test_supervisor_restarts_on_crash_and_stops_on_clean_exit(tmp_path, monkeypa
 
     calls = []
 
-    def fake_popen(cmd, cwd=None):
+    def fake_popen(cmd, cwd=None, **kwargs):
         code = next(codes)
         calls.append(code)
         return DummyProc(code)

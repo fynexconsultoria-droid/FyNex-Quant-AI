@@ -37,7 +37,10 @@ def fetch_live_ohlcv(
             )
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
             for col in ["open", "high", "low", "close", "volume"]:
-                df[col] = df[col].astype(float)
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            df = df.dropna(subset=["timestamp", "open", "high", "low", "close", "volume"])
+            df = df[(df["close"] > 0) & (df["high"] >= df["low"])]
+            df = df.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last").reset_index(drop=True)
 
             return df
         except (ccxt.RateLimitExceeded, ccxt.DDoSProtection) as e:
@@ -83,6 +86,17 @@ def fetch_live_ohlcv(
     return pd.DataFrame()
 
 
+def _filter_closed_candles(df: pd.DataFrame, tf_ms: int, now_ms: int) -> pd.DataFrame:
+    """Mantém apenas candles comprovadamente fechados (timestamp_ms + tf_ms <= now_ms)."""
+    if df.empty:
+        return df
+    if pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        ts_ms = df["timestamp"].map(lambda t: int(t.timestamp() * 1000))
+    else:
+        ts_ms = df["timestamp"].astype("int64")
+    return df.loc[(ts_ms + tf_ms) <= now_ms].reset_index(drop=True)
+
+
 def backfill_candles(
     db: TradingDatabase,
     exchange: ccxt.binance,
@@ -92,8 +106,8 @@ def backfill_candles(
     max_batches: int = 15,
 ) -> int:
     """
-    Sincroniza candles com a exchange preenchendo eventuais lacunas desde o último candle
-    salvo no banco (paginado com `since`), descartando o último candle em formação.
+    Sincroniza candles fechados com a exchange preenchendo lacunas desde o último candle
+    salvo no banco (paginado com `since`), filtrando candles ainda em formação por timestamp.
     """
     tf_ms = timeframe_to_ms(timeframe)
     now_ms = int(time.time() * 1000)
@@ -101,41 +115,53 @@ def backfill_candles(
 
     if last_ts is None or (now_ms - last_ts) > (max_batches * 1000 * tf_ms):
         df = fetch_live_ohlcv(exchange, symbol=symbol, timeframe=timeframe, limit=min_candles)
-        return db.save_candles(symbol, timeframe, df, drop_last_open=True)
+        closed_df = _filter_closed_candles(df, tf_ms, now_ms)
+        return db.save_candles(symbol, timeframe, closed_df, drop_last_open=False)
 
     total_saved = 0
     cursor_since = last_ts
-    for _ in range(max_batches):
+    for batch_idx in range(max_batches):
         df = fetch_live_ohlcv(exchange, symbol=symbol, timeframe=timeframe, limit=1000, since=cursor_since)
         if df.empty:
             break
-        total_saved += db.save_candles(symbol, timeframe, df, drop_last_open=True)
+        closed_df = _filter_closed_candles(df, tf_ms, now_ms)
+        if not closed_df.empty:
+            total_saved += db.save_candles(symbol, timeframe, closed_df, drop_last_open=False)
         last_fetched_ts = int(df["timestamp"].iloc[-1].timestamp() * 1000)
         if len(df) < 1000 or last_fetched_ts >= now_ms - tf_ms:
             break
         if last_fetched_ts <= cursor_since:
             break
-        cursor_since = last_fetched_ts
+        cursor_since = last_fetched_ts + tf_ms
+        if batch_idx + 1 < max_batches:
+            time.sleep(0.2)
 
     return total_saved
 
 
 def get_latest_contiguous_segment(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     """
-    Retorna apenas o segmento contíguo mais recente do DataFrame (sem buracos temporais),
-    garantindo que indicadores e alvos nunca cruzem uma lacuna de tempo.
+    Retorna apenas o segmento contíguo mais recente do DataFrame (ordenado, sem duplicatas
+    e sem buracos temporais), garantindo que indicadores e alvos nunca cruzem uma lacuna.
     """
     if df.empty or len(df) < 2:
         return df
 
+    work = df.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last").reset_index(drop=True)
+    if len(work) < 2:
+        return work
+
     tf_ms = timeframe_to_ms(timeframe)
-    if pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
-        diffs = df["timestamp"].diff().dt.total_seconds() * 1000.0
+    if pd.api.types.is_datetime64_any_dtype(work["timestamp"]):
+        diffs = work["timestamp"].diff().dt.total_seconds() * 1000.0
     else:
-        diffs = df["timestamp"].astype("int64").diff()
+        raw_ts = work["timestamp"].astype("int64")
+        if int(raw_ts.max()) < 100_000_000_000:
+            raw_ts = raw_ts * 1000
+        diffs = raw_ts.diff()
     gap_mask = diffs > (tf_ms * 1.5)
     if not gap_mask.any():
-        return df
+        return work
 
     last_gap_pos = int(np.where(gap_mask.values)[0][-1])
-    return df.iloc[last_gap_pos:].reset_index(drop=True)
+    return work.iloc[last_gap_pos:].reset_index(drop=True)

@@ -28,6 +28,17 @@ logger = logging.getLogger("QuantTradingBot")
 logger.setLevel(logging.INFO)
 
 
+class _WindowsSafeRotatingFileHandler(RotatingFileHandler):
+    """RotatingFileHandler tolerante a PermissionError no Windows quando `ver_logs.bat` lê o log."""
+
+    def doRollover(self) -> None:
+        try:
+            super().doRollover()
+        except PermissionError:
+            if self.stream is None:
+                self.stream = self._open()
+
+
 def setup_logging(log_path: Optional[str] = None, console: bool = True) -> logging.Logger:
     """
     Configura logging dual (console + RotatingFileHandler 5 MB x 5) sob demanda,
@@ -51,7 +62,7 @@ def setup_logging(log_path: Optional[str] = None, console: bool = True) -> loggi
         for h in logger.handlers
     )
     if not has_same_file:
-        file_h = RotatingFileHandler(
+        file_h = _WindowsSafeRotatingFileHandler(
             target_abs,
             maxBytes=5 * 1024 * 1024,
             backupCount=5,
@@ -70,8 +81,14 @@ def install_exception_hooks(stderr_log_path: Optional[str] = None) -> None:
     """
     if stderr_log_path and sys.stderr is None:
         try:
-            os.makedirs(os.path.dirname(stderr_log_path), exist_ok=True)
-            sys.stderr = open(stderr_log_path, "a", encoding="utf-8", buffering=1)
+            abs_stderr = os.path.abspath(stderr_log_path)
+            os.makedirs(os.path.dirname(abs_stderr), exist_ok=True)
+            # Limita crescimento ilimitado do stderr.log (trunca se ultrapassar 2 MB)
+            if os.path.exists(abs_stderr) and os.path.getsize(abs_stderr) > 2 * 1024 * 1024:
+                mode = "w"
+            else:
+                mode = "a"
+            sys.stderr = open(abs_stderr, mode, encoding="utf-8", buffering=1)
         except OSError:
             pass
 

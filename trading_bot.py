@@ -206,6 +206,7 @@ class TradingBotRunner:
 
         self.model_lock = threading.Lock()
         self.retrain_in_progress = False
+        self._forex_cycle_in_progress = False
         self.candles_since_retrain = 0
         self.last_evaluated_candle_ts = 0
         self.last_heartbeat_ts = 0.0
@@ -449,7 +450,9 @@ class TradingBotRunner:
                 min_sl_pct=self.profile.min_sl_pct,
                 max_sl_pct=self.profile.max_sl_pct,
             )
-            challenger, new_acc = train_model(
+            # Avalia o desafiante estritamente OUT-OF-SAMPLE (refit_full=False) contra o campeão
+            # para evitar vazamento in-sample em eval_slice; só refita em 100% após promoção.
+            challenger_oos, new_acc = train_model(
                 retrain_dataset,
                 f_cols,
                 model_version=ver,
@@ -457,11 +460,13 @@ class TradingBotRunner:
                 tp_pct=self.take_profit_pct,
                 sl_pct=self.stop_loss_pct,
                 confidence_threshold=self.confidence_threshold,
+                refit_full=False,
             )
             eval_slice = retrain_dataset.iloc[int(len(retrain_dataset) * 0.8):]
             with self.model_lock:
                 cur_champ = self.model
                 cur_champ_metrics = self.champion_metrics
+                cur_ver = self.model_version
 
             if cur_champ is not None and len(eval_slice) >= 20:
                 champ_eval = evaluate_model_on_dataset(
@@ -470,35 +475,46 @@ class TradingBotRunner:
                     confidence_threshold=self.confidence_threshold,
                 )
                 chal_eval = evaluate_model_on_dataset(
-                    challenger, eval_slice, f_cols,
+                    challenger_oos, eval_slice, f_cols,
                     tp_pct=self.take_profit_pct, sl_pct=self.stop_loss_pct,
                     confidence_threshold=self.confidence_threshold,
                 )
             else:
                 champ_eval = cur_champ_metrics
                 chal_eval = getattr(
-                    challenger, "validation_metrics_",
+                    challenger_oos, "validation_metrics_",
                     {"accuracy": new_acc, "precision_buy": new_acc},
                 )
 
-            chal_metrics = getattr(challenger, "validation_metrics_", chal_eval)
+            chal_metrics = getattr(challenger_oos, "validation_metrics_", chal_eval)
             promoted = should_promote_challenger(chal_eval, champ_eval)
             if promoted:
+                challenger_final, final_acc = train_model(
+                    retrain_dataset,
+                    f_cols,
+                    model_version=ver,
+                    horizon_candles=self.horizon_candles,
+                    tp_pct=self.take_profit_pct,
+                    sl_pct=self.stop_loss_pct,
+                    confidence_threshold=self.confidence_threshold,
+                    refit_full=True,
+                )
+                chal_metrics = getattr(challenger_final, "validation_metrics_", chal_metrics)
                 with self.model_lock:
-                    self.model = challenger
+                    self.model = challenger_final
                     self.model_version = ver
-                    self.current_model_acc = new_acc
+                    self.current_model_acc = final_acc
                     self.champion_metrics = chal_metrics
                     self.observation_mode = False
                 self.model_storage.save_model(
-                    challenger, ver, new_acc, f_cols, self.symbol, self.timeframe,
+                    challenger_final, ver, final_acc, f_cols, self.symbol, self.timeframe,
                     extra_meta={"validation": chal_metrics},
                 )
                 logger.info(f"🏆 [CAMPEÃO PROMOVIDO] Modelo v{ver} assumiu a operação e foi salvo em disco.")
             else:
                 logger.info(
                     f"🛡️ [CAMPEÃO MANTIDO] Desafiante v{ver} (Prec.Compra {chal_metrics.get('precision_buy', 0)*100:.1f}%) "
-                    f"não superou o campeão v{self.model_version} ({(cur_champ_metrics or {}).get('precision_buy', 0)*100:.1f}%)."
+                    f"não superou o campeão v{cur_ver} ({(cur_champ_metrics or {}).get('precision_buy', 0)*100:.1f}%)."
                 )
             try:
                 self.macro_store.record_learning_cycle(
@@ -543,7 +559,7 @@ class TradingBotRunner:
     def _run_inference(self, closed_ts: int, closed_close: float, current_price: float) -> None:
         assert self.positions is not None
         full_history_df = get_latest_contiguous_segment(
-            self.db.get_recent_candles(self.symbol, self.timeframe, limit=100), self.timeframe
+            self.db.get_recent_candles(self.symbol, self.timeframe, limit=200), self.timeframe
         )
         if len(full_history_df) >= 35:
             feat_full_df, _ = build_features(full_history_df)
@@ -562,6 +578,10 @@ class TradingBotRunner:
         if closed_features.empty or closed_features.isna().values.any():
             return
 
+        feat_dict = closed_features.iloc[0].to_dict()
+        cur_atr = feat_dict.get("atr_pct")
+        dyn_tp, dyn_sl = resolve_barriers(self.profile, atr_pct=float(cur_atr) if cur_atr is not None else None)
+
         pred, prob_down, prob_up = predict_signal(active_model, closed_features)
         pred_id = self.db.record_prediction(
             symbol=self.symbol,
@@ -572,8 +592,8 @@ class TradingBotRunner:
             prob_up=prob_up,
             prob_down=prob_down,
             entry_price=closed_close,
-            tp_pct=self.take_profit_pct,
-            sl_pct=self.stop_loss_pct,
+            tp_pct=dyn_tp,
+            sl_pct=dyn_sl,
             horizon_candles=self.horizon_candles,
         )
         logger.info(
@@ -587,7 +607,8 @@ class TradingBotRunner:
         try:
             macro = macro_intelligence.fetch_macro_snapshot()
             self.last_macro = macro
-            self.macro_store.save_macro_snapshot(self.symbol, self.timeframe, closed_ts, macro)
+            if macro.get("available", True):
+                self.macro_store.save_macro_snapshot(self.symbol, self.timeframe, closed_ts, macro)
             macro_adj = float(macro.get("confidence_adjustment", 0.0))
             logger.info(
                 f"   🌎 [MACRO & NOTÍCIAS] {macro.get('badge', '')} {macro.get('regime')} "
@@ -601,13 +622,13 @@ class TradingBotRunner:
         effective_confidence = min(0.85, max(0.55, self.active_confidence + macro_adj))
 
         if not self.positions.in_position and pred == 1 and prob_up >= effective_confidence:
-            feat_dict = closed_features.iloc[0].to_dict()
             last_trade = None
             try:
                 with self.db._get_connection() as conn:
                     row = conn.execute(
-                        "SELECT reason, pnl_usd, exit_time FROM simulated_trades WHERE symbol = ? AND timeframe = ? ORDER BY id DESC LIMIT 1",
-                        (self.symbol, self.timeframe),
+                        "SELECT reason, pnl_usd, exit_time FROM simulated_trades "
+                        "WHERE symbol = ? AND timeframe = ? AND mode = ? ORDER BY id DESC LIMIT 1",
+                        (self.symbol, self.timeframe, self.final_mode),
                     ).fetchone()
                     last_trade = dict(row) if row else None
             except Exception:
@@ -626,8 +647,6 @@ class TradingBotRunner:
                 consecutive_losses=consec_losses,
             )
             if safe_to_enter:
-                cur_atr = feat_dict.get("atr_pct")
-                dyn_tp, dyn_sl = resolve_barriers(self.profile, atr_pct=float(cur_atr) if cur_atr is not None else None)
                 safe_amount, size_mult, size_notes = entry_guard.compute_safe_position_size(
                     base_amount_usdt=self.positions.trade_amount_usdt,
                     features_row=feat_dict,
@@ -693,11 +712,20 @@ class TradingBotRunner:
         self._maybe_trigger_retrain()
         self._run_inference(closed_ts, closed_close, current_price)
 
-        # Em paralelo, escaneia pares de moedas (Forex) quando o mercado estiver aberto
-        try:
-            self.forex_trader.run_cycle(macro_snapshot=self.last_macro)
-        except Exception as e:
-            logger.warning(f"   ⚠️ [FOREX IA] Erro no ciclo de pares de moedas: {e}")
+        # Em paralelo (sem bloquear o loop de saídas cripto), escaneia Forex/Commodities
+        if not self._forex_cycle_in_progress:
+            macro_copy = dict(self.last_macro) if self.last_macro else None
+
+            def _run_forex_bg() -> None:
+                try:
+                    self.forex_trader.run_cycle(macro_snapshot=macro_copy)
+                except Exception as e:
+                    logger.warning(f"   ⚠️ [FOREX IA] Erro no ciclo de pares de moedas: {e}")
+                finally:
+                    self._forex_cycle_in_progress = False
+
+            self._forex_cycle_in_progress = True
+            threading.Thread(target=_run_forex_bg, daemon=True).start()
 
     def _emit_heartbeat(self, current_price: float) -> None:
         assert self.positions is not None
@@ -854,10 +882,12 @@ class TradingBotRunner:
                     self.db.save_candles(self.symbol, self.timeframe, live_df, drop_last_open=True)
                     current_price = float(live_df["close"].iloc[-1])
 
+                    open_candle_ts_ms = int(live_df["timestamp"].iloc[-1].timestamp() * 1000)
                     self.positions.check_exits(
                         current_price,
                         candle_high=float(live_df["high"].iloc[-1]),
                         candle_low=float(live_df["low"].iloc[-1]),
+                        candle_open_ts_ms=open_candle_ts_ms,
                     )
 
                     self._process_closed_candle(live_df.iloc[-2], current_price)

@@ -23,6 +23,7 @@ from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlparse
 
 import psutil
+from dotenv import dotenv_values
 from pydantic import BaseModel
 from fastapi import FastAPI, Query, HTTPException, Request, Depends
 from fastapi.staticfiles import StaticFiles
@@ -59,24 +60,41 @@ SUPERVISOR_SCRIPT = os.path.join(BASE_DIR, "supervisor.py")
 
 # Token CSRF gerado a cada inicialização do servidor e injetado no index.html
 CSRF_TOKEN = secrets.token_urlsafe(32)
+ENV_PATH = os.path.join(BASE_DIR, ".env")
+SYMBOL_PATTERN = r"^[A-Z0-9]{2,10}/[A-Z0-9]{2,10}$"
+TIMEFRAME_PATTERN = r"^(1m|3m|5m|15m|30m|1h)$"
+
+_SERVER_PORT = int(os.environ.get("PORT", "8000") or "8000")
 ALLOWED_HOSTS = {
     "127.0.0.1",
+    f"127.0.0.1:{_SERVER_PORT}",
     "127.0.0.1:8000",
     "localhost",
+    f"localhost:{_SERVER_PORT}",
     "localhost:8000",
+    "::1",
+    f"[::1]:{_SERVER_PORT}",
+    "[::1]:8000",
     "testserver",  # usado pelo TestClient do FastAPI/Starlette
 }
 ALLOWED_ORIGIN_TUPLES = {
+    ("http", "127.0.0.1", _SERVER_PORT),
     ("http", "127.0.0.1", 8000),
     ("http", "127.0.0.1", None),
+    ("http", "localhost", _SERVER_PORT),
     ("http", "localhost", 8000),
     ("http", "localhost", None),
+    ("http", "::1", _SERVER_PORT),
+    ("http", "::1", 8000),
+    ("http", "::1", None),
     ("http", "testserver", None),
 }
+_PUBLIC_HOSTS_REGISTERED = False
 
 
 def _register_cloud_hosts() -> None:
-    """Registra domínios públicos configurados no Railway/Render ou via FYNEX_PUBLIC_HOSTS."""
+    """Registra domínios públicos configurados no Railway/Render ou via FYNEX_PUBLIC_HOSTS (apenas HTTPS)."""
+    global _PUBLIC_HOSTS_REGISTERED
     raw_hosts = [
         os.environ.get("RAILWAY_PUBLIC_DOMAIN", ""),
         os.environ.get("RENDER_EXTERNAL_HOSTNAME", ""),
@@ -86,12 +104,12 @@ def _register_cloud_hosts() -> None:
         h = item.strip().lower().removeprefix("https://").removeprefix("http://").strip("/")
         if not h:
             continue
+        _PUBLIC_HOSTS_REGISTERED = True
         ALLOWED_HOSTS.add(h)
         host_only = h.split(":")[0]
         ALLOWED_HOSTS.add(host_only)
         ALLOWED_ORIGIN_TUPLES.add(("https", host_only, None))
         ALLOWED_ORIGIN_TUPLES.add(("https", host_only, 443))
-        ALLOWED_ORIGIN_TUPLES.add(("http", host_only, None))
 
 
 _register_cloud_hosts()
@@ -103,6 +121,7 @@ CSP_HEADER = (
     "font-src 'self' https://fonts.gstatic.com; "
     "img-src 'self' data:; "
     "connect-src 'self' wss://stream.binance.com:9443 wss://stream.binance.com:443 wss://stream.binance.com; "
+    "form-action 'self'; "
     "object-src 'none'; "
     "frame-ancestors 'none'; "
     "base-uri 'self'"
@@ -111,12 +130,61 @@ CSP_HEADER = (
 app = FastAPI(title="FyNex Quant AI Dashboard")
 
 
+def _get_auth_env(key: str, default: str = "") -> str:
+    val = os.environ.get(key)
+    if val is not None and val.strip():
+        return val.strip()
+    if os.path.exists(ENV_PATH):
+        try:
+            env_val = dotenv_values(ENV_PATH).get(key)
+            if env_val is not None and env_val.strip():
+                return env_val.strip()
+        except Exception:
+            pass
+    return default
+
+
+def _parse_host_header(host: str) -> str:
+    """Extrai o hostname de um header Host suportando IPv4, domínios e IPv6 ([::1]:8000), rejeitando userinfo/path."""
+    if not host or any(ch in host for ch in (" ", "\t", "\r", "\n", "@", "/", "?", "#")):
+        return ""
+    try:
+        parsed = urlparse(f"//{host}")
+        if (
+            parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.params
+            or parsed.query
+            or parsed.fragment
+        ):
+            return ""
+        return (parsed.hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def _is_loopback_host(hostname: str) -> bool:
+    return hostname in ("127.0.0.1", "localhost", "::1", "testserver")
+
+
 def _check_basic_auth(request: Request) -> bool:
-    """Se FYNEX_DASHBOARD_PASSWORD estiver definida (deploy na nuvem), exige HTTP Basic Auth."""
-    expected_pw = os.environ.get("FYNEX_DASHBOARD_PASSWORD", "").strip()
+    """
+    Exige HTTP Basic Auth quando:
+    - FYNEX_DASHBOARD_PASSWORD está configurada (env ou .env), OU
+    - o dashboard está exposto em host público/não-loopback (fail-closed).
+    """
+    expected_pw = _get_auth_env("FYNEX_DASHBOARD_PASSWORD", "")
+    bind_host = os.environ.get("HOST", "127.0.0.1").strip().lower()
+    req_hostname = _parse_host_header((request.headers.get("host") or "").strip().lower())
+    is_public_exposure = (
+        _PUBLIC_HOSTS_REGISTERED
+        or (bind_host not in ("127.0.0.1", "localhost", "::1", ""))
+        or (req_hostname != "" and not _is_loopback_host(req_hostname))
+    )
     if not expected_pw:
-        return True
-    expected_user = os.environ.get("FYNEX_DASHBOARD_USER", "admin").strip() or "admin"
+        return not is_public_exposure
+    expected_user = _get_auth_env("FYNEX_DASHBOARD_USER", "admin") or "admin"
     auth = request.headers.get("authorization") or ""
     if not auth.lower().startswith("basic "):
         return False
@@ -129,12 +197,31 @@ def _check_basic_auth(request: Request) -> bool:
 
 
 def is_allowed_origin(origin: str) -> bool:
-    """Valida exatamente scheme, host e porta do header Origin (evita bypass localhost.evil.com)."""
+    """Valida exatamente scheme, host e porta do header Origin (rejeita userinfo, path, query e subdomínios)."""
+    raw = origin.strip()
+    if not raw or any(ch in raw for ch in (" ", "\t", "\r", "\n", "@")):
+        return False
     try:
-        parsed = urlparse(origin.strip())
+        parsed = urlparse(raw)
     except Exception:
         return False
+    if (
+        parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        return False
     return (parsed.scheme.lower(), (parsed.hostname or "").lower(), parsed.port) in ALLOWED_ORIGIN_TUPLES
+
+
+def _apply_security_headers(response):
+    response.headers["Content-Security-Policy"] = CSP_HEADER
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    return response
 
 
 # -----------------------------------------------------------------------------
@@ -144,35 +231,38 @@ def is_allowed_origin(origin: str) -> bool:
 async def security_middleware(request: Request, call_next):
     # Healthcheck público para Railway / Render / Docker
     if request.url.path == "/healthz":
-        return JSONResponse({"status": "ok"})
+        return _apply_security_headers(JSONResponse({"status": "ok"}))
 
     host = (request.headers.get("host") or "").lower().strip()
-    host_no_port = host.split(":")[0]
+    host_no_port = _parse_host_header(host)
     if not host or (host not in ALLOWED_HOSTS and host_no_port not in ALLOWED_HOSTS):
-        return JSONResponse(
-            status_code=403,
-            content={"detail": f"Host '{host}' não autorizado (proteção contra DNS Rebinding)."},
+        return _apply_security_headers(
+            JSONResponse(
+                status_code=403,
+                content={"detail": f"Host '{host}' não autorizado (proteção contra DNS Rebinding)."},
+            )
         )
 
     origin = (request.headers.get("origin") or "").strip()
     if origin and not is_allowed_origin(origin):
-        return JSONResponse(
-            status_code=403,
-            content={"detail": f"Origem '{origin}' bloqueada (mesma origem exigida)."},
+        return _apply_security_headers(
+            JSONResponse(
+                status_code=403,
+                content={"detail": f"Origem '{origin}' bloqueada (mesma origem exigida)."},
+            )
         )
 
     if not _check_basic_auth(request):
-        return JSONResponse(
-            status_code=401,
-            headers={"WWW-Authenticate": 'Basic realm="FyNex Quant AI"'},
-            content={"detail": "Autenticação obrigatória para acessar o dashboard."},
+        return _apply_security_headers(
+            JSONResponse(
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="FyNex Quant AI"'},
+                content={"detail": "Autenticação obrigatória para acessar o dashboard."},
+            )
         )
 
     response = await call_next(request)
-    response.headers["Content-Security-Policy"] = CSP_HEADER
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    return response
+    return _apply_security_headers(response)
 
 
 def require_csrf(request: Request) -> None:
@@ -188,12 +278,11 @@ def require_csrf(request: Request) -> None:
 # Utilitários de Banco e Processo
 # -----------------------------------------------------------------------------
 def get_db_connection():
-    """Retorna uma conexão SQLite configurada para leitura rápida com WAL."""
+    """Retorna uma conexão SQLite configurada para leitura rápida sem lock de WAL por query."""
     if not os.path.exists(DB_PATH):
         return None
     conn = sqlite3.connect(DB_PATH, timeout=15.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA busy_timeout=15000;")
     return conn
 
@@ -352,6 +441,8 @@ def _build_calibration_status(
         rolling_accuracy=rolling_acc["accuracy_pct"],
         evaluated_count=rolling_acc["total"],
         base_threshold=profile.confidence,
+        buy_precision_pct=rolling_acc.get("buy_precision_pct"),
+        buy_evaluated_count=rolling_acc.get("buy_total"),
     )
     return {
         "mode": c_res["mode"],
@@ -363,13 +454,27 @@ def _build_calibration_status(
 
 
 _BOT_STATUS_CACHE_LOCK = threading.Lock()
-_BOT_STATUS_CACHE: Tuple[float, bool, Optional[int]] = (0.0, False, None)
+_BOT_STATUS_CACHE: Tuple[Optional[float], bool, Optional[int]] = (None, False, None)
+_BOT_START_LOCK = threading.Lock()
+_LAST_BOT_START_MONO: Optional[float] = None
+_REFRESH_COOLDOWN_LOCK = threading.Lock()
+_LAST_REFRESH_TS: Dict[str, float] = {}
+
+
+def _allow_forced_refresh(key: str, cooldown_sec: float = 15.0) -> bool:
+    now = time.monotonic()
+    with _REFRESH_COOLDOWN_LOCK:
+        last_ts = _LAST_REFRESH_TS.get(key)
+        if last_ts is not None and (now - last_ts) < cooldown_sec:
+            return False
+        _LAST_REFRESH_TS[key] = now
+        return True
 
 
 def _invalidate_bot_status_cache() -> None:
     global _BOT_STATUS_CACHE
     with _BOT_STATUS_CACHE_LOCK:
-        _BOT_STATUS_CACHE = (0.0, False, None)
+        _BOT_STATUS_CACHE = (None, False, None)
 
 
 def is_bot_running(use_cache: bool = True) -> Tuple[bool, Optional[int]]:
@@ -383,7 +488,7 @@ def is_bot_running(use_cache: bool = True) -> Tuple[bool, Optional[int]]:
     if use_cache:
         with _BOT_STATUS_CACHE_LOCK:
             ts, cached_running, cached_pid = _BOT_STATUS_CACHE
-            if (now - ts) < 2.5:
+            if ts is not None and (now - ts) < 2.5:
                 return cached_running, cached_pid
 
     pid = get_running_bot_pid(PID_FILE_PATH)
@@ -399,7 +504,7 @@ def is_bot_running(use_cache: bool = True) -> Tuple[bool, Optional[int]]:
             if "python" not in name:
                 continue
             cmdline = proc.info.get("cmdline") or []
-            if any("trading_bot.py" in str(arg).lower() for arg in cmdline):
+            if any(os.path.basename(str(arg).strip('"').strip("'")).lower() == "trading_bot.py" for arg in cmdline):
                 found_pid = proc.info["pid"]
                 break
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
@@ -427,8 +532,8 @@ def _tail_lines(file_path: str, max_lines: int = 50, max_bytes: int = 65536) -> 
 # -----------------------------------------------------------------------------
 @app.get("/api/status")
 def get_bot_status(
-    symbol: str = Query(default="BTC/USDT", max_length=20),
-    timeframe: Optional[str] = Query(default=None, max_length=10),
+    symbol: str = Query(default="BTC/USDT", pattern=SYMBOL_PATTERN),
+    timeframe: Optional[str] = Query(default=None, pattern=TIMEFRAME_PATTERN),
 ):
     """Retorna o estado geral do sistema, métricas da IA e saldo simulado filtrados por par/timeframe."""
     bot_running, bot_pid = is_bot_running()
@@ -436,7 +541,7 @@ def get_bot_status(
     with db_connection() as conn:
         bot_state = _fetch_bot_state(conn)
         active_symbol = symbol or (bot_state["symbol"] if bot_state else "BTC/USDT")
-        active_tf = timeframe or (bot_state["timeframe"] if bot_state else "1m")
+        active_tf = timeframe or (bot_state["timeframe"] if bot_state else "1h")
         latest_candle, rolling_acc, trade_stats, paper_pnl_usd = _query_status_metrics(
             conn, active_symbol, active_tf
         )
@@ -485,14 +590,14 @@ def get_bot_status(
 
 
 @app.get("/api/market/live")
-def get_live_market_ticker(symbol: str = Query(default="BTC/USDT", max_length=20)):
+def get_live_market_ticker(symbol: str = Query(default="BTC/USDT", pattern=SYMBOL_PATTERN)):
     """Retorna cotação ao vivo, spread, variação 24h e latência (Cripto Binance ou Forex XTB)."""
     try:
         if forex_market.is_forex_symbol(symbol):
             return forex_market.fetch_forex_quote(symbol=symbol)
         return binance_client.fetch_live_ticker(symbol=symbol, testnet=False)
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Falha ao consultar cotação ao vivo para {symbol}: {e}")
+    except Exception:
+        raise HTTPException(status_code=503, detail=f"Falha ao consultar cotação ao vivo para {symbol}.")
 
 
 @app.get("/api/market/instruments")
@@ -509,7 +614,7 @@ def get_market_watchlist(category: str = Query(default="all", pattern="^(all|cry
 
 @app.get("/api/market/depth")
 def get_live_market_depth(
-    symbol: str = Query(default="BTC/USDT", max_length=20),
+    symbol: str = Query(default="BTC/USDT", pattern=SYMBOL_PATTERN),
     limit: int = Query(default=15, ge=5, le=50),
 ):
     """Retorna resumo do Order Book (melhor bid/ask, spread e pressão compradora vs vendedora)."""
@@ -527,12 +632,12 @@ def get_live_market_depth(
                 "latency_ms": q["latency_ms"],
                 "timestamp": q["timestamp"],
             }
-        except Exception as e:
-            raise HTTPException(status_code=503, detail=f"Falha ao consultar book Forex: {e}")
+        except Exception:
+            raise HTTPException(status_code=503, detail="Falha ao consultar book Forex.")
     try:
         return binance_client.fetch_order_book_summary(symbol=symbol, limit=limit, testnet=False)
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Falha ao consultar livro de ofertas na Binance: {e}")
+    except Exception:
+        raise HTTPException(status_code=503, detail="Falha ao consultar livro de ofertas na Binance.")
 
 
 @app.get("/api/news")
@@ -543,7 +648,7 @@ def get_live_news(
     refresh: bool = Query(default=False),
 ):
     """Retorna notícias ao vivo do mercado financeiro (Cripto, Forex e Macro)."""
-    if refresh:
+    if refresh and _allow_forced_refresh("news", cooldown_sec=15.0):
         news_feed.clear_news_cache()
     return news_feed.fetch_live_news(category=category, query=q, limit=limit)
 
@@ -654,7 +759,12 @@ def get_xtb_copilot_telegram():
 @app.post("/api/xtb/copilot/telegram", dependencies=[Depends(require_csrf)])
 def save_xtb_copilot_telegram(payload: TelegramConfigPayload):
     """Salva configurações opcionais do Telegram para alertas do Copiloto XTB e envia mensagem de teste."""
-    cfg = xtb_copilot.save_telegram_config(bot_token=payload.bot_token, chat_id=payload.chat_id)
+    try:
+        cfg = xtb_copilot.save_telegram_config(bot_token=payload.bot_token, chat_id=payload.chat_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Falha ao salvar configuração do Telegram.")
     test_result = None
     if payload.send_test:
         test_result = xtb_copilot.send_telegram_message(
@@ -672,8 +782,8 @@ class AiChatPayload(BaseModel):
 
 @app.get("/api/ai/performance")
 def get_ai_performance(
-    symbol: str = Query(default="BTC/USDT", max_length=20),
-    timeframe: str = Query(default="1h", max_length=10),
+    symbol: str = Query(default="BTC/USDT", pattern=SYMBOL_PATTERN),
+    timeframe: str = Query(default="1h", pattern=TIMEFRAME_PATTERN),
 ):
     """Retorna evolução da IA e resultados consolidados em 24h, 7 dias e 30 dias."""
     return ai_chat.get_performance_summary(db_path=DB_PATH, symbol=symbol, timeframe=timeframe)
@@ -737,8 +847,13 @@ def close_xtb_order(position_id: int):
 
 
 @app.get("/api/binance/health")
-def get_binance_health(testnet: bool = Query(default=False)):
+def get_binance_health(
+    testnet: bool = Query(default=False),
+    refresh: bool = Query(default=False),
+):
     """Diagnóstico da conexão com a Binance: latência, sincronismo de relógio, mirror e métricas."""
+    if refresh and _allow_forced_refresh("binance_health", cooldown_sec=3.0):
+        return binance_client.check_binance_health(testnet=testnet, ttl_seconds=0.0)
     return binance_client.check_binance_health(testnet=testnet)
 
 
@@ -749,7 +864,7 @@ def get_binance_balance():
 
 
 @app.get("/api/binance/execution-ready")
-def get_binance_execution_ready(symbol: str = Query(default="BTC/USDT", max_length=20)):
+def get_binance_execution_ready(symbol: str = Query(default="BTC/USDT", pattern=SYMBOL_PATTERN)):
     """Diagnóstico de prontidão da conta Binance para entradas e saídas (chaves, Spot, saque, clock, saldo)."""
     return binance_client.check_execution_readiness(symbol=symbol)
 
@@ -832,7 +947,7 @@ def _run_ai_training_job(symbol: str, timeframe: str, candles: int, offline: boo
 @app.get("/api/macro/live")
 def get_live_macro_intelligence(refresh: bool = Query(default=False)):
     """Retorna inteligência macro ao vivo: Dólar (DXY), Juros EUA 10Y, S&P500, Fear & Greed, Notícias e Inflação/Fed."""
-    if refresh:
+    if refresh and _allow_forced_refresh("macro", cooldown_sec=15.0):
         macro_intelligence.clear_macro_cache()
     return macro_intelligence.fetch_macro_snapshot()
 
@@ -846,8 +961,8 @@ def get_ai_learning_history(limit: int = Query(default=15, ge=1, le=100)):
 
 @app.get("/api/ai/evolution")
 def get_ai_evolution(
-    symbol: str = Query(default="BTC/USDT", max_length=20),
-    timeframe: str = Query(default="1h", max_length=10),
+    symbol: str = Query(default="BTC/USDT", pattern=SYMBOL_PATTERN),
+    timeframe: str = Query(default="1h", pattern=TIMEFRAME_PATTERN),
 ):
     """Retorna a barra de progresso de evolução da IA e o radar de fatores globais."""
     macro = macro_intelligence.fetch_macro_snapshot()
@@ -900,8 +1015,8 @@ def start_ai_training(
 
 @app.get("/api/candles")
 def get_candles(
-    symbol: str = Query(default="BTC/USDT", max_length=20),
-    timeframe: str = Query(default="1m", max_length=10),
+    symbol: str = Query(default="BTC/USDT", pattern=SYMBOL_PATTERN),
+    timeframe: str = Query(default="1h", pattern=TIMEFRAME_PATTERN),
     limit: int = Query(default=150, ge=1, le=1000),
     source: str = Query(default="auto", pattern="^(auto|db|live)$"),
 ):
@@ -914,14 +1029,14 @@ def get_candles(
     if forex_market.is_forex_symbol(symbol):
         try:
             return forex_market.fetch_forex_candles(symbol=symbol, timeframe=timeframe, limit=limit)
-        except Exception as e:
-            raise HTTPException(status_code=503, detail=f"Falha ao buscar candles Forex para {symbol}: {e}")
+        except Exception:
+            raise HTTPException(status_code=503, detail=f"Falha ao buscar candles Forex para {symbol}.")
 
     if source == "live":
         try:
             return binance_client.fetch_live_candles(symbol=symbol, timeframe=timeframe, limit=limit, testnet=False)
-        except Exception as e:
-            raise HTTPException(status_code=503, detail=f"Falha ao buscar candles ao vivo da Binance: {e}")
+        except Exception:
+            raise HTTPException(status_code=503, detail="Falha ao buscar candles ao vivo da Binance.")
 
     candles = []
     with db_connection() as conn:
@@ -967,8 +1082,8 @@ def get_candles(
 
 @app.get("/api/predictions")
 def get_predictions(
-    symbol: str = Query(default="BTC/USDT", max_length=20),
-    timeframe: str = Query(default="1m", max_length=10),
+    symbol: str = Query(default="BTC/USDT", pattern=SYMBOL_PATTERN),
+    timeframe: str = Query(default="1h", pattern=TIMEFRAME_PATTERN),
     limit: int = Query(default=15, ge=1, le=200),
 ):
     """Retorna as últimas previsões e seus status de validação filtrados por par/timeframe."""
@@ -1059,8 +1174,8 @@ def test_binance_endpoint(payload: Optional[BinanceTestPayload] = None):
 
 @app.get("/api/trades")
 def get_trades(
-    symbol: Optional[str] = Query(default=None, max_length=20),
-    timeframe: Optional[str] = Query(default=None, max_length=10),
+    symbol: Optional[str] = Query(default=None, pattern=SYMBOL_PATTERN),
+    timeframe: Optional[str] = Query(default=None, pattern=TIMEFRAME_PATTERN),
     limit: int = Query(default=20, ge=1, le=200),
 ):
     """Retorna o histórico de operações executadas (filtrável por par e timeframe)."""
@@ -1099,53 +1214,72 @@ def get_recent_logs(lines: int = Query(default=50, ge=1, le=500)):
 
 @app.post("/api/bot/start", dependencies=[Depends(require_csrf)])
 def start_bot(
-    symbol: str = Query(default="BTC/USDT", pattern="^[A-Z0-9]{2,10}/[A-Z0-9]{2,10}$"),
-    timeframe: str = Query(default="1h", pattern="^(1m|3m|5m|15m|30m|1h)$"),
+    symbol: str = Query(default="BTC/USDT", pattern=SYMBOL_PATTERN),
+    timeframe: str = Query(default="1h", pattern=TIMEFRAME_PATTERN),
     retrain: Optional[int] = Query(default=None, ge=1, le=500),
-    trading_mode: Optional[str] = Query(default=None),
+    trading_mode: Optional[str] = Query(default=None, pattern="^(paper|testnet|live)$"),
     trade_amount: Optional[float] = Query(default=None, ge=10.0, le=10000.0),
 ):
     """Inicia o processo do robô supervisionado em segundo plano se já não estiver em execução."""
-    _invalidate_bot_status_cache()
-    running, pid = is_bot_running()
-    if running:
-        return {"status": "already_running", "pid": pid, "message": "O robô já está ativo em segundo plano."}
-
-    try:
-        if os.path.exists(STOP_SIGNAL_PATH):
-            try:
-                os.remove(STOP_SIGNAL_PATH)
-            except OSError:
-                pass
-
-        python_exe = sys.executable
-        target_script = SUPERVISOR_SCRIPT if os.path.exists(SUPERVISOR_SCRIPT) else BOT_SCRIPT
-        cmd = [python_exe, target_script, "--symbol", symbol, "--timeframe", timeframe]
-        if retrain is not None:
-            cmd.extend(["--retrain", str(retrain)])
-        if trading_mode:
-            cmd.extend(["--trading-mode", trading_mode])
-        if trade_amount:
-            cmd.extend(["--trade-amount", str(trade_amount)])
-
-        DETACHED_PROCESS = 0x00000008
-        proc = subprocess.Popen(
-            cmd,
-            cwd=BASE_DIR,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=DETACHED_PROCESS if os.name == "nt" else 0,
-            close_fds=True,
+    global _LAST_BOT_START_MONO
+    if forex_market.is_forex_symbol(symbol):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"O robô autônomo Binance Spot opera apenas pares cripto (ex.: BTC/USDT). "
+                f"'{symbol}' é monitorado automaticamente pelo Copiloto XTB / Forex IA."
+            ),
         )
+
+    with _BOT_START_LOCK:
         _invalidate_bot_status_cache()
-        return {
-            "status": "started",
-            "pid": proc.pid,
-            "message": f"Robô iniciado com sucesso (PID {proc.pid}) em {symbol} ({timeframe}).",
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao iniciar o robô: {str(e)}")
+        running, pid = is_bot_running(use_cache=False)
+        if running:
+            return {"status": "already_running", "pid": pid, "message": "O robô já está ativo em segundo plano."}
+        if _LAST_BOT_START_MONO is not None and (time.monotonic() - _LAST_BOT_START_MONO) < 4.0:
+            return {"status": "starting", "pid": None, "message": "Inicialização do robô já em andamento."}
+
+        try:
+            if os.path.exists(STOP_SIGNAL_PATH):
+                try:
+                    os.remove(STOP_SIGNAL_PATH)
+                except OSError:
+                    pass
+
+            python_exe = sys.executable
+            if os.name == "nt":
+                pyw_candidate = os.path.join(os.path.dirname(python_exe), "pythonw.exe")
+                if os.path.exists(pyw_candidate):
+                    python_exe = pyw_candidate
+
+            target_script = SUPERVISOR_SCRIPT if os.path.exists(SUPERVISOR_SCRIPT) else BOT_SCRIPT
+            cmd = [python_exe, target_script, "--symbol", symbol, "--timeframe", timeframe]
+            if retrain is not None:
+                cmd.extend(["--retrain", str(retrain)])
+            if trading_mode:
+                cmd.extend(["--trading-mode", trading_mode])
+            if trade_amount:
+                cmd.extend(["--trade-amount", str(trade_amount)])
+
+            creation_flags = (0x00000008 | 0x08000000) if os.name == "nt" else 0
+            proc = subprocess.Popen(
+                cmd,
+                cwd=BASE_DIR,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creation_flags,
+                close_fds=True,
+            )
+            _LAST_BOT_START_MONO = time.monotonic()
+            _invalidate_bot_status_cache()
+            return {
+                "status": "started",
+                "pid": proc.pid,
+                "message": f"Robô iniciado com sucesso (PID {proc.pid}) em {symbol} ({timeframe}).",
+            }
+        except Exception:
+            raise HTTPException(status_code=500, detail="Erro interno ao iniciar o processo do robô.")
 
 
 def _is_order_in_flight() -> bool:
@@ -1173,9 +1307,12 @@ def stop_bot():
     if not running or not pid:
         return {"status": "not_running", "message": "O robô não está em execução."}
 
+    p: Optional[psutil.Process] = None
+    orig_create_time: Optional[float] = None
     try:
         request_bot_stop(STOP_SIGNAL_PATH)
         p = psutil.Process(pid)
+        orig_create_time = p.create_time()
         for _ in range(180):  # até 45s (180 * 0.25s)
             if not p.is_running():
                 _invalidate_bot_status_cache()
@@ -1188,8 +1325,9 @@ def stop_bot():
                 "message": "Há uma ordem em andamento na exchange. A parada limpa foi solicitada e aguardará a conclusão.",
             }
 
-        p.terminate()
-        p.wait(timeout=3.0)
+        if is_pid_alive_bot(pid, expected_create_time=orig_create_time):
+            p.terminate()
+            p.wait(timeout=3.0)
         _invalidate_bot_status_cache()
         return {"status": "stopped", "message": f"Robô (PID {pid}) encerrado com sucesso."}
     except psutil.NoSuchProcess:
@@ -1202,10 +1340,12 @@ def stop_bot():
                 "message": "Ordem em andamento; encerramento forçado abortado por segurança.",
             }
         try:
-            psutil.Process(pid).kill()
+            if p is not None and is_pid_alive_bot(pid, expected_create_time=orig_create_time):
+                p.kill()
+            _invalidate_bot_status_cache()
             return {"status": "killed", "message": f"Processo forçado a fechar (PID {pid})."}
-        except Exception as e2:
-            raise HTTPException(status_code=500, detail=f"Falha ao parar o robô: {e2}")
+        except Exception:
+            raise HTTPException(status_code=500, detail="Falha ao parar o processo do robô.")
 
 
 # -----------------------------------------------------------------------------

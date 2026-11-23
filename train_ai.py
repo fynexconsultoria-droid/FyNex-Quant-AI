@@ -51,11 +51,16 @@ def download_deep_history(
         df = fetch_live_ohlcv(exchange, symbol=symbol, timeframe=timeframe, limit=1000, since=cursor)
         if df.empty:
             break
-        total_saved += db.save_candles(symbol, timeframe, df, drop_last_open=True)
-        last_ts = int(df["timestamp"].iloc[-1].timestamp() * 1000)
-        if len(df) < 1000 or last_ts >= now_ms - tf_ms or last_ts <= cursor:
+        # Filtra apenas candles já fechados por timestamp (nunca descarta o candle #1000 histórico fechado)
+        ts_ms = df["timestamp"].map(lambda t: int(t.timestamp() * 1000))
+        closed_df = df.loc[(ts_ms + tf_ms) <= now_ms].reset_index(drop=True)
+        if closed_df.empty:
             break
-        cursor = last_ts + tf_ms
+        total_saved += db.save_candles(symbol, timeframe, closed_df, drop_last_open=False)
+        last_saved_ts = int(closed_df["timestamp"].iloc[-1].timestamp() * 1000)
+        if len(df) < 1000 or last_saved_ts >= now_ms - tf_ms or last_saved_ts < cursor:
+            break
+        cursor = last_saved_ts + tf_ms
         time.sleep(0.25)
 
     return total_saved
@@ -103,7 +108,7 @@ def train_and_select_best_model(
 
     results: List[Dict[str, Any]] = []
     best_model: Optional[Any] = None
-    best_score: Tuple[float, float, float, float] = (-1e9, -1e9, -1e9, -1e9)
+    best_score: Tuple[int, float, float, float, float] = (-2, -1e9, -1e9, -1e9, -1e9)
     best_entry: Optional[Dict[str, Any]] = None
 
     total_cands = max(1, len(candidates))
@@ -139,9 +144,10 @@ def train_and_select_best_model(
         }
         results.append(entry)
 
-        # Critério quantitativo: maior PnL simulado, Profit Factor, precisão de compra e menor Brier
-        score = (entry["sim_pnl_pct"], entry["profit_factor"], entry["precision_buy"], -entry["brier_score"])
-        if score > best_score:
+        # Critério quantitativo: penaliza modelos mortos (0 sinais) para não vencerem modelos ativos
+        has_signals = 1 if entry["buy_signals"] >= 5 else (0 if entry["buy_signals"] > 0 else -1)
+        score = (has_signals, entry["sim_pnl_pct"], entry["profit_factor"], entry["precision_buy"], -entry["brier_score"])
+        if best_entry is None or score > best_score:
             best_score = score
             best_model = model
             best_entry = entry
@@ -208,7 +214,7 @@ def main() -> None:
         print("[1/2] Modo offline: usando candles existentes no SQLite.")
 
     df = db.get_recent_candles(args.symbol, args.timeframe, limit=max(args.candles, 2000))
-    print(f"[2/2] Treinando e comparando arquiteturas (RF vs HistGradientBoosting vs Ensemble)...")
+    print(f"[2/2] Treinando e comparando arquiteturas (RF vs ExtraTrees vs HistGradientBoosting vs Ensemble)...")
 
     summary = train_and_select_best_model(df, symbol=args.symbol, timeframe=args.timeframe)
 

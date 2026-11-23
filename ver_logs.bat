@@ -1,4 +1,6 @@
 @echo off
+setlocal
+cd /d "%~dp0"
 chcp 65001 >nul
 echo =========================================================
 echo       Acompanhamento ao Vivo dos Logs da IA

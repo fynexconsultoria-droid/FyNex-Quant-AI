@@ -41,6 +41,14 @@ def run_supervised(
     last_code = 0
 
     while True:
+        if os.path.exists(stop_signal_path):
+            logger.info("Sinal de parada detectado antes de iniciar o robô. Encerrando supervisor.")
+            try:
+                os.remove(stop_signal_path)
+            except OSError:
+                pass
+            return 0
+
         start_time = time.monotonic()
         logger.info(f"Iniciando robô supervisionado: {' '.join(cmd)}")
 
@@ -52,8 +60,7 @@ def run_supervised(
         creationflags = 0
         if os.name == "nt":
             creationflags |= getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
-            if sys.stdout is None:
-                creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
         proc = subprocess.Popen(cmd, cwd=BASE_DIR, env=child_env, creationflags=creationflags)
         last_code = proc.wait()
@@ -61,6 +68,16 @@ def run_supervised(
 
         if last_code == 0 or os.path.exists(stop_signal_path):
             logger.info(f"Robô encerrado normalmente (exit_code={last_code}). Encerrando supervisor.")
+            if os.path.exists(stop_signal_path):
+                try:
+                    os.remove(stop_signal_path)
+                except OSError:
+                    pass
+            return last_code
+
+        # Erros determinísticos de linha de comando (argparse exit code 2) não devem gerar loop infinito
+        if last_code == 2:
+            logger.critical("Robô encerrou com erro de argumentos CLI (exit_code=2). Abortando supervisor.")
             return last_code
 
         # Se rodou saudável por mais de 5 minutos, reseta o backoff
@@ -77,7 +94,19 @@ def run_supervised(
             f"Robô encerrou com erro (exit_code={last_code}) após {elapsed:.1f}s. "
             f"Reiniciando em {delay:.1f}s (tentativa #{restarts})..."
         )
-        time.sleep(delay)
+        # Dorme em fatias curtas para responder imediatamente a `bot.stop` durante o backoff
+        remaining = float(delay)
+        while remaining > 0:
+            if os.path.exists(stop_signal_path):
+                logger.info("Sinal de parada recebido durante backoff. Encerrando supervisor.")
+                try:
+                    os.remove(stop_signal_path)
+                except OSError:
+                    pass
+                return 0
+            step = min(1.0, remaining)
+            time.sleep(step)
+            remaining -= step
 
 
 if __name__ == "__main__":

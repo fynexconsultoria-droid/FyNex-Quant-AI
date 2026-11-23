@@ -14,7 +14,10 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
-from datetime import datetime, timezone
+import math
+import threading
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -23,6 +26,7 @@ from core import forex_market, xtb_copilot
 from core.ml import build_features
 
 logger = logging.getLogger("QuantTradingBot")
+_FOREX_CYCLE_LOCK = threading.Lock()
 
 FOREX_AI_PAIRS: Tuple[str, ...] = (
     # Moedas (Forex)
@@ -41,23 +45,58 @@ FOREX_AI_PAIRS: Tuple[str, ...] = (
 )
 
 
+def _us_eastern_dt(dt_utc: datetime) -> datetime:
+    """Converte um datetime UTC para horário de Nova York (EST UTC-5 / EDT UTC-4) sem depender de tzdata."""
+    if dt_utc.tzinfo is None:
+        dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+    else:
+        dt_utc = dt_utc.astimezone(timezone.utc)
+
+    year = dt_utc.year
+    # 2º domingo de março às 07:00 UTC (02:00 EST -> 03:00 EDT)
+    mar1 = datetime(year, 3, 1, tzinfo=timezone.utc)
+    mar_first_sun = 1 + (6 - mar1.weekday()) % 7
+    dst_start_utc = datetime(year, 3, mar_first_sun + 7, 7, 0, tzinfo=timezone.utc)
+
+    # 1º domingo de novembro às 06:00 UTC (02:00 EDT -> 01:00 EST)
+    nov1 = datetime(year, 11, 1, tzinfo=timezone.utc)
+    nov_first_sun = 1 + (6 - nov1.weekday()) % 7
+    dst_end_utc = datetime(year, 11, nov_first_sun, 6, 0, tzinfo=timezone.utc)
+
+    offset_hours = -4 if (dst_start_utc <= dt_utc < dst_end_utc) else -5
+    return dt_utc + timedelta(hours=offset_hours)
+
+
+def _safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+    if value is None:
+        return default
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return default
+    return f if math.isfinite(f) else default
+
+
 def is_forex_market_open(now_utc: Optional[datetime] = None) -> Tuple[bool, str]:
     """
-    Verifica se o mercado global de Forex está aberto (horário UTC):
-    - Abre: Domingo 22:30 UTC (evita os primeiros 30 min de spread de abertura)
-    - Fecha: Sexta 21:30 UTC (evita os últimos 30 min de spread de fechamento)
+    Verifica se o mercado global de Forex está aberto (horário de Nova York com DST automático):
+    - Abre: Domingo 17:30 ET (30 min após abertura de 17:00 ET, evitando spread inicial)
+    - Fecha: Sexta 16:30 ET (30 min antes do fechamento de 17:00 ET)
+    - Rollover diário (Seg–Qui 16:55–17:30 ET): pausado por baixa liquidez
     - Sábado: sempre fechado.
     """
-    dt = now_utc or datetime.now(timezone.utc)
-    wd = dt.weekday()  # 0=Seg ... 4=Sex, 5=Sáb, 6=Dom
-    mins = dt.hour * 60 + dt.minute
+    dt_et = _us_eastern_dt(now_utc or datetime.now(timezone.utc))
+    wd = dt_et.weekday()  # 0=Seg ... 4=Sex, 5=Sáb, 6=Dom
+    mins = dt_et.hour * 60 + dt_et.minute
 
     if wd == 5:
-        return False, "Mercado Forex fechado (Sábado — abre Domingo 19h30 BRT)."
-    if wd == 6 and mins < (22 * 60 + 30):
-        return False, "Mercado Forex fechado (Domingo — abre às 22:30 UTC / 19:30 BRT)."
-    if wd == 4 and mins >= (21 * 60 + 30):
-        return False, "Mercado Forex fechado (encerramento de Sexta-feira)."
+        return False, "Mercado Forex fechado (Sábado — abre Domingo 17:30 NY)."
+    if wd == 6 and mins < (17 * 60 + 30):
+        return False, "Mercado Forex fechado (Domingo — abre às 17:30 horário de NY)."
+    if wd == 4 and mins >= (16 * 60 + 30):
+        return False, "Mercado Forex fechado (encerramento de Sexta-feira em NY)."
+    if wd in (0, 1, 2, 3) and (16 * 60 + 55) <= mins < (17 * 60 + 30):
+        return False, "Mercado Forex em janela de rollover diário (16:55–17:30 NY)."
     return True, "Mercado Forex ABERTO (liquidez ativa)."
 
 
@@ -67,7 +106,7 @@ def evaluate_forex_opportunity(
     macro_snapshot: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
-    Avalia um par Forex em velas de 1h e retorna um dicionário de oportunidade
+    Avalia um par Forex em velas fechadas de 1h e retorna um dicionário de oportunidade
     com `side` ('BUY' | 'SELL' | 'NEUTRAL'), `score` (0..100), `atr_pct` e motivos.
     """
     if df.empty or len(df) < 35:
@@ -78,17 +117,17 @@ def evaluate_forex_opportunity(
         return None
     row = feat_df.iloc[-1]
 
-    rsi = float(row.get("rsi_14", 50.0) or 50.0)
-    macd_diff = float(row.get("macd_diff", 0.0) or 0.0)
-    ema_ratio = float(row.get("ema_trend_ratio", 0.0) or 0.0)
-    sma_ratio = float(row.get("sma_ratio", 0.0) or 0.0)
-    adx = float(row.get("adx_14", 0.0) or 0.0)
-    bb_pos = float(row.get("bb_pos", 0.5) or 0.5)
-    bb_width = float(row.get("bb_width", 0.01) or 0.01)
-    atr_pct = float(row.get("atr_pct", 0.003) or 0.003)
-    close_price = float(row.get("close", 0.0) or 0.0)
+    rsi = _safe_float(row.get("rsi_14"))
+    macd_diff = _safe_float(row.get("macd_diff"), 0.0) or 0.0
+    ema_ratio = _safe_float(row.get("ema_trend_ratio"), 0.0) or 0.0
+    sma_ratio = _safe_float(row.get("sma_ratio"), 0.0) or 0.0
+    adx = _safe_float(row.get("adx_14"), 0.0) or 0.0
+    bb_pos = _safe_float(row.get("bb_pos"))
+    bb_width = _safe_float(row.get("bb_width"), 0.01) or 0.01
+    atr_pct = _safe_float(row.get("atr_pct"))
+    close_price = _safe_float(row.get("close"), 0.0) or 0.0
 
-    if close_price <= 0:
+    if close_price <= 0 or rsi is None or bb_pos is None or atr_pct is None or atr_pct <= 0:
         return None
 
     # Travas conservadoras: sem lateralização morta nem volatilidade extrema
@@ -99,70 +138,85 @@ def evaluate_forex_opportunity(
 
     buy_pts = 0.0
     sell_pts = 0.0
-    reasons: List[str] = []
+    buy_reasons: List[str] = []
+    sell_reasons: List[str] = []
 
     # 1. Tendência EMA 12/26 + SMA 9/21 (até 40 pts)
     if ema_ratio > 0.0005:
         buy_pts += 22.0
-        reasons.append("EMA alta")
+        buy_reasons.append("EMA alta")
     elif ema_ratio < -0.0005:
         sell_pts += 22.0
-        reasons.append("EMA baixa")
+        sell_reasons.append("EMA baixa")
 
     if sma_ratio > 0.0003:
         buy_pts += 18.0
     elif sma_ratio < -0.0003:
         sell_pts += 18.0
 
-    # 2. Momentum MACD + RSI saudável (até 30 pts)
+    # 2. Momentum MACD + RSI simétrico (até 30 pts)
     if macd_diff > 0:
         buy_pts += 16.0
     elif macd_diff < 0:
         sell_pts += 16.0
 
-    if 46.0 <= rsi <= 66.0:
+    if 52.0 <= rsi <= 66.0:
         buy_pts += 14.0
-    elif 34.0 <= rsi <= 54.0:
+    elif 34.0 <= rsi <= 48.0:
         sell_pts += 14.0
+    elif 48.0 < rsi < 52.0:
+        if ema_ratio > 0:
+            buy_pts += 7.0
+        elif ema_ratio < 0:
+            sell_pts += 7.0
 
-    # 3. Força de tendência ADX (até 15 pts)
+    # 3. Força de tendência ADX (até 15 pts — sem viés em empate)
     if adx >= 0.22:
-        buy_pts += 15.0 if buy_pts >= sell_pts else 0.0
-        sell_pts += 15.0 if sell_pts > buy_pts else 0.0
-        reasons.append(f"ADX {adx*100:.0f}")
+        if buy_pts > sell_pts:
+            buy_pts += 15.0
+            buy_reasons.append(f"ADX {adx*100:.0f}")
+        elif sell_pts > buy_pts:
+            sell_pts += 15.0
+            sell_reasons.append(f"ADX {adx*100:.0f}")
 
     # 4. Influência do Dólar (DXY) e Juros EUA (até 15 pts)
     base, _, quote = symbol.upper().partition("/")
     if macro_snapshot:
-        dxy_chg = float(macro_snapshot.get("dxy_change_pct") or 0.0)
+        dxy_chg = _safe_float(macro_snapshot.get("dxy_change_pct"), 0.0) or 0.0
         if quote == "USD":
             # DXY caindo favorece EUR/USD, GBP/USD, AUD/USD, XAU/USD
             if dxy_chg <= -0.15:
                 buy_pts += 15.0
-                reasons.append(f"DXY {dxy_chg:+.2f}%")
+                buy_reasons.append(f"DXY {dxy_chg:+.2f}%")
             elif dxy_chg >= 0.15:
                 sell_pts += 15.0
-                reasons.append(f"DXY {dxy_chg:+.2f}%")
+                sell_reasons.append(f"DXY {dxy_chg:+.2f}%")
         elif base == "USD":
             # DXY subindo favorece USD/JPY, USD/BRL, USD/CHF
             if dxy_chg >= 0.15:
                 buy_pts += 15.0
-                reasons.append(f"DXY {dxy_chg:+.2f}%")
+                buy_reasons.append(f"DXY {dxy_chg:+.2f}%")
             elif dxy_chg <= -0.15:
                 sell_pts += 15.0
-                reasons.append(f"DXY {dxy_chg:+.2f}%")
+                sell_reasons.append(f"DXY {dxy_chg:+.2f}%")
+
+    # Empate ou falta de direção clara -> NEUTRAL
+    if buy_pts == sell_pts:
+        return {"symbol": symbol, "side": "NEUTRAL", "score": 0.0, "reason": "Sem direção dominante"}
 
     # Bloqueio anti-topo / anti-fundo (Bollinger + RSI)
-    if buy_pts >= sell_pts:
+    if buy_pts > sell_pts:
         if rsi > 68.0 or bb_pos > 0.92:
             return {"symbol": symbol, "side": "NEUTRAL", "score": 0.0, "reason": "Sobrecomprado (anti-topo)"}
         side = "BUY"
         score = round(min(100.0, buy_pts), 1)
+        reasons = buy_reasons
     else:
         if rsi < 32.0 or bb_pos < 0.08:
             return {"symbol": symbol, "side": "NEUTRAL", "score": 0.0, "reason": "Sobrevendido (anti-fundo)"}
         side = "SELL"
         score = round(min(100.0, sell_pts), 1)
+        reasons = sell_reasons
 
     return {
         "symbol": symbol,
@@ -228,10 +282,17 @@ class ForexAITrader:
 
         opportunities: List[Dict[str, Any]] = []
 
+        now_epoch = int((now_utc or datetime.now(timezone.utc)).timestamp())
+
         def _analyze_one(sym: str) -> Optional[Dict[str, Any]]:
             try:
                 raw_candles = forex_market.fetch_forex_candles(sym, timeframe="1h", limit=80)
                 if not raw_candles or len(raw_candles) < 35:
+                    return None
+                # Descarta o último candle em formação (evita repainting em vela 1h ainda aberta)
+                if len(raw_candles) > 35 and (int(raw_candles[-1]["time"]) + 3600) > now_epoch:
+                    raw_candles = raw_candles[:-1]
+                if len(raw_candles) < 35:
                     return None
                 df = pd.DataFrame(raw_candles)
                 df["timestamp"] = pd.to_datetime(df["time"], unit="s")
@@ -256,28 +317,34 @@ class ForexAITrader:
 
         opportunities.sort(key=lambda x: x.get("score", 0.0), reverse=True)
         last_action = None
+        open_forex_count = len(open_forex)
 
-        # 2. Se há vaga e existe oportunidade forte (>= min_score), abre na MELHOR!
-        if len(open_forex) < self.max_open_forex_positions:
+        # 2. Registra sinais fortes no Copiloto XTB (desacoplado da mesa simulada) e abre na mesa se houver vaga
+        with _FOREX_CYCLE_LOCK:
+            snap_latest = self.store.get_account_snapshot()
+            open_forex_latest = [p for p in snap_latest.get("open_positions", []) if p.get("category") != "crypto"]
+            open_syms = {p["symbol"] for p in open_forex_latest}
+            open_forex_count = len(open_forex_latest)
+
             for best in opportunities:
                 if best["side"] not in ("BUY", "SELL"):
                     continue
                 if best["score"] < self.min_score:
                     break
-                if best["symbol"] in open_syms:
-                    continue
 
                 sym = best["symbol"]
                 inst = forex_market.MARKET_INSTRUMENTS.get(sym, {})
                 decimals = int(inst.get("decimals", 5))
-                atr_pct = float(best.get("atr_pct", 0.003))
+                atr_pct = _safe_float(best.get("atr_pct"), 0.003) or 0.003
                 # TP/SL razoáveis adaptados ao par Forex (mínimo 0.35% TP / 0.25% SL)
                 tp_pct = min(max(atr_pct * 2.0, 0.0035), 0.0180)
                 sl_pct = min(max(atr_pct * 1.3, 0.0025), 0.0110)
 
                 try:
                     q = forex_market.fetch_forex_quote(sym)
-                    ref_price = float(q["ask"] if best["side"] == "BUY" else q["bid"])
+                    ref_price = float((q.get("ask") if best["side"] == "BUY" else q.get("bid")) or q.get("price") or 0.0)
+                    if not (ref_price > 0 and math.isfinite(ref_price)):
+                        continue
                     if best["side"] == "BUY":
                         tp_price = round(ref_price * (1.0 + tp_pct), decimals)
                         sl_price = round(ref_price * (1.0 - sl_pct), decimals)
@@ -285,50 +352,60 @@ class ForexAITrader:
                         tp_price = round(ref_price * (1.0 - tp_pct), decimals)
                         sl_price = round(ref_price * (1.0 + sl_pct), decimals)
 
-                    # Lote conservador (metade do padrão em volatilidade maior)
                     base_lot = float(inst.get("default_lot", 0.05))
                     safe_lot = round(base_lot * (0.5 if atr_pct > 0.008 else 1.0), 3)
                     safe_lot = max(float(inst.get("min_lot", 0.01)), safe_lot)
+                    eff_lev = min(self.leverage, int(inst.get("max_leverage", 30)))
 
-                    pos = self.store.open_position(
-                        symbol=sym,
-                        side=best["side"],
-                        lots=safe_lot,
-                        leverage=min(self.leverage, int(inst.get("max_leverage", 30))),
-                        sl_price=sl_price,
-                        tp_price=tp_price,
-                        quote_override=q,
-                    )
-                    # Registra sinal pronto no Copiloto XTB (com ticker exato da xStation 5 + alerta Telegram opcional)
+                    # Sempre registra sinal pronto no Copiloto XTB, mesmo se a mesa simulada estiver cheia
                     try:
                         self.copilot.record_signal(
                             symbol=sym,
                             side=best["side"],
                             score=best["score"],
-                            entry_price=pos["entry_price"],
+                            entry_price=ref_price,
                             sl_price=sl_price,
                             tp_price=tp_price,
                             suggested_lots=safe_lot,
-                            leverage=min(self.leverage, int(inst.get("max_leverage", 30))),
+                            leverage=eff_lev,
                             reason=best.get("reason", "Confluência técnica + macro"),
                             notify_telegram=True,
                         )
                     except Exception as cop_err:
                         logger.debug(f"[COPILOTO XTB] Falha ao gravar sinal para {sym}: {cop_err}")
 
-                    last_action = (
-                        f"Ordem {pos['side']} {pos['lots']} lote(s) em {sym} @ {pos['entry_price']} "
-                        f"(Score {best['score']:.0f}/100 | TP {tp_price} | SL {sl_price})"
-                    )
-                    logger.info(f"💱🚀 [FOREX IA ENTRADA] {last_action} | Motivos: {best['reason']}")
-                    break
+                    if open_forex_count < self.max_open_forex_positions and sym not in open_syms:
+                        pos = self.store.open_position(
+                            symbol=sym,
+                            side=best["side"],
+                            lots=safe_lot,
+                            leverage=eff_lev,
+                            sl_price=sl_price,
+                            tp_price=tp_price,
+                            quote_override=q,
+                        )
+                        open_forex_count += 1
+                        open_syms.add(sym)
+                        last_action = (
+                            f"Ordem {pos['side']} {pos['lots']} lote(s) em {sym} @ {pos['entry_price']} "
+                            f"(Score {best['score']:.0f}/100 | TP {tp_price} | SL {sl_price})"
+                        )
+                        logger.info(f"💱🚀 [FOREX IA ENTRADA] {last_action} | Motivos: {best['reason']}")
+                        break
+                    elif last_action is None:
+                        last_action = (
+                            f"Sinal Copiloto XTB {best['side']} em {sym} @ {ref_price} "
+                            f"(Score {best['score']:.0f}/100 | TP {tp_price} | SL {sl_price})"
+                        )
+                    if open_forex_count >= self.max_open_forex_positions:
+                        break
                 except Exception as e:
-                    logger.warning(f"💱 [FOREX IA] Não foi possível abrir {sym}: {e}")
+                    logger.warning(f"💱 [FOREX IA] Não foi possível processar {sym}: {e}")
 
         self.last_scan_report = {
             "market_open": True,
             "status_message": open_msg,
-            "open_forex_positions": len(open_forex),
+            "open_forex_positions": open_forex_count,
             "opportunities": opportunities[:7],
             "last_action": last_action,
         }

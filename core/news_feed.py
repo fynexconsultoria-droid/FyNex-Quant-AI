@@ -9,15 +9,19 @@ e mantém cache curto em memória para resposta instantânea no dashboard.
 from __future__ import annotations
 
 import html
+import logging
 import re
 import threading
 import time
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger("QuantTradingBot")
 
 NEWS_SOURCES: List[Dict[str, str]] = [
     {
@@ -58,23 +62,36 @@ _BULLISH_TERMS = (
 _BEARISH_TERMS = (
     "queda", "cai", "desaba", "crise", "inflação", "alerta", "liquidação", "perda",
     "risco", "recessão", "crash", "drops", "falls", "plunge", "bearish", "slumps",
-    "selloff", "tensão", "recua", "despenc", "deficit", "tarifa",
+    "selloff", "tensão", "recua", "despenca", "despencou", "despencam", "deficit", "tarifa",
+)
+
+_BULLISH_PATTERNS = tuple(re.compile(rf"\b{re.escape(k)}\b", re.IGNORECASE) for k in _BULLISH_TERMS)
+_BEARISH_PATTERNS = tuple(re.compile(rf"\b{re.escape(k)}\b", re.IGNORECASE) for k in _BEARISH_TERMS)
+_HAWKISH_OVERRIDE_RE = re.compile(r"\b(?:alta dos juros|alta da infla[cç][aã]o|infla[cç][aã]o sobe)\b", re.IGNORECASE)
+_CRYPTO_CAT_RE = re.compile(
+    r"\b(?:bitcoin|btc|ethereum|eth|cripto|crypto|binance|solana|blockchain)\b", re.IGNORECASE
+)
+_FOREX_CAT_RE = re.compile(
+    r"(?:eur/usd|gbp/usd|usd/jpy|\b(?:forex|d[oó]lar|euro|c[aâ]mbio|fed|banco central|juros|selic|ouro|xau)\b)",
+    re.IGNORECASE,
 )
 
 _NEWS_CACHE_LOCK = threading.Lock()
-_NEWS_CACHE: Tuple[float, List[Dict[str, Any]]] = (0.0, [])
+_NEWS_CACHE: Tuple[float, str, List[Dict[str, Any]]] = (0.0, "", [])
 
 
 def clear_news_cache() -> None:
     global _NEWS_CACHE
     with _NEWS_CACHE_LOCK:
-        _NEWS_CACHE = (0.0, [])
+        _NEWS_CACHE = (0.0, "", [])
 
 
 def _clean_text(raw: Optional[str], max_len: int = 240) -> str:
     if not raw:
         return ""
-    text = html.unescape(_TAG_RE.sub(" ", raw))
+    # Desescapa entidades HTML antes de remover tags (evita vazamento de HTML duplamente escapado)
+    unescaped = html.unescape(html.unescape(raw))
+    text = _TAG_RE.sub(" ", unescaped)
     text = _SPACE_RE.sub(" ", text).strip()
     if len(text) > max_len:
         return text[: max_len - 1].rstrip() + "…"
@@ -83,8 +100,11 @@ def _clean_text(raw: Optional[str], max_len: int = 240) -> str:
 
 def _classify_sentiment(title: str, summary: str) -> str:
     blob = f"{title} {summary}".lower()
-    bull = sum(1 for kw in _BULLISH_TERMS if kw in blob)
-    bear = sum(1 for kw in _BEARISH_TERMS if kw in blob)
+    # Neutraliza frases hawkish ("alta dos juros") antes de contar "alta" como positivo
+    hawkish_hits = len(_HAWKISH_OVERRIDE_RE.findall(blob))
+    cleaned_blob = _HAWKISH_OVERRIDE_RE.sub(" ", blob)
+    bull = sum(1 for rx in _BULLISH_PATTERNS if rx.search(cleaned_blob))
+    bear = sum(1 for rx in _BEARISH_PATTERNS if rx.search(cleaned_blob)) + hawkish_hits
     if bull > bear:
         return "positivo"
     if bear > bull:
@@ -94,17 +114,16 @@ def _classify_sentiment(title: str, summary: str) -> str:
 
 def _refine_category(default_cat: str, title: str, summary: str) -> str:
     blob = f"{title} {summary}".lower()
-    if any(k in blob for k in ("bitcoin", "btc", "ethereum", "eth", "cripto", "crypto", "binance", "solana", "blockchain")):
+    if _CRYPTO_CAT_RE.search(blob):
         return "cripto"
-    if any(k in blob for k in ("eur/usd", "gbp/usd", "usd/jpy", "forex", "dólar", "dolar", "euro", "câmbio", "cambio", "fed", "banco central", "juros", "selic", "ouro", "xau")):
+    if _FOREX_CAT_RE.search(blob):
         return "forex"
     return default_cat
 
 
 def _parse_pub_date(raw: Optional[str]) -> Tuple[int, str]:
     if not raw:
-        now = int(time.time())
-        return now, datetime.fromtimestamp(now, tz=timezone.utc).strftime("%d/%m %H:%M UTC")
+        return 0, "N/D"
     try:
         dt = parsedate_to_datetime(raw.strip())
         if dt.tzinfo is None:
@@ -114,22 +133,35 @@ def _parse_pub_date(raw: Optional[str]) -> Tuple[int, str]:
     except Exception:
         try:
             dt = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
             dt_utc = dt.astimezone(timezone.utc)
             return int(dt_utc.timestamp()), dt_utc.strftime("%d/%m %H:%M UTC")
         except Exception:
-            now = int(time.time())
-            return now, datetime.fromtimestamp(now, tz=timezone.utc).strftime("%d/%m %H:%M UTC")
+            return 0, "N/D"
 
 
 def _safe_url(url: Optional[str]) -> str:
     val = (url or "").strip()
-    if val.startswith("https://") or val.startswith("http://"):
-        return val
+    if not val or any(ch.isspace() or ord(ch) < 32 for ch in val):
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(val)
+        if parsed.scheme in ("http", "https") and parsed.netloc:
+            return val
+    except Exception:
+        pass
     return ""
 
 
 def parse_rss_xml(xml_bytes: bytes, source_name: str, default_category: str, max_items: int = 12) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
+    if not xml_bytes or len(xml_bytes) > 2_097_152:
+        return items
+    # Defesa contra entidades XML/DTD maliciosas
+    head_upper = xml_bytes[:4096].upper()
+    if b"<!ENTITY" in head_upper or b"<!DOCTYPE" in head_upper:
+        return items
     root = ET.fromstring(xml_bytes)
 
     # Suporta RSS 2.0 (<item>) e Atom (<entry>)
@@ -181,7 +213,7 @@ def _fetch_single_feed(source: Dict[str, str], timeout: float = 4.5) -> List[Dic
         },
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = resp.read()
+        data = resp.read(2_097_152)
     return parse_rss_xml(data, source["name"], source["category"], max_items=12)
 
 
@@ -198,19 +230,22 @@ def fetch_live_news(
     global _NEWS_CACHE
     now = time.monotonic()
     with _NEWS_CACHE_LOCK:
-        cached_ts, cached_items = _NEWS_CACHE
+        cached_ts, cached_updated_str, cached_items = _NEWS_CACHE
         has_valid_cache = bool(cached_items) and (now - cached_ts) < ttl_seconds
 
+    stale = False
     if has_valid_cache:
         all_items = cached_items
+        updated_at_str = cached_updated_str or datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
     else:
         collected: List[Dict[str, Any]] = []
         with ThreadPoolExecutor(max_workers=len(NEWS_SOURCES)) as pool:
-            futures = [pool.submit(_fetch_single_feed, src) for src in NEWS_SOURCES]
+            futures = {pool.submit(_fetch_single_feed, src): src["name"] for src in NEWS_SOURCES}
             for fut in as_completed(futures):
                 try:
                     collected.extend(fut.result())
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"[NEWS] Falha no feed '{futures[fut]}': {e}")
                     continue
 
         # Remove duplicatas pelo título normalizado e ordena das mais recentes para mais antigas
@@ -225,11 +260,14 @@ def fetch_live_news(
             deduped.append(item)
 
         if deduped:
+            updated_at_str = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
             with _NEWS_CACHE_LOCK:
-                _NEWS_CACHE = (now, deduped)
+                _NEWS_CACHE = (now, updated_at_str, deduped)
             all_items = deduped
         else:
             all_items = cached_items
+            updated_at_str = cached_updated_str or datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+            stale = True
 
     filtered = all_items
     cat = (category or "all").lower().strip()
@@ -246,6 +284,7 @@ def fetch_live_news(
     safe_limit = max(1, min(int(limit), 100))
     return {
         "total": len(filtered),
-        "updated_at": datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
+        "updated_at": updated_at_str,
+        "stale": stale,
         "items": filtered[:safe_limit],
     }

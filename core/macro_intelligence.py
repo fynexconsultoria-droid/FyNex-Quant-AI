@@ -14,6 +14,9 @@ Combina dados reais ao vivo para apoiar a tomada de decisão da IA nas entradas 
 from __future__ import annotations
 
 import json
+import logging
+import os
+import re
 import sqlite3
 import threading
 import time
@@ -25,41 +28,58 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from core import forex_market, news_feed
 
+logger = logging.getLogger("QuantTradingBot")
+
 _MACRO_CACHE_LOCK = threading.Lock()
 _MACRO_CACHE: Tuple[float, Optional[Dict[str, Any]]] = (0.0, None)
+_MACRO_DB_INIT_LOCK = threading.Lock()
+_INITIALIZED_MACRO_DBS: set = set()
 
-_INFLATION_FED_KEYWORDS = (
+
+def _compile_kw_regex(keywords: Tuple[str, ...]) -> re.Pattern:
+    parts = [rf"\b{re.escape(k)}\b" for k in keywords]
+    return re.compile("|".join(parts), re.IGNORECASE)
+
+
+_INFLATION_FED_RE = _compile_kw_regex((
     "fed", "federal reserve", "fomc", "powell", "juros", "taxa de juros", "interest rate",
     "rate cut", "rate hike", "inflação", "inflacao", "inflation", "cpi", "pce",
     "treasury", "payroll", "selic", "banco central", "central bank",
-)
-_DOVISH_KEYWORDS = (
+))
+_DOVISH_RE = _compile_kw_regex((
     "corte", "cut", "queda da inflação", "desacelera", "alívio", "dovish", "cooling",
     "slows", "lower rates", "estímulo", "stimulus", "pausa", "pause",
-)
-_HAWKISH_KEYWORDS = (
+))
+_HAWKISH_RE = _compile_kw_regex((
     "alta dos juros", "hike", "inflação sobe", "acima do esperado", "hawkish", "hotter",
     "recessão", "recession", "aperto", "tightening", "higher for longer", "alerta",
-)
-_GEOPOLITICS_WAR_KEYWORDS = (
+))
+_GEOPOLITICS_WAR_RE = _compile_kw_regex((
     "guerra", "war", "conflito", "conflict", "míssil", "missile", "ataque", "attack",
     "sanção", "sanctions", "oriente médio", "middle east", "ucrânia", "ukraine",
     "taiwan", "otan", "nato", "opep", "opec", "tensão geopolítica", "geopolitical",
-)
-_CLIMATE_ENERGY_KEYWORDS = (
+))
+_CLIMATE_ENERGY_RE = _compile_kw_regex((
     "clima", "climate", "seca", "drought", "furacão", "hurricane", "enchente", "flood",
     "el niño", "safra", "harvest", "petróleo", "oil", "brent", "wti", "gás natural", "energia",
-)
-_RARE_EARTH_MINERALS_KEYWORDS = (
+))
+_RARE_EARTH_MINERALS_RE = _compile_kw_regex((
     "terras raras", "rare earth", "lítio", "lithium", "cobre", "copper", "ouro", "gold",
     "prata", "silver", "minério", "mineral", "mining", "urânio", "uranium", "níquel", "cobalto",
-)
+))
 
 
 def clear_macro_cache() -> None:
     global _MACRO_CACHE
     with _MACRO_CACHE_LOCK:
         _MACRO_CACHE = (0.0, None)
+
+
+def get_cached_macro_snapshot() -> Optional[Dict[str, Any]]:
+    """Retorna o último snapshot macro em cache sem fazer chamadas de rede."""
+    with _MACRO_CACHE_LOCK:
+        _, cached = _MACRO_CACHE
+        return dict(cached) if cached is not None else None
 
 
 def _fetch_yahoo_change(ticker: str) -> Tuple[float, float]:
@@ -81,7 +101,7 @@ def _fetch_fear_and_greed(timeout: float = 4.0) -> Tuple[Optional[int], str]:
         headers={"User-Agent": "FyNexQuantAI/2.0", "Accept": "application/json"},
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        data = json.loads(resp.read(65536).decode("utf-8", errors="replace"))
     entry = (data.get("data") or [{}])[0]
     val = int(entry.get("value", 50))
     label = str(entry.get("value_classification", "Neutral"))
@@ -117,17 +137,17 @@ def analyze_news_and_inflation(items: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     for i in items:
         blob = f"{i.get('title', '')} {i.get('summary', '')}".lower()
-        if any(kw in blob for kw in _INFLATION_FED_KEYWORDS):
+        if _INFLATION_FED_RE.search(blob):
             inf_mentions += 1
-            if any(k in blob for k in _DOVISH_KEYWORDS):
+            if _DOVISH_RE.search(blob):
                 dovish += 1
-            if any(k in blob for k in _HAWKISH_KEYWORDS):
+            if _HAWKISH_RE.search(blob):
                 hawkish += 1
-        if any(kw in blob for kw in _GEOPOLITICS_WAR_KEYWORDS):
+        if _GEOPOLITICS_WAR_RE.search(blob):
             war_mentions += 1
-        if any(kw in blob for kw in _CLIMATE_ENERGY_KEYWORDS):
+        if _CLIMATE_ENERGY_RE.search(blob):
             climate_mentions += 1
-        if any(kw in blob for kw in _RARE_EARTH_MINERALS_KEYWORDS):
+        if _RARE_EARTH_MINERALS_RE.search(blob):
             minerals_mentions += 1
 
     inf_bias = (dovish - hawkish) / max(1, inf_mentions) if inf_mentions > 0 else 0.0
@@ -302,6 +322,8 @@ def fetch_macro_snapshot(ttl_seconds: float = 300.0) -> Dict[str, Any]:
         "news": lambda: news_feed.fetch_live_news(category="all", limit=36),
     }
 
+    succeeded = 0
+    failed_sources: List[str] = []
     with ThreadPoolExecutor(max_workers=8) as pool:
         future_map = {pool.submit(fn): key for key, fn in tasks.items()}
         for fut in as_completed(future_map):
@@ -327,11 +349,35 @@ def fetch_macro_snapshot(ttl_seconds: float = 300.0) -> Dict[str, Any]:
                 elif key == "fng":
                     snap["fear_greed_value"], snap["fear_greed_label"] = res
                 elif key == "news":
-                    snap.update(analyze_news_and_inflation(res.get("items") or []))
-            except Exception:
+                    items = (res.get("items") or []) if isinstance(res, dict) else []
+                    if (isinstance(res, dict) and res.get("stale")) or not items:
+                        failed_sources.append(key)
+                        continue
+                    snap.update(analyze_news_and_inflation(items))
+                succeeded += 1
+            except Exception as e:
+                failed_sources.append(key)
+                logger.debug(f"[MACRO] Falha na fonte '{key}': {e}")
                 continue
 
+    if succeeded == 0:
+        logger.warning("⚠️ [MACRO] Todas as fontes macro falharam; preservando cache anterior se disponível.")
+        with _MACRO_CACHE_LOCK:
+            _, prev_val = _MACRO_CACHE
+        if prev_val is not None:
+            stale_copy = dict(prev_val)
+            stale_copy["stale"] = True
+            return stale_copy
+        snap.update(compute_macro_decision(snap))
+        snap["available"] = False
+        snap["stale"] = True
+        snap["failed_sources"] = failed_sources
+        return snap
+
     snap.update(compute_macro_decision(snap))
+    snap["available"] = True
+    snap["stale"] = False
+    snap["failed_sources"] = failed_sources
 
     with _MACRO_CACHE_LOCK:
         _MACRO_CACHE = (now, snap)
@@ -344,19 +390,21 @@ def fetch_macro_snapshot(ttl_seconds: float = 300.0) -> Dict[str, Any]:
 class MacroLearningStore:
     """
     Salva continuamente no SQLite:
-    - `macro_context_snapshots`: contexto macro + notícias de cada candle fechado (30m)
+    - `macro_context_snapshots`: contexto macro + notícias de cada candle fechado
     - `learning_history`: cada ciclo de treinamento/retreino da IA para evolução contínua
     """
 
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self._init_tables()
+        with _MACRO_DB_INIT_LOCK:
+            if db_path not in _INITIALIZED_MACRO_DBS or not os.path.exists(db_path):
+                self._init_tables()
+                _INITIALIZED_MACRO_DBS.add(db_path)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.db_path, timeout=15.0)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA busy_timeout=15000;")
         try:
             with conn:
@@ -366,6 +414,7 @@ class MacroLearningStore:
 
     def _init_tables(self) -> None:
         with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS macro_context_snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -404,7 +453,6 @@ class MacroLearningStore:
                     notes TEXT DEFAULT ''
                 );
             """)
-            conn.commit()
 
     def save_macro_snapshot(
         self,
@@ -513,12 +561,12 @@ class MacroLearningStore:
 def compute_ai_evolution_progress(
     db_path: str,
     symbol: str = "BTC/USDT",
-    timeframe: str = "30m",
+    timeframe: str = "1h",
     macro_snapshot: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Calcula o progresso real de evolução e adaptação da IA ao mercado (0% a 100%)
-    combinando 4 pilares persistidos no SQLite:
+    combinando 4 pilares persistidos no SQLite (somente leitura, sem criar tabelas):
     1. Memória de Mercado (candles salvos, alvo 3.000 candles) — 30 pts
     2. Memória Macro & Geopolítica (snapshots macro/notícias salvos, alvo 100) — 20 pts
     3. Ciclos de Aprendizado & Evolução do Modelo (learning_history, alvo 15 ciclos) — 25 pts
@@ -532,35 +580,49 @@ def compute_ai_evolution_progress(
     eval_acc = 50.0
     model_version = 1
 
-    try:
-        store = MacroLearningStore(db_path=db_path)
-        with store._connect() as conn:
-            r_c = conn.execute(
-                "SELECT COUNT(*) AS n FROM ohlcv_candles WHERE symbol = ? AND timeframe = ?",
-                (symbol, timeframe),
-            ).fetchone()
-            candles_count = int(r_c["n"] or 0) if r_c else 0
+    if db_path and os.path.exists(db_path):
+        conn = None
+        try:
+            conn = sqlite3.connect(db_path, timeout=15.0)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON;")
+            conn.execute("PRAGMA busy_timeout=15000;")
+            existing_tables = {
+                r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            }
+            if "ohlcv_candles" in existing_tables:
+                r_c = conn.execute(
+                    "SELECT COUNT(*) AS n FROM ohlcv_candles WHERE symbol = ? AND timeframe = ?",
+                    (symbol, timeframe),
+                ).fetchone()
+                candles_count = int(r_c["n"] or 0) if r_c else 0
 
-            r_m = conn.execute("SELECT COUNT(*) AS n FROM macro_context_snapshots").fetchone()
-            macro_snaps = int(r_m["n"] or 0) if r_m else 0
+            if "macro_context_snapshots" in existing_tables:
+                r_m = conn.execute("SELECT COUNT(*) AS n FROM macro_context_snapshots").fetchone()
+                macro_snaps = int(r_m["n"] or 0) if r_m else 0
 
-            r_l = conn.execute(
-                "SELECT COUNT(*) AS n, COALESCE(SUM(promoted), 0) AS p, COALESCE(MAX(model_version), 1) AS mv FROM learning_history"
-            ).fetchone()
-            if r_l:
-                learning_cycles = int(r_l["n"] or 0)
-                promoted_cycles = int(r_l["p"] or 0)
-                model_version = max(1, int(r_l["mv"] or 1))
+            if "learning_history" in existing_tables:
+                r_l = conn.execute(
+                    "SELECT COUNT(*) AS n, COALESCE(SUM(promoted), 0) AS p, COALESCE(MAX(model_version), 1) AS mv FROM learning_history"
+                ).fetchone()
+                if r_l:
+                    learning_cycles = int(r_l["n"] or 0)
+                    promoted_cycles = int(r_l["p"] or 0)
+                    model_version = max(1, int(r_l["mv"] or 1))
 
-            p_rows = conn.execute(
-                "SELECT is_correct FROM predictions WHERE symbol = ? AND is_correct IS NOT NULL ORDER BY id DESC LIMIT 40",
-                (symbol,),
-            ).fetchall()
-            if p_rows:
-                eval_total = len(p_rows)
-                eval_acc = sum(1 for r in p_rows if r["is_correct"] == 1) / eval_total * 100.0
-    except Exception:
-        pass
+            if "predictions" in existing_tables:
+                p_rows = conn.execute(
+                    "SELECT is_correct FROM predictions WHERE symbol = ? AND timeframe = ? AND is_correct IS NOT NULL ORDER BY id DESC LIMIT 40",
+                    (symbol, timeframe),
+                ).fetchall()
+                if p_rows:
+                    eval_total = len(p_rows)
+                    eval_acc = sum(1 for r in p_rows if r["is_correct"] == 1) / eval_total * 100.0
+        except Exception:
+            pass
+        finally:
+            if conn is not None:
+                conn.close()
 
     pts_candles = min(30.0, (candles_count / 3000.0) * 30.0)
     pts_macro = min(20.0, (macro_snaps / 100.0) * 20.0)
@@ -575,7 +637,7 @@ def compute_ai_evolution_progress(
     progress_pct = round(max(5.0, min(100.0, pts_candles + pts_macro + pts_cycles + pts_acc)), 1)
 
     if progress_pct < 25.0:
-        level, stage_name, next_milestone = 1, "Coleta & Observação", "Acumular base de candles 30m e snapshots macro"
+        level, stage_name, next_milestone = 1, "Coleta & Observação", f"Acumular base de candles {timeframe} e snapshots macro"
     elif progress_pct < 50.0:
         level, stage_name, next_milestone = 2, "Aprendizado Base", "Completar novos ciclos de retreino com macro/notícias"
     elif progress_pct < 75.0:

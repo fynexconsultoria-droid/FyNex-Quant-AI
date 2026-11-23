@@ -11,7 +11,7 @@ Gestão de Posição e Risco (FyNex Quant AI)
 import os
 import logging
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple, Dict, Any
 
 import alerts
@@ -134,17 +134,24 @@ class RiskManager:
             row = conn.execute("""
                 SELECT COUNT(*) AS n, COALESCE(SUM(pnl_usd), 0.0) AS pnl
                 FROM simulated_trades
-                WHERE mode = ? AND substr(entry_time, 1, 10) = ?
+                WHERE mode = ? AND substr(COALESCE(exit_time, entry_time), 1, 10) = ?
             """, (self.mode, today)).fetchone()
         return int(row["n"] or 0), float(row["pnl"] or 0.0)
 
-    def consecutive_losses(self) -> int:
-        """Conta quantas operações seguidas terminaram no prejuízo no modo atual."""
+    def consecutive_losses(self, window_hours: Optional[float] = 24.0) -> int:
+        """Conta quantas operações seguidas terminaram no prejuízo no modo atual (dentro da janela)."""
         with self.db._get_connection() as conn:
-            rows = conn.execute(
-                "SELECT pnl_usd FROM simulated_trades WHERE mode = ? ORDER BY id DESC LIMIT 10",
-                (self.mode,),
-            ).fetchall()
+            if window_hours is not None and window_hours > 0:
+                cutoff = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).strftime("%Y-%m-%d %H:%M:%S")
+                rows = conn.execute(
+                    "SELECT pnl_usd FROM simulated_trades WHERE mode = ? AND COALESCE(exit_time, entry_time) >= ? ORDER BY id DESC LIMIT 10",
+                    (self.mode, cutoff),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT pnl_usd FROM simulated_trades WHERE mode = ? ORDER BY id DESC LIMIT 10",
+                    (self.mode,),
+                ).fetchall()
         count = 0
         for r in rows:
             if float(r["pnl_usd"] or 0.0) < 0:
@@ -231,7 +238,7 @@ class PositionManager:
         return (current_price - self.position.entry_price) * self.position.quantity
 
     def _record_exit(self, exit_price: float, reason: str, exit_order_id: str = "",
-                     quantity: Optional[float] = None) -> Dict[str, Any]:
+                     quantity: Optional[float] = None, fee_usd: float = 0.0) -> Dict[str, Any]:
         pos = self.position
         qty = quantity if quantity is not None else pos.quantity
         if not self.is_real:
@@ -245,8 +252,9 @@ class PositionManager:
             pnl_pct = (pnl_usd / gross_entry_cost) * 100.0 if gross_entry_cost > 0 else 0.0
             recorded_exit_price = effective_exit
         else:
-            pnl_pct = (exit_price - pos.entry_price) / pos.entry_price * 100.0
-            pnl_usd = (exit_price - pos.entry_price) * qty
+            gross_entry_cost = pos.entry_price * qty
+            pnl_usd = (exit_price - pos.entry_price) * qty - max(0.0, float(fee_usd or 0.0))
+            pnl_pct = (pnl_usd / gross_entry_cost) * 100.0 if gross_entry_cost > 0 else 0.0
             recorded_exit_price = exit_price
 
         self.db.record_trade(
@@ -280,7 +288,16 @@ class PositionManager:
 
         # 0. Reconciliação de ordem PENDING caso o robô tenha encerrado durante o envio da compra
         if pos.status == "PENDING" and pos.order_id and pos.order_id != "PENDING":
-            reconciled = binance_client.reconcile_order_by_client_id(self.exchange, self.symbol, pos.order_id)
+            try:
+                reconciled = binance_client.reconcile_order_by_client_id(
+                    self.exchange, self.symbol, pos.order_id, raise_on_network_error=True
+                )
+            except Exception as e:
+                logger.warning(
+                    f"   ⚠️ Falha transitória ao reconciliar ordem PENDING [{pos.order_id}]: {e}. "
+                    f"Mantendo registro PENDING para próxima verificação."
+                )
+                return
             if reconciled and float(reconciled.get("filled") or 0.0) > 0:
                 base = self.symbol.split("/")[0]
                 net_qty = binance_client.net_filled_quantity(reconciled, base, float(reconciled["filled"]))
@@ -296,9 +313,17 @@ class PositionManager:
                     f"   ✅ [RECONCILIAÇÃO PENDING] Compra confirmada na Binance! "
                     f"Entrada ${avg_price:,.2f} | Qtd {net_qty:.6f}"
                 )
-            else:
+            elif reconciled is None or str(reconciled.get("status", "")).lower() in (
+                "canceled", "cancelled", "rejected", "expired", "closed"
+            ):
                 logger.warning("   ℹ️ Ordem PENDING não foi executada na Binance. Limpando registro local.")
                 self._clear()
+                return
+            else:
+                logger.warning(
+                    f"   ⏳ Ordem PENDING [{pos.order_id}] ainda em estado '{reconciled.get('status')}' na Binance. "
+                    f"Mantendo registro PENDING."
+                )
                 return
 
         # 1. A OCO pode ter executado enquanto o robô estava desligado
@@ -381,9 +406,12 @@ class PositionManager:
         if self.is_real:
             base = self.symbol.split("/")[0]
             try:
-                base_before = binance_client.get_free_balance(self.exchange, base)
+                _, _, base_before = binance_client.get_asset_balances(self.exchange, base)
             except Exception:
-                base_before = 0.0
+                try:
+                    base_before = binance_client.get_free_balance(self.exchange, base)
+                except Exception:
+                    base_before = 0.0
 
             # M6: Persiste intenção PENDING com client_order_id e marca order_in_flight ANTES do envio à exchange
             cid = binance_client.generate_client_order_id("fynexb")
@@ -405,8 +433,15 @@ class PositionManager:
                 self._set_order_in_flight(False)
 
             if not buy.get("success"):
-                self.store.delete(self.symbol, self.timeframe, self.mode)
-                logger.error(f"   ❌ [FALHA AO ENVIAR ORDEM NA BINANCE] {buy.get('message')}")
+                if buy.get("ambiguous_network"):
+                    logger.critical(
+                        f"   ⚠️ [TIMEOUT AMBÍGUO NA COMPRA {cid}] Mantendo registro PENDING para reconciliação "
+                        f"segura no próximo ciclo/restore. Motivo: {buy.get('message')}"
+                    )
+                    self.position = pending_pos
+                else:
+                    self.store.delete(self.symbol, self.timeframe, self.mode)
+                    logger.error(f"   ❌ [FALHA AO ENVIAR ORDEM NA BINANCE] {buy.get('message')}")
                 return False
             entry_price, qty, order_id = buy["price"], buy["quantity"], buy["order_id"]
         else:
@@ -482,7 +517,12 @@ class PositionManager:
                 alerts.send_alert(err_msg, level="CRITICAL")
                 return False
 
-            self._record_exit(sell["price"], reason, sell["order_id"], sell["quantity"])
+            sell_fee_usd = 0.0
+            raw_sell = sell.get("raw_order")
+            if isinstance(raw_sell, dict):
+                quote = self.symbol.split("/")[1] if "/" in self.symbol else "USDT"
+                sell_fee_usd = binance_client.quote_fee_from_order(raw_sell, quote)
+            self._record_exit(sell["price"], reason, sell["order_id"], sell["quantity"], fee_usd=sell_fee_usd)
             return True
         finally:
             self._set_order_in_flight(False)
@@ -519,12 +559,16 @@ class PositionManager:
 
         progress = (high_check - pos.entry_price) / tp_dist
         new_sl = pos.sl_price
+        be_sl = pos.entry_price * 1.0025
         if progress >= 0.80:
             trail_sl = pos.entry_price + (high_check - pos.entry_price) * 0.50
-            new_sl = max(new_sl, trail_sl)
+            new_sl = max(new_sl, be_sl, trail_sl)
         elif progress >= 0.60:
-            be_sl = pos.entry_price * 1.0025
             new_sl = max(new_sl, be_sl)
+
+        # Nunca eleva o stop acima ou colado ao preço atual (evita stop fantasma em recuo no mesmo candle)
+        if new_sl >= current_price * 0.9995:
+            return False
 
         min_step = 1.0015 if (self.is_real and pos.oco_list_id) else 1.0001
         if new_sl <= pos.sl_price * min_step:
@@ -570,12 +614,35 @@ class PositionManager:
         candle_high: Optional[float] = None,
         candle_low: Optional[float] = None,
         now_utc: Optional[datetime] = None,
+        candle_open_ts_ms: Optional[int] = None,
     ) -> None:
         if not self.in_position:
             return
         pos = self.position
-        low_check = min(current_price, candle_low) if candle_low is not None else current_price
-        high_check = max(current_price, candle_high) if candle_high is not None else current_price
+
+        # Se a posição ficou PENDING após timeout de rede ambíguo, reconcilia antes de checar SL/TP
+        if self.is_real and pos.status == "PENDING":
+            self.restore()
+            if not self.in_position or (self.position and self.position.status == "PENDING"):
+                return
+            pos = self.position
+
+        # Não usa high/low de candle que abriu ANTES da entrada (evita stop/trailing fantasma por pavio pré-entrada)
+        use_hl = True
+        if candle_open_ts_ms is not None and pos.entry_time:
+            try:
+                entry_ts_ms = int(
+                    datetime.strptime(pos.entry_time[:19], "%Y-%m-%d %H:%M:%S")
+                    .replace(tzinfo=timezone.utc)
+                    .timestamp() * 1000
+                )
+                if candle_open_ts_ms < entry_ts_ms:
+                    use_hl = False
+            except Exception:
+                pass
+
+        low_check = min(current_price, candle_low) if (use_hl and candle_low is not None) else current_price
+        high_check = max(current_price, candle_high) if (use_hl and candle_high is not None) else current_price
 
         # Proteção na exchange ativa: ela é a fonte da verdade
         if self.is_real and pos.oco_list_id:
@@ -612,7 +679,7 @@ class PositionManager:
         if low_check <= pos.sl_price:
             # M7: No paper, se houve gap abaixo do stop, preenche no pior preço real
             exit_p = min(pos.sl_price, current_price) if not self.is_real else current_price
-            reason = "TRAILING_PROFIT" if pos.sl_price > pos.entry_price else "STOP_LOSS"
+            reason = "TRAILING_PROFIT" if (pos.sl_price > pos.entry_price and exit_p > pos.entry_price) else "STOP_LOSS"
             self.close(reason, exit_p)
         elif high_check >= pos.tp_price:
             exit_p = pos.tp_price if not self.is_real else current_price

@@ -5,7 +5,9 @@ Gerencia candles OHLCV, previsões com feedback vivo (Triple Barrier e t+1),
 histórico de operações (Paper / Testnet / Live) e estado em tempo real do robô.
 """
 
+import os
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, List, Optional
@@ -23,16 +25,26 @@ TIMEFRAME_MS: Dict[str, int] = {
     "1h": 60 * 60_000,
     "4h": 4 * 60 * 60_000,
     "1d": 24 * 60 * 60_000,
+    "1w": 7 * 24 * 60 * 60_000,
 }
+
+_DB_INIT_LOCK = threading.Lock()
+_INITIALIZED_DBS: Dict[str, int] = {}
 
 
 def timeframe_to_ms(timeframe: str) -> int:
+    if not timeframe or not isinstance(timeframe, str):
+        raise ValueError(f"Timeframe inválido: {timeframe!r}")
     if timeframe in TIMEFRAME_MS:
         return TIMEFRAME_MS[timeframe]
     unit = timeframe[-1]
+    mult_map = {"m": 60_000, "h": 3_600_000, "d": 86_400_000, "w": 604_800_000}
+    if unit not in mult_map or not timeframe[:-1].isdigit():
+        raise ValueError(f"Timeframe não suportado: {timeframe!r}")
     val = int(timeframe[:-1])
-    mult = {"m": 60_000, "h": 3_600_000, "d": 86_400_000}[unit]
-    return val * mult
+    if val <= 0:
+        raise ValueError(f"Timeframe inválido: {timeframe!r}")
+    return val * mult_map[unit]
 
 
 def timeframe_to_seconds(timeframe: str) -> int:
@@ -47,29 +59,41 @@ class TradingDatabase:
 
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self.db_path = db_path
-        self._init_database()
+        abs_path = os.path.abspath(db_path)
+        with _DB_INIT_LOCK:
+            current_ino = os.stat(abs_path).st_ino if os.path.exists(abs_path) else -1
+            if _INITIALIZED_DBS.get(abs_path) != current_ino or current_ino == -1:
+                self._init_database()
+                new_ino = os.stat(abs_path).st_ino if os.path.exists(abs_path) else -1
+                _INITIALIZED_DBS[abs_path] = new_ino
 
     @contextmanager
     def _get_connection(self) -> Iterator[sqlite3.Connection]:
-        """Cria uma conexão SQLite (WAL) e garante fechamento imediato ao sair do bloco `with`."""
+        """Cria uma conexão SQLite com busy_timeout primeiro e fechamento garantido."""
         conn = sqlite3.connect(self.db_path, timeout=15.0)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("PRAGMA busy_timeout=15000;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("PRAGMA cache_size=-4000;")
         conn.execute("PRAGMA temp_store=MEMORY;")
-        conn.execute("PRAGMA wal_autocheckpoint=1000;")
         try:
             with conn:
                 yield conn
         finally:
             conn.close()
 
+    @staticmethod
+    def _ensure_column(cursor: sqlite3.Cursor, table: str, column: str, col_def: str) -> None:
+        cols = {row[1] for row in cursor.execute(f"PRAGMA table_info({table});").fetchall()}
+        if column not in cols:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def};")
+
     def _init_database(self) -> None:
-        """Cria as tabelas e índices necessários caso não existam."""
+        """Cria as tabelas, migrações seguras e índices necessários (executa 1x por banco)."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL;")
+            cursor.execute("PRAGMA wal_autocheckpoint=1000;")
 
             # 1. Tabela de candles históricos e em tempo real
             cursor.execute("""
@@ -86,11 +110,6 @@ class TradingDatabase:
                     volume REAL NOT NULL,
                     UNIQUE(symbol, timeframe, timestamp)
                 );
-            """)
-
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_candles_lookup
-                ON ohlcv_candles(symbol, timeframe, timestamp);
             """)
 
             # 2. Tabela de previsões do modelo e feedback de acerto/erro
@@ -114,38 +133,28 @@ class TradingDatabase:
             """)
 
             cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_pred_eval
-                ON predictions(symbol, timeframe, candle_timestamp);
-            """)
-
-            # Migração: remove duplicatas antigas e garante índice UNIQUE em bancos existentes
-            cursor.execute("""
-                DELETE FROM predictions
-                WHERE id NOT IN (
-                    SELECT MAX(id) FROM predictions GROUP BY symbol, timeframe, candle_timestamp
-                );
-            """)
-            cursor.execute("""
-                CREATE UNIQUE INDEX IF NOT EXISTS uq_predictions_candle
-                ON predictions(symbol, timeframe, candle_timestamp);
-            """)
-            cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_pred_resolved
                 ON predictions(symbol, timeframe, is_correct, id DESC);
             """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_pred_buy_resolved
+                ON predictions(symbol, timeframe, prediction, is_correct, id DESC);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_pred_pending
+                ON predictions(symbol, timeframe, candle_timestamp)
+                WHERE actual_direction IS NULL;
+            """)
 
-            # Colunas para avaliação Triple Barrier ao vivo
-            for col_sql in [
-                "ALTER TABLE predictions ADD COLUMN tp_pct REAL;",
-                "ALTER TABLE predictions ADD COLUMN sl_pct REAL;",
-                "ALTER TABLE predictions ADD COLUMN horizon_candles INTEGER;",
-                "ALTER TABLE predictions ADD COLUMN outcome TEXT;",
-                "ALTER TABLE predictions ADD COLUMN resolved_at TEXT;",
+            # Colunas para avaliação Triple Barrier ao vivo (verificadas via PRAGMA table_info)
+            for col_name, col_def in [
+                ("tp_pct", "REAL"),
+                ("sl_pct", "REAL"),
+                ("horizon_candles", "INTEGER"),
+                ("outcome", "TEXT"),
+                ("resolved_at", "TEXT"),
             ]:
-                try:
-                    cursor.execute(col_sql)
-                except sqlite3.OperationalError:
-                    pass
+                self._ensure_column(cursor, "predictions", col_name, col_def)
 
             # 3. Tabela de operações executadas (Paper Trading ou Live Trading)
             cursor.execute("""
@@ -167,23 +176,20 @@ class TradingDatabase:
                 );
             """)
 
-            for col_sql in [
-                "ALTER TABLE simulated_trades ADD COLUMN mode TEXT DEFAULT 'paper';",
-                "ALTER TABLE simulated_trades ADD COLUMN order_id TEXT DEFAULT '';",
-                "ALTER TABLE simulated_trades ADD COLUMN quantity REAL DEFAULT 0.0;",
+            for col_name, col_def in [
+                ("mode", "TEXT DEFAULT 'paper'"),
+                ("order_id", "TEXT DEFAULT ''"),
+                ("quantity", "REAL DEFAULT 0.0"),
             ]:
-                try:
-                    cursor.execute(col_sql)
-                except sqlite3.OperationalError:
-                    pass
+                self._ensure_column(cursor, "simulated_trades", col_name, col_def)
 
             cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_trades_sym_tf
-                ON simulated_trades(symbol, timeframe);
+                CREATE INDEX IF NOT EXISTS idx_trades_sym_tf_id
+                ON simulated_trades(symbol, timeframe, id DESC);
             """)
             cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_trades_mode
-                ON simulated_trades(mode);
+                CREATE INDEX IF NOT EXISTS idx_trades_mode_id
+                ON simulated_trades(mode, id DESC);
             """)
 
             # 4. Tabela de estado vivo do robô (lida pelo dashboard em tempo real)
@@ -207,13 +213,7 @@ class TradingDatabase:
                     updated_at TEXT NOT NULL
                 );
             """)
-
-            try:
-                cursor.execute("ALTER TABLE bot_state ADD COLUMN order_in_flight INTEGER NOT NULL DEFAULT 0;")
-            except sqlite3.OperationalError:
-                pass
-
-            conn.commit()
+            self._ensure_column(cursor, "bot_state", "order_in_flight", "INTEGER NOT NULL DEFAULT 0")
         logger.info(f"Banco de dados SQLite operacional (WAL): {self.db_path}")
 
     def set_order_in_flight(self, active: bool) -> None:
@@ -295,7 +295,12 @@ class TradingDatabase:
         if df.empty:
             return 0
 
-        work_df = df.iloc[:-1] if (drop_last_open and len(df) > 1) else df
+        if drop_last_open:
+            if len(df) <= 1:
+                return 0
+            work_df = df.iloc[:-1]
+        else:
+            work_df = df
         if work_df.empty:
             return 0
 
@@ -308,7 +313,14 @@ class TradingDatabase:
             work_df["close"],
             work_df["volume"],
         ):
-            ts = int(ts_raw.timestamp() * 1000) if isinstance(ts_raw, pd.Timestamp) else int(ts_raw)
+            if isinstance(ts_raw, pd.Timestamp):
+                ts = int(ts_raw.timestamp() * 1000)
+            elif isinstance(ts_raw, datetime):
+                dt_obj = ts_raw if ts_raw.tzinfo is not None else ts_raw.replace(tzinfo=timezone.utc)
+                ts = int(dt_obj.timestamp() * 1000)
+            else:
+                ts_val = int(ts_raw)
+                ts = ts_val * 1000 if 0 < ts_val < 100_000_000_000 else ts_val
             dt_str = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             rows.append((symbol, timeframe, ts, dt_str, float(o), float(h), float(l), float(c), float(v)))
 
@@ -635,19 +647,32 @@ class TradingDatabase:
             ))
             conn.commit()
 
-    def get_trade_summary(self, symbol: str) -> Dict[str, Any]:
+    def get_trade_summary(
+        self,
+        symbol: str,
+        timeframe: Optional[str] = None,
+        mode: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Retorna o resumo consolidado de desempenho das operações registradas."""
+        clauses = ["symbol = ?"]
+        params: List[Any] = [symbol]
+        if timeframe:
+            clauses.append("timeframe = ?")
+            params.append(timeframe)
+        if mode:
+            clauses.append("mode = ?")
+            params.append(mode)
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT COUNT(*) as total_trades,
-                       SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
-                       SUM(CASE WHEN pnl_pct <= 0 THEN 1 ELSE 0 END) as losses,
+                       SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
+                       SUM(CASE WHEN pnl_usd <= 0 THEN 1 ELSE 0 END) as losses,
                        SUM(pnl_pct) as total_pnl_pct,
                        SUM(pnl_usd) as total_pnl_usd
                 FROM simulated_trades
-                WHERE symbol = ?
-            """, (symbol,))
+                WHERE {' AND '.join(clauses)}
+            """, tuple(params))
             row = cursor.fetchone()
 
         total = row["total_trades"] if row and row["total_trades"] else 0

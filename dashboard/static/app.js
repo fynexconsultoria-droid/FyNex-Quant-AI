@@ -542,6 +542,7 @@ function disconnectLiveMarketStream() {
   }
   if (liveWs) {
     try {
+      liveWs.onopen = null;
       liveWs.onclose = null;
       liveWs.onerror = null;
       liveWs.onmessage = null;
@@ -578,12 +579,18 @@ function connectLiveMarketStream() {
     liveWs = ws;
 
     ws.onopen = () => {
+      if (ws !== liveWs) return;
       liveWsConnected = true;
       liveWsReconnectAttempts = 0;
       lastWsMessageAt = Date.now();
       setLiveBadgeState("ws");
 
+      if (liveWsWatchdogTimer) clearInterval(liveWsWatchdogTimer);
       liveWsWatchdogTimer = setInterval(() => {
+        if (ws !== liveWs) {
+          clearInterval(liveWsWatchdogTimer);
+          return;
+        }
         if (liveWsConnected && Date.now() - lastWsMessageAt > 15000) {
           liveWsEndpointIndex += 1;
           connectLiveMarketStream();
@@ -592,6 +599,7 @@ function connectLiveMarketStream() {
     };
 
     ws.onmessage = (event) => {
+      if (ws !== liveWs) return;
       try {
         lastWsMessageAt = Date.now();
         const envelope = JSON.parse(event.data);
@@ -998,10 +1006,11 @@ async function fetchMarketDepth() {
   }
 }
 
-async function fetchBinanceHealth() {
+async function fetchBinanceHealth(forceRefresh = false) {
   lastHealthFetchAt = Date.now();
   try {
-    const res = await fetch("/api/binance/health");
+    const url = forceRefresh ? "/api/binance/health?refresh=true" : "/api/binance/health";
+    const res = await fetch(url);
     if (!res.ok) return;
     const h = await res.json();
     const dot = document.getElementById("mktHealthDot");
@@ -1198,16 +1207,20 @@ async function fetchStatus() {
  */
 async function fetchCandles(fullReload = false) {
   if (!candleSeries) return;
+  const reqSymbol = activeSymbol;
+  const reqTf = activeTimeframe;
   try {
     const limit = fullReload || !chartInitializedWithData ? 150 : 5;
     const q = new URLSearchParams({
-      symbol: activeSymbol,
-      timeframe: activeTimeframe,
+      symbol: reqSymbol,
+      timeframe: reqTf,
       limit: String(limit),
     });
     const res = await fetch(`/api/candles?${q.toString()}`);
     if (!res.ok) return;
     const candles = await res.json();
+    // Descarta resposta obsoleta caso o usuário tenha trocado de ativo/timeframe em voo
+    if (reqSymbol !== activeSymbol || reqTf !== activeTimeframe) return;
     if (!candles || candles.length === 0) return;
 
     if (fullReload || !chartInitializedWithData) {
@@ -1225,7 +1238,9 @@ async function fetchCandles(fullReload = false) {
       refreshEmaSeries();
       chartInitializedWithData = true;
     } else {
-      for (const c of candles) {
+      const lastTime = loadedCandles.length ? Number(loadedCandles[loadedCandles.length - 1].time) : 0;
+      const freshBars = candles.filter((c) => Number(c.time) >= lastTime);
+      for (const c of freshBars) {
         candleSeries.update(c);
         if (volumeSeries) {
           volumeSeries.update({
@@ -1402,15 +1417,16 @@ async function toggleBot() {
         method: "POST",
         headers: csrfHeaders(),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       alert(data.message || data.detail || "Robô finalizado.");
     } else {
-      const q = new URLSearchParams({ symbol: activeSymbol, timeframe: activeTimeframe });
+      const targetSymbol = isActiveForex() ? "BTC/USDT" : activeSymbol;
+      const q = new URLSearchParams({ symbol: targetSymbol, timeframe: activeTimeframe });
       const res = await fetch(`/api/bot/start?${q.toString()}`, {
         method: "POST",
         headers: csrfHeaders(),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       alert(data.message || data.detail || "Robô iniciado em segundo plano!");
     }
     await fetchStatus();
@@ -1655,20 +1671,20 @@ async function testBinanceConnectionModal(silent = false) {
         balancesHtml = `
           <div class="test-balances-grid">
             ${data.assets
-              .map(
-                (a) => `
+            .map(
+              (a) => `
               <div class="test-balance-item">
                 <span class="asset-name">${escapeHtml(a.asset)}</span>
                 <span class="asset-val">${escapeHtml(
-                  Number(a.free).toLocaleString("en-US", {
-                    minimumFractionDigits: 2,
-                    maximumFractionDigits: 6,
-                  })
-                )}</span>
+                Number(a.free).toLocaleString("en-US", {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 6,
+                })
+              )}</span>
               </div>
             `
-              )
-              .join("")}
+            )
+            .join("")}
           </div>
         `;
       }
@@ -1679,28 +1695,25 @@ async function testBinanceConnectionModal(silent = false) {
         </div>
         <div style="font-size: 0.8rem; color: var(--text-muted);">
           Saldo USDT Livre: <strong style="color: #10b981;">$${escapeHtml(
-            Number(data.usdt_free || 0).toFixed(2)
-          )} USDT</strong> | 
+        Number(data.usdt_free || 0).toFixed(2)
+      )} USDT</strong> | 
           BTC Total: <strong style="color: #F0B90B;">${escapeHtml(
-            Number(data.btc_total || 0).toFixed(6)
-          )} BTC</strong>
+        Number(data.btc_total || 0).toFixed(6)
+      )} BTC</strong>
         </div>
         ${balancesHtml}
         <div style="font-size: 0.725rem; color: var(--text-dim); display: flex; gap: 0.75rem; flex-wrap: wrap;">
           <span>Trading Spot: ${data.can_trade ? "✅ Ativo" : "❌ Inativo"}</span>
-          <span>Saques: ${
-            data.can_withdraw ? "⚠️ Permitido" : "🔒 Bloqueado (Segurança Máxima)"
-          }</span>
-          ${
-            data.clock_drift_ms !== null && data.clock_drift_ms !== undefined
-              ? `<span>Clock Drift: ${escapeHtml(String(data.clock_drift_ms))} ms</span>`
-              : ""
-          }
-          ${
-            data.active_mirror
-              ? `<span>Endpoint: ${escapeHtml(String(data.active_mirror).replace(/^https?:\/\//, ""))}</span>`
-              : ""
-          }
+          <span>Saques: ${data.can_withdraw ? "⚠️ Permitido" : "🔒 Bloqueado (Segurança Máxima)"
+        }</span>
+          ${data.clock_drift_ms !== null && data.clock_drift_ms !== undefined
+          ? `<span>Clock Drift: ${escapeHtml(String(data.clock_drift_ms))} ms</span>`
+          : ""
+        }
+          ${data.active_mirror
+          ? `<span>Endpoint: ${escapeHtml(String(data.active_mirror).replace(/^https?:\/\//, ""))}</span>`
+          : ""
+        }
         </div>
       `;
 
@@ -1720,12 +1733,11 @@ async function testBinanceConnectionModal(silent = false) {
         <div style="font-size: 0.8rem; color: #fda4af;">
           ${escapeHtml(data.message || data.detail || "Verifique se a API Key e Secret estão corretas.")}
         </div>
-        ${
-          data.detail
-            ? `<div style="font-size: 0.725rem; color: var(--text-dim); font-family: var(--font-mono);">${escapeHtml(
-                data.detail
-              )}</div>`
-            : ""
+        ${data.detail
+          ? `<div style="font-size: 0.725rem; color: var(--text-dim); font-family: var(--font-mono);">${escapeHtml(
+            data.detail
+          )}</div>`
+          : ""
         }
       `;
     }
@@ -1788,8 +1800,7 @@ async function saveBinanceConnectionModal() {
       );
     } else {
       alert(
-        `⚠️ ${data.message}\nPorém o teste de conexão retornou:\n${
-          (data.test_result && data.test_result.message) || "Verifique suas chaves."
+        `⚠️ ${data.message}\nPorém o teste de conexão retornou:\n${(data.test_result && data.test_result.message) || "Verifique suas chaves."
         }`
       );
     }
@@ -1929,13 +1940,17 @@ function updateXtbMarginEstimate() {
   })}`;
 }
 
+let xtbOrderInFlight = false;
+const xtbClosingIds = new Set();
+
 async function submitXtbOrder(side) {
+  if (xtbOrderInFlight) return;
   const lots = parseFloat(document.getElementById("xtbLotsInput")?.value || "0");
   const leverage = parseInt(document.getElementById("xtbLeverageSelect")?.value || "10", 10);
   const slRaw = document.getElementById("xtbSlInput")?.value?.trim();
   const tpRaw = document.getElementById("xtbTpInput")?.value?.trim();
 
-  if (!lots || lots <= 0) {
+  if (!Number.isFinite(lots) || lots <= 0) {
     showToast("Informe um volume (lotes) válido.", "error");
     return;
   }
@@ -1949,13 +1964,14 @@ async function submitXtbOrder(side) {
     tp_price: tpRaw ? parseFloat(tpRaw) : null,
   };
 
+  xtbOrderInFlight = true;
   try {
     const res = await fetch("/api/xtb/order", {
       method: "POST",
       headers: csrfHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
     });
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       showToast(data.detail || "Não foi possível abrir a ordem.", "error");
       return;
@@ -1968,16 +1984,20 @@ async function submitXtbOrder(side) {
     await fetchXtbAccount();
   } catch (err) {
     showToast(`Erro ao enviar ordem: ${err}`, "error");
+  } finally {
+    xtbOrderInFlight = false;
   }
 }
 
 async function closeXtbPosition(posId) {
+  if (xtbClosingIds.has(posId)) return;
+  xtbClosingIds.add(posId);
   try {
     const res = await fetch(`/api/xtb/close/${posId}`, {
       method: "POST",
       headers: csrfHeaders(),
     });
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       showToast(data.detail || "Erro ao fechar posição.", "error");
       return;
@@ -1986,6 +2006,8 @@ async function closeXtbPosition(posId) {
     await fetchXtbAccount();
   } catch (err) {
     showToast(`Erro ao fechar posição: ${err}`, "error");
+  } finally {
+    xtbClosingIds.delete(posId);
   }
 }
 
@@ -2449,12 +2471,18 @@ function toggleCopilotSound() {
   if (copilotSoundEnabled) playCopilotChime();
 }
 
+let sharedCopilotAudioCtx = null;
+
 function playCopilotChime() {
   if (!copilotSoundEnabled) return;
   try {
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
     if (!AudioCtx) return;
-    const ctx = new AudioCtx();
+    if (!sharedCopilotAudioCtx || sharedCopilotAudioCtx.state === "closed") {
+      sharedCopilotAudioCtx = new AudioCtx();
+    }
+    const ctx = sharedCopilotAudioCtx;
+    if (ctx.state === "suspended") ctx.resume().catch(() => { });
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = "sine";
@@ -2537,8 +2565,8 @@ function renderXtbCopilotTable(signals) {
       const statusHtml = isDone
         ? '<span class="copilot-mini-btn done">✅ Na XTB</span>'
         : isDismissed
-        ? '<span class="dim">Dispensado</span>'
-        : `
+          ? '<span class="dim">Dispensado</span>'
+          : `
           <button type="button" class="copilot-mini-btn" data-cop-copy="${escapeHtml(s.id)}">📋 Copiar</button>
           <button type="button" class="copilot-mini-btn" data-cop-exec="${escapeHtml(s.id)}">✅ Executei</button>
           <button type="button" class="copilot-mini-btn" data-cop-dis="${escapeHtml(s.id)}">✖️</button>
@@ -2703,7 +2731,7 @@ function toggleAiChatDrawer(forceState = null) {
 function formatChatMarkdownSafe(text) {
   let safe = escapeHtml(text || "");
   safe = safe.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-  safe = safe.replace(/_(.+?)_/g, "<em>$1</em>");
+  safe = safe.replace(/(^|\s)_([^_\n]+?)_(?=\s|[.,!?;:]|$)/g, "$1<em>$2</em>");
   return safe;
 }
 

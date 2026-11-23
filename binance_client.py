@@ -6,6 +6,7 @@ consulta de saldos reais da carteira Spot, validação de chaves e execução de
 reais (Live) ou de teste (Testnet), incluindo proteção OCO do lado da exchange.
 """
 
+import math
 import os
 import re
 import time
@@ -87,9 +88,20 @@ def _get(env_data: Dict[str, Optional[str]], key: str, default: str = "") -> str
 
 def _to_float(value: str, default: float) -> float:
     try:
-        return float(value)
+        f = float(value)
+        return f if math.isfinite(f) else default
     except (TypeError, ValueError):
         return default
+
+
+def _cache_put_bounded(cache: Dict[Any, Any], key: Any, value: Any, max_size: int = 128) -> None:
+    if key in cache:
+        cache.pop(key, None)
+    elif len(cache) >= max_size:
+        oldest = next(iter(cache), None)
+        if oldest is not None:
+            cache.pop(oldest, None)
+    cache[key] = value
 
 
 def load_binance_config() -> Dict[str, Any]:
@@ -205,7 +217,10 @@ def save_binance_config(
     """
     current = load_binance_config()
 
-    final_key = validate_api_credential(api_key, "API Key") if api_key and api_key.strip() else current["api_key"]
+    if api_key and api_key.strip() and "..." not in api_key and not api_key.strip().startswith(("*", "•")):
+        final_key = validate_api_credential(api_key, "API Key")
+    else:
+        final_key = current["api_key"]
     if api_secret and api_secret.strip() and not api_secret.startswith(("*", "•")):
         final_secret = validate_api_credential(api_secret, "API Secret")
     else:
@@ -331,11 +346,17 @@ _BINANCE_HOST_RE = re.compile(r"https://(?:api[0-9]?\.binance\.com|data-api\.bin
 
 
 def _apply_mirror_to_exchange(exchange: ccxt.binance, mirror_base: str) -> None:
-    """Aplica o mirror base (ex.: https://api1.binance.com ou data-api.binance.vision) às URLs Spot do CCXT."""
+    """
+    Aplica o mirror base (ex.: https://api1.binance.com ou data-api.binance.vision) às URLs Spot do CCXT.
+    Nunca redireciona endpoints privados/autenticados para `data-api.binance.vision` (somente público).
+    """
     try:
         api_urls = exchange.urls.get("api")
+        public_only = (mirror_base == BINANCE_PUBLIC_FALLBACK_MIRROR)
         if isinstance(api_urls, dict):
             for key, val in list(api_urls.items()):
+                if public_only and any(tok in str(key).lower() for tok in ("private", "sapi", "wapi", "dapi", "fapi")):
+                    continue
                 if isinstance(val, str) and _BINANCE_HOST_RE.search(val):
                     api_urls[key] = _BINANCE_HOST_RE.sub(mirror_base, val)
     except Exception:
@@ -421,7 +442,8 @@ def call_with_retry(
             _record_request_result(None, error=str(e), retried=(attempt > 1))
             if not testnet and allow_mirror_failover and attempt < max_attempts:
                 err_str = str(e).lower()
-                if "451" in err_str or "restricted location" in err_str:
+                is_authenticated = bool(getattr(exchange, "apiKey", None))
+                if ("451" in err_str or "restricted location" in err_str) and not is_authenticated:
                     global _ACTIVE_MIRROR_IDX
                     with _METRICS_LOCK:
                         _ACTIVE_MIRROR_IDX = BINANCE_SPOT_MIRRORS.index(BINANCE_PUBLIC_FALLBACK_MIRROR)
@@ -433,6 +455,8 @@ def call_with_retry(
                     logger.warning(f"🌎 Geo-block HTTP 451 detectado! Alternando para mirror público global {new_mirror}.")
                 else:
                     new_mirror = _rotate_mirror(type(e).__name__)
+                    if is_authenticated and new_mirror == BINANCE_PUBLIC_FALLBACK_MIRROR:
+                        new_mirror = _rotate_mirror("skip_public_only_mirror_for_auth")
                 if exchange is not None:
                     _apply_mirror_to_exchange(exchange, new_mirror)
             if attempt < max_attempts:
@@ -505,7 +529,7 @@ def get_binance_exchange(
 
     if use_cache:
         with _EXCHANGE_CACHE_LOCK:
-            _EXCHANGE_CACHE[cache_key] = exchange
+            _cache_put_bounded(_EXCHANGE_CACHE, cache_key, exchange, max_size=16)
 
     return exchange
 
@@ -621,7 +645,7 @@ def fetch_live_ticker(
         "timestamp": int(ticker.get("timestamp") or int(time.time() * 1000)),
     }
     with _TICKER_CACHE_LOCK:
-        _TICKER_CACHE[cache_key] = (now, result)
+        _cache_put_bounded(_TICKER_CACHE, cache_key, (now, result), max_size=128)
     return result
 
 
@@ -682,7 +706,7 @@ def fetch_order_book_summary(
         "timestamp": int(ob.get("timestamp") or int(time.time() * 1000)),
     }
     with _ORDERBOOK_CACHE_LOCK:
-        _ORDERBOOK_CACHE[cache_key] = (now, result)
+        _cache_put_bounded(_ORDERBOOK_CACHE, cache_key, (now, result), max_size=64)
     return result
 
 
@@ -724,7 +748,7 @@ def fetch_live_candles(
         for row in (raw or [])
     ]
     with _CANDLES_CACHE_LOCK:
-        _CANDLES_CACHE[cache_key] = (now, candles)
+        _cache_put_bounded(_CANDLES_CACHE, cache_key, (now, candles), max_size=128)
     return candles
 
 
@@ -791,7 +815,10 @@ def test_binance_connection(
 
     try:
         t0 = time.perf_counter()
-        exchange = get_binance_exchange(api_key=api_key, api_secret=api_secret, testnet=testnet)
+        is_adhoc = bool((api_key and api_key != cfg["api_key"]) or (api_secret and api_secret != cfg["api_secret"]))
+        exchange = get_binance_exchange(
+            api_key=api_key, api_secret=api_secret, testnet=testnet, use_cache=not is_adhoc
+        )
         raw_balance = call_with_retry(
             lambda: exchange.fetch_balance(),
             exchange=exchange,
@@ -954,10 +981,14 @@ def reconcile_order_by_client_id(
     exchange: ccxt.binance,
     symbol: str,
     client_order_id: str,
+    raise_on_network_error: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """
     Consulta uma ordem na Binance pelo `origClientOrderId` após um timeout/erro de rede,
     evitando ordens duplicadas caso a requisição original tenha chegado à exchange.
+    Retorna `None` quando a ordem definitivamente não existe (-2013 / OrderNotFound).
+    Se `raise_on_network_error=True`, propaga erros transitórios de rede/timeout para o chamador
+    não confundir queda de rede com ordem inexistente.
     """
     try:
         markets = exchange.load_markets()
@@ -985,7 +1016,18 @@ def reconcile_order_by_client_id(
             "fees": [],
             "info": raw,
         }
+    except ccxt.OrderNotFound:
+        return None
+    except ccxt.ExchangeError as e:
+        err_msg = str(e).lower()
+        if "-2013" in err_msg or "order does not exist" in err_msg:
+            return None
+        if raise_on_network_error:
+            raise
+        return None
     except Exception:
+        if raise_on_network_error:
+            raise
         return None
 
 
@@ -1174,7 +1216,8 @@ def execute_spot_buy(
                     "success": False,
                     "client_order_id": cid,
                     "reconciled": False,
-                    "message": f"Falha de rede na compra e ordem não encontrada na Binance: {net_err}",
+                    "ambiguous_network": (order is None),
+                    "message": f"Falha de rede na compra e ordem não confirmada na Binance: {net_err}",
                 }
             logger.info(f"✅ Compra [{cid}] confirmada via reconciliação na Binance (order_id={order.get('id')}).")
 
@@ -1324,10 +1367,34 @@ def execute_spot_sell_with_retry(
     attempts: int = 3,
     base_delay_seconds: float = 2.0
 ) -> Dict[str, Any]:
-    """Tenta vender até `attempts` vezes com backoff exponencial e novo clientOrderId por tentativa."""
+    """
+    Tenta vender até `attempts` vezes com backoff exponencial.
+    Antes de cada nova tentativa, reconcilia o `client_order_id` anterior para evitar venda duplicada.
+    """
     last: Dict[str, Any] = {"success": False, "message": "Nenhuma tentativa executada."}
+    prev_cid: Optional[str] = None
     for attempt in range(1, attempts + 1):
+        if prev_cid is not None:
+            reconciled = reconcile_order_by_client_id(exchange, symbol, prev_cid)
+            if reconciled and float(reconciled.get("filled") or 0.0) > 0:
+                filled_qty = float(reconciled["filled"])
+                avg_price = float(reconciled.get("average") or 0.0)
+                logger.info(f"✅ Venda anterior [{prev_cid}] confirmada na reconciliação pré-retry!")
+                return {
+                    "success": True,
+                    "order_id": str(reconciled.get("id")),
+                    "client_order_id": prev_cid,
+                    "symbol": symbol,
+                    "side": "SELL",
+                    "quantity": filled_qty,
+                    "price": avg_price,
+                    "proceeds_usdt": float(reconciled.get("cost") or filled_qty * avg_price),
+                    "slippage_pct": 0.0,
+                    "execution_latency_ms": 0.0,
+                    "raw_order": reconciled,
+                }
         last = execute_spot_sell(exchange, symbol, quantity)
+        prev_cid = last.get("client_order_id")
         if last.get("success"):
             return last
         logger.warning(f"Tentativa de venda {attempt}/{attempts} falhou: {last.get('message')}")
@@ -1377,6 +1444,7 @@ def place_protective_oco(
 
         params = {
             "symbol": market["id"],
+            "listClientOrderId": generate_client_order_id("fynexoco"),
             "side": "SELL",
             "quantity": qty,
             "aboveType": "LIMIT_MAKER",
@@ -1390,7 +1458,7 @@ def place_protective_oco(
             lambda: exchange.privatePostOrderListOco(params),
             exchange=exchange,
             testnet=testnet,
-            max_attempts=2,
+            max_attempts=1,
             allow_mirror_failover=False,
         )
         list_id = str(response.get("orderListId"))
@@ -1447,6 +1515,7 @@ def get_oco_status(exchange: ccxt.binance, symbol: str, order_list_id: str) -> D
 def cancel_oco(exchange: ccxt.binance, symbol: str, order_list_id: str) -> Dict[str, Any]:
     try:
         testnet = _is_testnet_exchange(exchange)
+        call_with_retry(lambda: exchange.load_markets(), exchange=exchange, testnet=testnet, max_attempts=2)
         market = exchange.market(symbol)
         call_with_retry(
             lambda: exchange.privateDeleteOrderList({"symbol": market["id"], "orderListId": order_list_id}),

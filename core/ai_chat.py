@@ -12,6 +12,7 @@ Assistente conversacional 100% local conectado diretamente ao banco SQLite
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import unicodedata
 from contextlib import contextmanager
@@ -28,6 +29,8 @@ def _connect_readonly(db_path: str) -> Iterator[Optional[sqlite3.Connection]]:
         return
     conn = sqlite3.connect(db_path, timeout=15.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only=ON;")
+    conn.execute("PRAGMA busy_timeout=15000;")
     try:
         yield conn
     finally:
@@ -205,6 +208,7 @@ def get_performance_summary(
         db_path=db_path,
         symbol=symbol,
         timeframe=timeframe,
+        macro_snapshot=macro_intelligence.get_cached_macro_snapshot(),
     )
 
     bot_state: Dict[str, Any] = {}
@@ -284,42 +288,8 @@ def answer_ai_chat(
     pillars = evo.get("pillars") or {}
     bs = summary["bot_state"]
 
-    # Detecta intenção da pergunta
-    if any(k in norm for k in ("24h", "24 hora", "hoje", "ultimo dia", "ultimas 24", "diario")):
-        intent = "report_24h"
-        reply = (
-            f"Aqui está o meu relatório das **últimas 24 horas** ({symbol} • {timeframe}):\n\n"
-            f"{_format_period_block('Últimas 24 Horas', p24)}\n\n"
-            f"🧠 Evolução atual: **Nível {evo.get('level', 1)} ({evo.get('progress_pct', 0):.0f}%)** — {evo.get('adaptation_status', 'Sincronizada')}."
-        )
-    elif any(k in norm for k in ("semana", "7 dia", "7d", "semanal")):
-        intent = "report_7d"
-        reply = (
-            f"Aqui está o meu desempenho na **última semana (7 dias)** ({symbol} • {timeframe}):\n\n"
-            f"{_format_period_block('Últimos 7 Dias', p7d)}\n\n"
-            f"Comparativo rápido: nas últimas 24h fiz **{p24['total_trades']}** operação(ões) ({_fmt_usd(p24['total_pnl_usd'])})."
-        )
-    elif any(k in norm for k in ("mes", "30 dia", "30d", "mensal")):
-        intent = "report_30d"
-        reply = (
-            f"Aqui está o meu balanço do **último mês (30 dias)** ({symbol} • {timeframe}):\n\n"
-            f"{_format_period_block('Últimos 30 Dias', p30d)}\n\n"
-            f"📈 Progresso geral: **Nível {evo.get('level', 1)} • {evo.get('stage_name', '')}** ({evo.get('progress_pct', 0):.0f}%)."
-        )
-    elif any(k in norm for k in ("evolu", "nivel", "treino", "aprend", "progresso", "modelo", "acuracia")):
-        intent = "evolution"
-        calib_mode = bs.get("calibration_mode") or "CALIBRAÇÃO INICIAL"
-        active_conf = float(bs.get("active_confidence") or 0.65) * 100.0
-        reply = (
-            f"🧠 **Minha Evolução Atual — Nível {evo.get('level', 1)} • {evo.get('stage_name', '')} ({evo.get('progress_pct', 0):.0f}%)**\n\n"
-            f"• Status: **{evo.get('adaptation_status', '🟢 Sincronizada')}**\n"
-            f"• Memória de mercado ({timeframe}): **{pillars.get('candles_count', 0):,} / {pillars.get('candles_target', 3000):,} candles**\n"
-            f"• Contextos Macro & Notícias salvos: **{pillars.get('macro_snapshots', 0)} / {pillars.get('macro_target', 100)}**\n"
-            f"• Ciclos de aprendizado: **{pillars.get('learning_cycles', 0)}** (Modelo **v{pillars.get('model_version', 1)}**)\n"
-            f"• Regime de calibração: **{calib_mode}** (filtro de entrada em **{active_conf:.0f}%**)\n"
-            f"• Próximo marco: _{evo.get('next_milestone', 'Evolução contínua')}_"
-        )
-    elif any(k in norm for k in ("xtb", "forex", "ouro", "prata", "sinal", "sinais", "posicao", "posicoes", "aberta")):
+    # Detecta intenção da pergunta com fronteiras de palavra e prioridade para temas específicos
+    if any(re.search(rf"\b{p}\b", norm) for p in ("xtb", "forex", "ouro", "prata", "sinal", "sinais", "posicao", "posicoes", "aberta", "mesa")):
         intent = "xtb_signals"
         is_open, fx_msg = forex_ai_trader.is_forex_market_open(now_utc=now_utc)
         sigs = xtb_copilot.XTBCopilotStore(db_path=db_path).list_signals(limit=3) if os.path.exists(db_path) else []
@@ -342,7 +312,7 @@ def answer_ai_chat(
             f"• Posições abertas na Mesa XTB: **{summary['open_xtb_positions']}**\n"
             f"• Últimos sinais prontos para xStation 5:\n{sigs_block}"
         )
-    elif any(k in norm for k in ("macro", "dolar", "dxy", "juros", "fed", "petroleo", "guerra", "clima", "noticia")):
+    elif any(re.search(rf"\b{p}\b", norm) for p in ("macro", "dolar", "dxy", "juros", "fed", "petroleo", "guerra", "clima", "noticia", "noticias")):
         intent = "macro"
         try:
             m = macro_intelligence.fetch_macro_snapshot()
@@ -359,6 +329,40 @@ def answer_ai_chat(
             )
         except Exception:
             reply = "🌎 Não consegui atualizar o feed macro externo neste instante, mas o monitoramento continua ativo em cache."
+    elif any(re.search(p, norm) for p in (r"\b24h\b", r"24 hora", r"\bhoje\b", r"ultimo dia", r"ultimas 24", r"\bdiario\b")):
+        intent = "report_24h"
+        reply = (
+            f"Aqui está o meu relatório das **últimas 24 horas** ({symbol} • {timeframe}):\n\n"
+            f"{_format_period_block('Últimas 24 Horas', p24)}\n\n"
+            f"🧠 Evolução atual: **Nível {evo.get('level', 1)} ({evo.get('progress_pct', 0):.0f}%)** — {evo.get('adaptation_status', 'Sincronizada')}."
+        )
+    elif any(re.search(p, norm) for p in (r"\bsemana\b", r"7 dia", r"\b7d\b", r"\bsemanal\b")):
+        intent = "report_7d"
+        reply = (
+            f"Aqui está o meu desempenho na **última semana (7 dias)** ({symbol} • {timeframe}):\n\n"
+            f"{_format_period_block('Últimos 7 Dias', p7d)}\n\n"
+            f"Comparativo rápido: nas últimas 24h fiz **{p24['total_trades']}** operação(ões) ({_fmt_usd(p24['total_pnl_usd'])})."
+        )
+    elif any(re.search(p, norm) for p in (r"\bmes\b", r"30 dia", r"\b30d\b", r"\bmensal\b")):
+        intent = "report_30d"
+        reply = (
+            f"Aqui está o meu balanço do **último mês (30 dias)** ({symbol} • {timeframe}):\n\n"
+            f"{_format_period_block('Últimos 30 Dias', p30d)}\n\n"
+            f"📈 Progresso geral: **Nível {evo.get('level', 1)} • {evo.get('stage_name', '')}** ({evo.get('progress_pct', 0):.0f}%)."
+        )
+    elif any(k in norm for k in ("evolu", "nivel", "treino", "aprend", "progresso", "modelo", "acuracia")):
+        intent = "evolution"
+        calib_mode = bs.get("calibration_mode") or "CALIBRAÇÃO INICIAL"
+        active_conf = float(bs.get("active_confidence") or 0.65) * 100.0
+        reply = (
+            f"🧠 **Minha Evolução Atual — Nível {evo.get('level', 1)} • {evo.get('stage_name', '')} ({evo.get('progress_pct', 0):.0f}%)**\n\n"
+            f"• Status: **{evo.get('adaptation_status', '🟢 Sincronizada')}**\n"
+            f"• Memória de mercado ({timeframe}): **{pillars.get('candles_count', 0):,} / {pillars.get('candles_target', 3000):,} candles**\n"
+            f"• Contextos Macro & Notícias salvos: **{pillars.get('macro_snapshots', 0)} / {pillars.get('macro_target', 100)}**\n"
+            f"• Ciclos de aprendizado: **{pillars.get('learning_cycles', 0)}** (Modelo **v{pillars.get('model_version', 1)}**)\n"
+            f"• Regime de calibração: **{calib_mode}** (filtro de entrada em **{active_conf:.0f}%**)\n"
+            f"• Próximo marco: _{evo.get('next_milestone', 'Evolução contínua')}_"
+        )
     else:
         intent = "overview"
         reply = (

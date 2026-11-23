@@ -23,7 +23,7 @@ if ROOT not in sys.path:
 
 from core.database import timeframe_to_seconds  # noqa: E402
 from position_manager import PAPER_FEE_PCT, PAPER_SLIPPAGE_PCT  # noqa: E402
-from strategy_config import get_strategy_profile  # noqa: E402
+from strategy_config import get_strategy_profile, resolve_barriers  # noqa: E402
 from trading_bot import (  # noqa: E402
     InsufficientLabelsError,
     TradingDatabase,
@@ -35,7 +35,12 @@ from trading_bot import (  # noqa: E402
 )
 
 
-def _empty_backtest_result(timeframe: str, samples: int, message: str) -> Dict[str, Any]:
+def _empty_backtest_result(
+    timeframe: str,
+    samples: int,
+    message: str,
+    initial_capital: float = 1000.0,
+) -> Dict[str, Any]:
     return {
         "timeframe": timeframe,
         "samples": samples,
@@ -49,6 +54,7 @@ def _empty_backtest_result(timeframe: str, samples: int, message: str) -> Dict[s
         "sharpe_ratio": 0.0,
         "profit_factor": 0.0,
         "profit_factor_display": "0.00",
+        "final_capital": float(initial_capital),
         "trades": [],
         "message": message,
     }
@@ -118,6 +124,7 @@ def _compute_backtest_metrics(
         "profit_factor_display": profit_factor_display,
         "final_capital": final_capital,
         "trades": trades,
+        "message": "OK",
     }
 
 
@@ -137,8 +144,12 @@ def run_walk_forward_backtest(
     target_mode: str = "triple_barrier",
 ) -> Dict[str, Any]:
     """
-    Executa simulação walk-forward sobre `df` (ordenado cronologicamente), com purge
-    de `horizon_candles` entre treino e avaliação para eliminar look-ahead bias.
+    Executa simulação walk-forward alinhada ao robô real:
+    - Purge de `horizon_candles` entre treino e avaliação (sem look-ahead bias)
+    - Barreiras ATR dinâmicas quando ativas no perfil do timeframe
+    - Proteção dinâmica de lucro (Breakeven + Trailing Profit) idêntica ao PositionManager
+    - Preenchimento conservador de Stop Loss em gaps (`min(open, sl_price)`), bloqueio de
+      reentrada no mesmo candle, fechamento mark-to-market no fim e equity por candle.
     """
     profile = get_strategy_profile(
         timeframe,
@@ -158,6 +169,7 @@ def run_walk_forward_backtest(
             timeframe,
             len(clean_df),
             f"Histórico insuficiente ({len(clean_df)} candles < {train_window + horizon + 20}).",
+            initial_capital=initial_capital,
         )
 
     feat_df, feature_cols = build_features(clean_df)
@@ -167,6 +179,13 @@ def run_walk_forward_backtest(
         take_profit_pct=tp_pct,
         stop_loss_pct=sl_pct,
         horizon_candles=horizon,
+        use_atr_barriers=profile.use_atr_barriers,
+        atr_tp_mult=profile.atr_tp_mult,
+        atr_sl_mult=profile.atr_sl_mult,
+        min_tp_pct=profile.min_tp_pct,
+        max_tp_pct=profile.max_tp_pct,
+        min_sl_pct=profile.min_sl_pct,
+        max_sl_pct=profile.max_sl_pct,
     ).reset_index(drop=True)
 
     purge_gap = horizon if target_mode == "triple_barrier" else 1
@@ -177,6 +196,7 @@ def run_walk_forward_backtest(
             timeframe,
             len(labeled_df),
             "Amostras rotuladas insuficientes para walk-forward com purge.",
+            initial_capital=initial_capital,
         )
 
     capital = float(initial_capital)
@@ -193,13 +213,38 @@ def run_walk_forward_backtest(
     model = None
     last_train_idx = -retrain_step
 
+    opens = labeled_df["open"].to_numpy(dtype=float)
     closes = labeled_df["close"].to_numpy(dtype=float)
     highs = labeled_df["high"].to_numpy(dtype=float)
     lows = labeled_df["low"].to_numpy(dtype=float)
+    atr_arr = labeled_df["atr_pct"].to_numpy(dtype=float) if "atr_pct" in labeled_df.columns else None
     X_all = labeled_df[feature_cols]
 
+    def _close_trade(exit_i: int, raw_exit: float, reason: str) -> None:
+        nonlocal capital, in_pos
+        effective_exit = raw_exit * (1.0 - slippage_pct)
+        gross_entry = entry_price * qty
+        gross_exit = effective_exit * qty
+        fees = (gross_entry + gross_exit) * fee_pct
+        pnl_usd = (gross_exit - gross_entry) - fees
+        pnl_pct = (pnl_usd / gross_entry) * 100.0 if gross_entry > 0 else 0.0
+        capital += pnl_usd
+        trades.append({
+            "entry_idx": entry_idx,
+            "exit_idx": exit_i,
+            "entry_price": entry_price,
+            "exit_price": effective_exit,
+            "reason": reason,
+            "pnl_usd": pnl_usd,
+            "pnl_pct": pnl_pct,
+            "fees_usd": fees,
+        })
+        in_pos = False
+
     for i in range(start_idx, len(labeled_df)):
-        # 1. Verifica saída pela mínima/máxima do candle i
+        exited_this_candle = False
+
+        # 1. Verifica saída pela mínima/máxima do candle i (conservador: SL antes de TP; gap preenche em open)
         if in_pos:
             hit_sl = lows[i] <= sl_price
             hit_tp = highs[i] >= tp_price
@@ -207,8 +252,8 @@ def run_walk_forward_backtest(
             raw_exit_price = closes[i]
 
             if hit_sl:
-                exit_reason = "STOP_LOSS"
-                raw_exit_price = sl_price
+                raw_exit_price = min(opens[i], sl_price)
+                exit_reason = "TRAILING_PROFIT" if (sl_price > entry_price and raw_exit_price > entry_price) else "STOP_LOSS"
             elif hit_tp:
                 exit_reason = "TAKE_PROFIT"
                 raw_exit_price = tp_price
@@ -217,25 +262,22 @@ def run_walk_forward_backtest(
                 raw_exit_price = closes[i]
 
             if exit_reason is not None:
-                effective_exit = raw_exit_price * (1.0 - slippage_pct)
-                gross_entry = entry_price * qty
-                gross_exit = effective_exit * qty
-                fees = (gross_entry + gross_exit) * fee_pct
-                pnl_usd = (gross_exit - gross_entry) - fees
-                pnl_pct = (pnl_usd / gross_entry) * 100.0 if gross_entry > 0 else 0.0
-                capital += pnl_usd
-                equity_curve.append(capital)
-                trades.append({
-                    "entry_idx": entry_idx,
-                    "exit_idx": i,
-                    "entry_price": entry_price,
-                    "exit_price": effective_exit,
-                    "reason": exit_reason,
-                    "pnl_usd": pnl_usd,
-                    "pnl_pct": pnl_pct,
-                    "fees_usd": fees,
-                })
-                in_pos = False
+                _close_trade(i, raw_exit_price, exit_reason)
+                exited_this_candle = True
+            else:
+                # Proteção dinâmica de lucro (Breakeven + Trailing) aplicada para os candles seguintes
+                tp_dist = tp_price - entry_price
+                if tp_dist > 0 and highs[i] > entry_price:
+                    progress = (highs[i] - entry_price) / tp_dist
+                    be_sl = entry_price * 1.0025
+                    new_sl = sl_price
+                    if progress >= 0.80:
+                        trail_sl = entry_price + (highs[i] - entry_price) * 0.50
+                        new_sl = max(new_sl, be_sl, trail_sl)
+                    elif progress >= 0.60:
+                        new_sl = max(new_sl, be_sl)
+                    if new_sl > sl_price and new_sl < closes[i] * 0.9995:
+                        sl_price = new_sl
 
         # 2. Retreina periodicamente usando APENAS dados passados já resolvidos [i - purge - W : i - purge]
         if model is None or (i - last_train_idx) >= retrain_step:
@@ -254,25 +296,39 @@ def run_walk_forward_backtest(
                         tp_pct=tp_pct,
                         sl_pct=sl_pct,
                         confidence_threshold=conf_th,
+                        run_walk_forward_eval=False,
                     )
                     last_train_idx = i
                 except InsufficientLabelsError:
                     pass
 
-        # 3. Avalia sinal de entrada no fechamento do candle i
-        if not in_pos and model is not None:
+        # 3. Avalia sinal de entrada no fechamento do candle i (sem reentrada no mesmo candle de saída)
+        if not in_pos and not exited_this_candle and model is not None and capital >= min(10.0, trade_amount_usdt):
             pred, _, prob_up = predict_signal(model, X_all.iloc[i:i + 1])
             if pred == 1 and prob_up >= conf_th:
+                eff_amount = min(trade_amount_usdt, capital)
+                cur_atr = float(atr_arr[i]) if (atr_arr is not None and math.isfinite(atr_arr[i])) else None
+                dyn_tp, dyn_sl = resolve_barriers(profile, atr_pct=cur_atr)
                 entry_price = closes[i] * (1.0 + slippage_pct)
-                qty = trade_amount_usdt / entry_price
-                sl_price = entry_price * (1.0 - sl_pct)
-                tp_price = entry_price * (1.0 + tp_pct)
+                qty = eff_amount / entry_price
+                sl_price = entry_price * (1.0 - dyn_sl)
+                tp_price = entry_price * (1.0 + dyn_tp)
                 entry_idx = i
                 in_pos = True
 
+        # Marca equity a mercado em cada candle para Max Drawdown preciso
+        mtm_equity = capital + ((closes[i] - entry_price) * qty if in_pos else 0.0)
+        equity_curve.append(mtm_equity)
+
+    # Fecha posição residual ao final do backtest (evita descartar prejuízo/lucro aberto)
+    if in_pos:
+        _close_trade(len(labeled_df) - 1, closes[-1], "END_OF_BACKTEST")
+        equity_curve.append(capital)
+
+    oos_samples = max(1, len(labeled_df) - start_idx)
     return _compute_backtest_metrics(
         timeframe=timeframe,
-        samples=len(labeled_df),
+        samples=oos_samples,
         initial_capital=initial_capital,
         final_capital=capital,
         equity_curve=equity_curve,
@@ -284,7 +340,7 @@ def compare_timeframes_from_db(db_path: str = "trading_data.db", symbol: str = "
     """Compara o desempenho walk-forward com custos reais usando o perfil único por timeframe."""
     db = TradingDatabase(db_path=db_path)
     results = []
-    for tf in ("1m", "5m", "15m"):
+    for tf in ("1m", "5m", "15m", "30m", "1h"):
         df = db.get_recent_candles(symbol, tf, limit=2000)
         if df.empty:
             continue

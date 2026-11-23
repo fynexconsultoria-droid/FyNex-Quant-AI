@@ -16,14 +16,25 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
+import tempfile
+import threading
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterator, List, Optional
 
+from dotenv import dotenv_values
+
 logger = logging.getLogger("QuantTradingBot")
+
+_DEFAULT_ENV_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
+_ENV_WRITE_LOCK = threading.Lock()
+_TELEGRAM_TOKEN_RE = re.compile(r"^\d{6,15}:[A-Za-z0-9_-]{20,64}$")
+_TELEGRAM_CHAT_ID_RE = re.compile(r"^-?\d{5,20}$")
+_TELEGRAM_TOKEN_SCRUB_RE = re.compile(r"bot\d{6,15}:[A-Za-z0-9_-]{10,}")
 
 # Mapeamento de símbolos internos -> tickers oficiais da XTB (xStation 5)
 XTB_SYMBOL_MAP: Dict[str, str] = {
@@ -54,10 +65,46 @@ def to_xtb_symbol(symbol: str) -> str:
     return XTB_SYMBOL_MAP.get(key, key.replace("/", ""))
 
 
-def get_telegram_config() -> Dict[str, Any]:
-    """Lê configuração opcional do Telegram a partir das variáveis de ambiente."""
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+def _scrub_telegram_error(err: Any, token: str = "") -> str:
+    msg = str(err or "")
+    if token:
+        msg = msg.replace(token, "***")
+    msg = _TELEGRAM_TOKEN_SCRUB_RE.sub("bot***", msg)
+    return msg[:300]
+
+
+def _load_telegram_creds(env_path: Optional[str] = None) -> tuple[str, str]:
+    path = env_path or _DEFAULT_ENV_PATH
+    env_data: Dict[str, Optional[str]] = {}
+    if os.path.exists(path):
+        try:
+            env_data = dotenv_values(path)
+        except Exception:
+            env_data = {}
+    token = (os.getenv("TELEGRAM_BOT_TOKEN") or env_data.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    chat_id = (os.getenv("TELEGRAM_CHAT_ID") or env_data.get("TELEGRAM_CHAT_ID") or "").strip()
+    return token, chat_id
+
+
+def _atomic_write_text(path: str, content: str) -> None:
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".env.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        raise
+
+
+def get_telegram_config(env_path: Optional[str] = None) -> Dict[str, Any]:
+    """Lê configuração opcional do Telegram a partir do .env e variáveis de ambiente."""
+    token, chat_id = _load_telegram_creds(env_path=env_path)
     configured = bool(token and chat_id)
     masked = ""
     if token:
@@ -70,76 +117,98 @@ def get_telegram_config() -> Dict[str, Any]:
 
 
 def save_telegram_config(bot_token: str, chat_id: str, env_path: Optional[str] = None) -> Dict[str, Any]:
-    """Salva TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID no arquivo .env e atualiza os.environ."""
+    """Valida e salva TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID de forma atômica no .env e os.environ."""
     token = (bot_token or "").strip()
     cid = (chat_id or "").strip()
 
-    if env_path is None:
-        env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
-
-    lines: List[str] = []
-    if os.path.exists(env_path):
-        with open(env_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+    if any(ch in token for ch in ("\r", "\n")) or any(ch in cid for ch in ("\r", "\n")):
+        raise ValueError("Credenciais do Telegram não podem conter quebras de linha.")
 
     updates: Dict[str, str] = {}
-    if token and "..." not in token and not token.startswith("*"):
+    if token and "..." not in token and not token.startswith(("*", "•")):
+        if not _TELEGRAM_TOKEN_RE.match(token):
+            raise ValueError(
+                "TELEGRAM_BOT_TOKEN inválido. Use o formato oficial do BotFather (ex.: 123456789:AA...)."
+            )
         updates["TELEGRAM_BOT_TOKEN"] = token
-        os.environ["TELEGRAM_BOT_TOKEN"] = token
+
     if cid:
+        if not _TELEGRAM_CHAT_ID_RE.match(cid):
+            raise ValueError("TELEGRAM_CHAT_ID inválido. Informe apenas o ID numérico do chat/grupo.")
         updates["TELEGRAM_CHAT_ID"] = cid
-        os.environ["TELEGRAM_CHAT_ID"] = cid
 
-    seen = set()
-    new_lines: List[str] = []
-    for line in lines:
-        stripped = line.strip()
-        replaced = False
+    if env_path is None:
+        env_path = _DEFAULT_ENV_PATH
+
+    with _ENV_WRITE_LOCK:
+        lines: List[str] = []
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+
+        seen = set()
+        new_lines: List[str] = []
+        key_re = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")
+        for line in lines:
+            m = key_re.match(line)
+            if m and m.group(1) in updates:
+                k = m.group(1)
+                if k not in seen:
+                    new_lines.append(f"{k}={updates[k]}")
+                    seen.add(k)
+            else:
+                new_lines.append(line)
+
         for k, v in updates.items():
-            if stripped.startswith(f"{k}="):
-                new_lines.append(f"{k}={v}\n")
-                seen.add(k)
-                replaced = True
-                break
-        if not replaced:
-            new_lines.append(line)
+            if k not in seen:
+                new_lines.append(f"{k}={v}")
 
-    for k, v in updates.items():
-        if k not in seen:
-            if new_lines and not new_lines[-1].endswith("\n"):
-                new_lines[-1] += "\n"
-            new_lines.append(f"{k}={v}\n")
+        content = "\n".join(new_lines) + "\n"
+        _atomic_write_text(env_path, content)
 
-    with open(env_path, "w", encoding="utf-8") as f:
-        f.writelines(new_lines)
+        for k, v in updates.items():
+            os.environ[k] = v
 
-    return get_telegram_config()
+    return get_telegram_config(env_path=env_path)
 
 
 def format_copilot_copy_text(sig: Dict[str, Any]) -> str:
     """Formata um sinal em texto limpo pronto para replicar na xStation 5."""
     side_pt = "COMPRA (BUY)" if sig.get("side") == "BUY" else "VENDA (SELL)"
+    entry = float(sig.get("entry_price") or 0.0)
+    sl = sig.get("sl_price")
+    tp = sig.get("tp_price")
+    dist_note = ""
+    if entry > 0 and sl is not None and tp is not None:
+        sl_pct = abs(float(sl) - entry) / entry * 100.0
+        tp_pct = abs(float(tp) - entry) / entry * 100.0
+        dist_note = f" (SL {sl_pct:.2f}% | TP {tp_pct:.2f}%)"
     return (
         f"XTB xStation 5 | {sig.get('xtb_symbol')} ({sig.get('symbol')})\n"
         f"Direção: {side_pt} | Score IA: {float(sig.get('score', 0)):.0f}/100\n"
-        f"Entrada: {sig.get('entry_price')} | SL: {sig.get('sl_price')} | TP: {sig.get('tp_price')}\n"
+        f"Entrada: {sig.get('entry_price')} | SL: {sig.get('sl_price')} | TP: {sig.get('tp_price')}{dist_note}\n"
         f"Lote sugerido: {sig.get('suggested_lots')} | Alavancagem: 1:{sig.get('leverage')}\n"
         f"Motivo: {sig.get('reason') or 'Confluência técnica + macro'}"
     )
 
 
 def send_telegram_message(text: str, timeout: float = 8.0) -> Dict[str, Any]:
-    """Envia mensagem via Telegram Bot API usando apenas stdlib (urllib)."""
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    """Envia mensagem via Telegram Bot API usando apenas stdlib (urllib) com sanitização."""
+    token, chat_id = _load_telegram_creds()
     if not token or not chat_id:
         return {"sent": False, "error": "Telegram não configurado (defina TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID)."}
+    if not _TELEGRAM_TOKEN_RE.match(token) or not _TELEGRAM_CHAT_ID_RE.match(chat_id):
+        return {"sent": False, "error": "Configuração de Telegram inválida."}
+
+    safe_text = str(text or "")
+    if len(safe_text) > 4000:
+        safe_text = safe_text[:3997] + "..."
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = json.dumps(
         {
             "chat_id": chat_id,
-            "text": text,
+            "text": safe_text,
             "disable_web_page_preview": True,
         }
     ).encode("utf-8")
@@ -151,15 +220,17 @@ def send_telegram_message(text: str, timeout: float = 8.0) -> Dict[str, Any]:
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = json.loads(resp.read().decode("utf-8", errors="ignore") or "{}")
+            raw_bytes = resp.read(65536)
+            body = json.loads(raw_bytes.decode("utf-8", errors="ignore") or "{}")
             ok = bool(body.get("ok"))
-            return {"sent": ok, "error": None if ok else str(body.get("description") or "Erro Telegram")}
+            return {"sent": ok, "error": None if ok else _scrub_telegram_error(body.get("description") or "Erro Telegram", token)}
     except urllib.error.HTTPError as e:
         return {"sent": False, "error": f"HTTP {e.code}: {e.reason}"}
     except Exception as e:
-        return {"sent": False, "error": str(e)}
+        return {"sent": False, "error": _scrub_telegram_error(e, token)}
 
 
+_COPILOT_INIT_LOCK = threading.Lock()
 _INITIALIZED_COPILOT_DBS: set = set()
 
 
@@ -168,22 +239,35 @@ class XTBCopilotStore:
 
     def __init__(self, db_path: str):
         self.db_path = db_path
-        if db_path not in _INITIALIZED_COPILOT_DBS or not os.path.exists(db_path):
-            self._init_tables()
-            _INITIALIZED_COPILOT_DBS.add(db_path)
+        with _COPILOT_INIT_LOCK:
+            if db_path not in _INITIALIZED_COPILOT_DBS or not os.path.exists(db_path):
+                self._init_tables()
+                _INITIALIZED_COPILOT_DBS.add(db_path)
 
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.db_path, timeout=15)
+    def _connect(self, *, write_immediate: bool = False) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(self.db_path, timeout=15.0, isolation_level=None if write_immediate else "")
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=15000;")
         try:
-            yield conn
+            if write_immediate:
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    yield conn
+                    conn.execute("COMMIT")
+                except Exception:
+                    if conn.in_transaction:
+                        conn.execute("ROLLBACK")
+                    raise
+            else:
+                with conn:
+                    yield conn
         finally:
             conn.close()
 
     def _init_tables(self) -> None:
         with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS xtb_copilot_signals (
@@ -207,10 +291,9 @@ class XTBCopilotStore:
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_copilot_dedup
-                ON xtb_copilot_signals(symbol, side, status, created_at)
+                ON xtb_copilot_signals(symbol, side, created_at)
                 """
             )
-            conn.commit()
 
     def record_signal(
         self,
@@ -226,19 +309,21 @@ class XTBCopilotStore:
         notify_telegram: bool = True,
         dedup_minutes: int = 120,
     ) -> Dict[str, Any]:
-        """Registra um novo sinal para o Copiloto XTB (com deduplicação por símbolo/direção)."""
+        """Registra um novo sinal para o Copiloto XTB (com deduplicação atômica por símbolo/direção)."""
         now_utc = datetime.now(timezone.utc)
-        now_iso = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
-        cutoff_iso = (now_utc - timedelta(minutes=dedup_minutes)).strftime("%Y-%m-%d %H:%M:%S UTC")
+        now_iso = now_utc.strftime("%Y-%m-%d %H:%M:%S")
+        cutoff_iso = (now_utc - timedelta(minutes=dedup_minutes)).strftime("%Y-%m-%d %H:%M:%S")
         sym = symbol.upper().strip()
         xtb_sym = to_xtb_symbol(sym)
         side_u = side.upper().strip()
+        if side_u not in ("BUY", "SELL"):
+            raise ValueError(f"Direção inválida para sinal XTB: '{side}'. Use 'BUY' ou 'SELL'.")
 
-        with self._connect() as conn:
+        with self._connect(write_immediate=True) as conn:
             existing = conn.execute(
                 """
                 SELECT * FROM xtb_copilot_signals
-                WHERE symbol = ? AND side = ? AND status = 'NEW' AND created_at >= ?
+                WHERE symbol = ? AND side = ? AND substr(created_at, 1, 19) >= ?
                 ORDER BY id DESC LIMIT 1
                 """,
                 (sym, side_u, cutoff_iso),
@@ -272,7 +357,6 @@ class XTBCopilotStore:
                 ),
             )
             sig_id = cur.lastrowid
-            conn.commit()
             row = conn.execute("SELECT * FROM xtb_copilot_signals WHERE id = ?", (sig_id,)).fetchone()
 
         sig = dict(row)
@@ -285,7 +369,6 @@ class XTBCopilotStore:
             if tg_res.get("sent"):
                 with self._connect() as conn:
                     conn.execute("UPDATE xtb_copilot_signals SET telegram_sent = 1 WHERE id = ?", (sig_id,))
-                    conn.commit()
                 sig["telegram_sent"] = 1
             else:
                 logger.debug(f"[COPILOTO XTB] Alerta Telegram não enviado: {tg_res.get('error')}")
