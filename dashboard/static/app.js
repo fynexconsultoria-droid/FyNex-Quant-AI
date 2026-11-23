@@ -272,6 +272,18 @@ function bindUIEvents() {
     if (box) box.style.display = box.style.display === "none" ? "flex" : "none";
   });
   on("btnSaveTelegram", "click", saveTelegramConfigUI);
+
+  // Chat da IA (Evolução & Resultados 24h / 7d / 30d)
+  on("btnSendAiChat", "click", () => sendAiChatMessage());
+  on("aiChatInput", "keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      sendAiChatMessage();
+    }
+  });
+  document.querySelectorAll("#aiChatChips [data-chat-q]").forEach((btn) => {
+    btn.addEventListener("click", () => sendAiChatMessage(btn.dataset.chatQ));
+  });
 }
 
 function switchView(viewName) {
@@ -295,6 +307,7 @@ function switchView(viewName) {
     fetchMacroIntelligence(false);
     fetchAiEvolution();
     fetchXtbCopilotSignals();
+    fetchAiPerformanceAndWelcome();
     pollAiTrainStatus();
   }
   if (activeView === "news" && newsCacheItems.length === 0) {
@@ -2657,5 +2670,119 @@ async function saveTelegramConfigUI() {
       btn.disabled = false;
       btn.textContent = "💾 Salvar & Testar";
     }
+  }
+}
+
+/* ==========================================================================
+   Chat da IA (Evolução & Resultados em 24h, 1 Semana e 1 Mês)
+   ========================================================================== */
+
+let aiChatInitialized = false;
+
+function formatChatMarkdownSafe(text) {
+  let safe = escapeHtml(text || "");
+  safe = safe.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  safe = safe.replace(/_(.+?)_/g, "<em>$1</em>");
+  return safe;
+}
+
+function appendAiChatBubble(role, text) {
+  const feed = document.getElementById("aiChatMessages");
+  if (!feed) return;
+  const wrap = document.createElement("div");
+  wrap.className = `chat-msg ${role === "user" ? "user" : "ai"}`;
+  const bubble = document.createElement("div");
+  bubble.className = "chat-bubble";
+  bubble.innerHTML = formatChatMarkdownSafe(text);
+  wrap.appendChild(bubble);
+  feed.appendChild(wrap);
+  feed.scrollTop = feed.scrollHeight;
+}
+
+function renderAiPerformanceBoxes(summary) {
+  if (!summary || !summary.periods) return;
+  const map = [
+    ["24h", "perf24hPnl", "perf24hSub"],
+    ["7d", "perf7dPnl", "perf7dSub"],
+    ["30d", "perf30dPnl", "perf30dSub"],
+  ];
+  for (const [key, pnlId, subId] of map) {
+    const p = summary.periods[key] || {};
+    const pnl = Number(p.total_pnl_usd || 0);
+    const pnlEl = document.getElementById(pnlId);
+    const subEl = document.getElementById(subId);
+    if (pnlEl) {
+      pnlEl.textContent = `${pnl >= 0 ? "+$" : "-$"}${Math.abs(pnl).toLocaleString("en-US", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })}`;
+      pnlEl.className = `mono-val ${pnl >= 0 ? "text-up" : "text-down"}`;
+    }
+    if (subEl) {
+      const accStr = p.predictions_evaluated > 0 ? `${Number(p.accuracy_pct || 0).toFixed(1)}%` : "--%";
+      subEl.textContent = `${p.total_trades || 0} trade(s) • WR ${Number(p.win_rate_pct || 0).toFixed(0)}% • Acurácia: ${accStr}`;
+    }
+  }
+}
+
+async function fetchAiPerformanceAndWelcome() {
+  const sym = isActiveForex() ? "BTC/USDT" : activeSymbol;
+  try {
+    const res = await fetch(`/api/ai/performance?symbol=${encodeURIComponent(sym)}&timeframe=${encodeURIComponent(activeTimeframe)}`);
+    if (res.ok) {
+      const summary = await res.json();
+      renderAiPerformanceBoxes(summary);
+    }
+  } catch (_) {
+    // silencioso
+  }
+
+  if (!aiChatInitialized) {
+    aiChatInitialized = true;
+    const feed = document.getElementById("aiChatMessages");
+    if (feed) feed.innerHTML = "";
+    await sendAiChatMessage("Resumo geral da sua evolução e resultados", true);
+  }
+}
+
+async function sendAiChatMessage(presetText = null, silentUserBubble = false) {
+  const inp = document.getElementById("aiChatInput");
+  const text = (presetText !== null ? presetText : inp ? inp.value : "").trim();
+  if (!text) return;
+
+  if (!silentUserBubble) {
+    appendAiChatBubble("user", text);
+  }
+  if (inp && presetText === null) {
+    inp.value = "";
+  }
+
+  const btn = document.getElementById("btnSendAiChat");
+  if (btn) btn.disabled = true;
+
+  try {
+    const sym = isActiveForex() ? "BTC/USDT" : activeSymbol;
+    const res = await fetch("/api/ai/chat", {
+      method: "POST",
+      headers: csrfHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        message: text,
+        symbol: sym,
+        timeframe: activeTimeframe,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      appendAiChatBubble("ai", `⚠️ ${data.detail || "Não foi possível consultar a IA agora."}`);
+      return;
+    }
+    if (data.summary) {
+      renderAiPerformanceBoxes(data.summary);
+    }
+    appendAiChatBubble("ai", data.reply || "Sem resposta.");
+  } catch (err) {
+    appendAiChatBubble("ai", `⚠️ Erro ao falar com a IA: ${err}`);
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }

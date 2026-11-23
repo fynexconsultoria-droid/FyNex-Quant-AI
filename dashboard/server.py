@@ -35,7 +35,7 @@ if BASE_DIR not in sys.path:
 
 import binance_client  # noqa: E402
 import train_ai  # noqa: E402
-from core import forex_ai_trader, forex_market, macro_intelligence, news_feed, xtb_copilot  # noqa: E402
+from core import ai_chat, forex_ai_trader, forex_market, macro_intelligence, news_feed, xtb_copilot  # noqa: E402
 from core.database import TradingDatabase  # noqa: E402
 from strategy_config import get_strategy_profile, DEFAULT_TIMEFRAME  # noqa: E402
 from trading_bot import (  # noqa: E402
@@ -662,6 +662,37 @@ def save_xtb_copilot_telegram(payload: TelegramConfigPayload):
             "Você receberá aqui os alertas de Forex, Ouro, Prata, Petróleo e Índices prontos para a xStation 5."
         )
     return {"status": "saved", "telegram": cfg, "test_result": test_result}
+
+
+class AiChatPayload(BaseModel):
+    message: str
+    symbol: str = "BTC/USDT"
+    timeframe: str = "1h"
+
+
+@app.get("/api/ai/performance")
+def get_ai_performance(
+    symbol: str = Query(default="BTC/USDT", max_length=20),
+    timeframe: str = Query(default="1h", max_length=10),
+):
+    """Retorna evolução da IA e resultados consolidados em 24h, 7 dias e 30 dias."""
+    return ai_chat.get_performance_summary(db_path=DB_PATH, symbol=symbol, timeframe=timeframe)
+
+
+@app.post("/api/ai/chat", dependencies=[Depends(require_csrf)])
+def post_ai_chat(payload: AiChatPayload):
+    """Chat quantitativo local com a IA sobre evolução e resultados (24h, 1 semana e 1 mês)."""
+    msg = (payload.message or "").strip()
+    if not msg:
+        raise HTTPException(status_code=400, detail="Digite uma pergunta para a IA.")
+    if len(msg) > 500:
+        msg = msg[:500]
+    return ai_chat.answer_ai_chat(
+        message=msg,
+        db_path=DB_PATH,
+        symbol=payload.symbol or "BTC/USDT",
+        timeframe=payload.timeframe or "1h",
+    )
 
 
 @app.post("/api/xtb/order", dependencies=[Depends(require_csrf)])

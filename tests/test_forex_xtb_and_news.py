@@ -396,3 +396,76 @@ def test_xtb_copilot_store_and_endpoints(tmp_path, monkeypatch):
     )
     assert r_ok.status_code == 200
     assert r_ok.json()["signal"]["status"] == "EXECUTED_XTB"
+
+
+# ----------------------------------------- 7. Chat da IA (Evolução + Resultados 24h / 7d / 30d)
+def test_ai_chat_and_performance_periods(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from core import ai_chat
+    from core.database import TradingDatabase
+
+    db_file = str(tmp_path / "chat_test.db")
+    monkeypatch.setattr(server, "DB_PATH", db_file)
+
+    db = TradingDatabase(db_path=db_file)
+    now = datetime(2026, 11, 22, 21, 0, 0, tzinfo=timezone.utc)
+    t_5h = (now - timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
+    t_4d = (now - timedelta(days=4)).strftime("%Y-%m-%d %H:%M:%S")
+    t_20d = (now - timedelta(days=20)).strftime("%Y-%m-%d %H:%M:%S")
+
+    with db._get_connection() as conn:
+        # 1 trade há 5h (+$15), 1 trade há 4 dias (+$25), 1 trade há 20 dias (-$10)
+        conn.execute(
+            "INSERT INTO simulated_trades (symbol, timeframe, model_version, entry_time, entry_price, exit_time, exit_price, reason, pnl_pct, pnl_usd, mode) VALUES (?, ?, 1, ?, 60000, ?, 60900, 'TAKE_PROFIT', 1.5, 15.0, 'paper')",
+            ("BTC/USDT", "1h", t_5h, t_5h),
+        )
+        conn.execute(
+            "INSERT INTO simulated_trades (symbol, timeframe, model_version, entry_time, entry_price, exit_time, exit_price, reason, pnl_pct, pnl_usd, mode) VALUES (?, ?, 1, ?, 60000, ?, 61500, 'TAKE_PROFIT', 2.5, 25.0, 'paper')",
+            ("BTC/USDT", "1h", t_4d, t_4d),
+        )
+        conn.execute(
+            "INSERT INTO simulated_trades (symbol, timeframe, model_version, entry_time, entry_price, exit_time, exit_price, reason, pnl_pct, pnl_usd, mode) VALUES (?, ?, 1, ?, 60000, ?, 59400, 'STOP_LOSS', -1.0, -10.0, 'paper')",
+            ("BTC/USDT", "1h", t_20d, t_20d),
+        )
+        conn.commit()
+
+    summary = ai_chat.get_performance_summary(db_path=db_file, symbol="BTC/USDT", timeframe="1h", now_utc=now)
+    assert summary["periods"]["24h"]["total_trades"] == 1
+    assert summary["periods"]["24h"]["total_pnl_usd"] == pytest.approx(15.0)
+    assert summary["periods"]["7d"]["total_trades"] == 2
+    assert summary["periods"]["7d"]["total_pnl_usd"] == pytest.approx(40.0)
+    assert summary["periods"]["30d"]["total_trades"] == 3
+    assert summary["periods"]["30d"]["total_pnl_usd"] == pytest.approx(30.0)
+
+    r24 = ai_chat.answer_ai_chat("como foram os resultados nas ultimas 24 horas?", db_file, now_utc=now)
+    assert r24["intent"] == "report_24h"
+    assert "+$15.00" in r24["reply"]
+
+    r7d = ai_chat.answer_ai_chat("mostre o resultado da semana", db_file, now_utc=now)
+    assert r7d["intent"] == "report_7d"
+    assert "+$40.00" in r7d["reply"]
+
+    r30d = ai_chat.answer_ai_chat("quanto lucrou no mes?", db_file, now_utc=now)
+    assert r30d["intent"] == "report_30d"
+    assert "+$30.00" in r30d["reply"]
+
+    revo = ai_chat.answer_ai_chat("como esta sua evolucao?", db_file, now_utc=now)
+    assert revo["intent"] == "evolution"
+    assert "Nível" in revo["reply"]
+
+    # Endpoints REST
+    client = TestClient(server.app)
+    r_perf = client.get("/api/ai/performance?symbol=BTC/USDT&timeframe=1h")
+    assert r_perf.status_code == 200
+    assert "24h" in r_perf.json()["periods"]
+
+    r_no_csrf = client.post("/api/ai/chat", json={"message": "resumo geral"})
+    assert r_no_csrf.status_code == 403
+
+    r_chat = client.post(
+        "/api/ai/chat",
+        headers={"X-CSRF-Token": server.CSRF_TOKEN},
+        json={"message": "como está sua evolução?", "symbol": "BTC/USDT", "timeframe": "1h"},
+    )
+    assert r_chat.status_code == 200
+    assert r_chat.json()["intent"] == "evolution"
