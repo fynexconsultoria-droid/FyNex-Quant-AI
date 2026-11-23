@@ -8,6 +8,7 @@ Machine Learning, Engenharia de Features e Persistência de Modelos (FyNex Quant
   calibração Platt e promoção Campeão vs. Desafiante.
 """
 
+import gc
 import hashlib
 import json
 import os
@@ -45,7 +46,7 @@ class ModelPersistence:
     e poda controlada de versões antigas.
     """
 
-    def __init__(self, models_dir: str = DEFAULT_MODELS_DIR, max_versions_kept: int = 10):
+    def __init__(self, models_dir: str = DEFAULT_MODELS_DIR, max_versions_kept: int = 5):
         self.models_dir = models_dir
         self.max_versions_kept = max_versions_kept
         os.makedirs(self.models_dir, exist_ok=True)
@@ -58,7 +59,7 @@ class ModelPersistence:
     @staticmethod
     def _atomic_dump_joblib(obj: Any, target_path: str) -> None:
         tmp_path = target_path + ".tmp"
-        joblib.dump(obj, tmp_path)
+        joblib.dump(obj, tmp_path, compress=3)
         os.replace(tmp_path, target_path)
 
     @staticmethod
@@ -1006,4 +1007,5 @@ def train_model(
     )
     logger.info(f"   Top Features: {top_feats}")
 
+    gc.collect()
     return final_model, precision_buy

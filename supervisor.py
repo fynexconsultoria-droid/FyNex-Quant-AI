@@ -10,6 +10,7 @@ import os
 import sys
 import time
 import logging
+from logging.handlers import RotatingFileHandler
 import subprocess
 from typing import List, Optional
 
@@ -42,7 +43,19 @@ def run_supervised(
     while True:
         start_time = time.monotonic()
         logger.info(f"Iniciando robô supervisionado: {' '.join(cmd)}")
-        proc = subprocess.Popen(cmd, cwd=BASE_DIR)
+
+        # Limita threads BLAS/OpenMP/Loky para nunca travar o PC durante retreino em segundo plano
+        child_env = os.environ.copy()
+        for env_var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS", "LOKY_MAX_CPU_COUNT"):
+            child_env.setdefault(env_var, "2")
+
+        creationflags = 0
+        if os.name == "nt":
+            creationflags |= getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
+            if sys.stdout is None:
+                creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+        proc = subprocess.Popen(cmd, cwd=BASE_DIR, env=child_env, creationflags=creationflags)
         last_code = proc.wait()
         elapsed = time.monotonic() - start_time
 
@@ -73,7 +86,12 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
         handlers=[
-            logging.FileHandler(os.path.join(BASE_DIR, "logs", "supervisor.log"), encoding="utf-8"),
+            RotatingFileHandler(
+                os.path.join(BASE_DIR, "logs", "supervisor.log"),
+                maxBytes=2 * 1024 * 1024,
+                backupCount=2,
+                encoding="utf-8",
+            ),
         ],
     )
     sys.exit(run_supervised(sys.argv[1:]))

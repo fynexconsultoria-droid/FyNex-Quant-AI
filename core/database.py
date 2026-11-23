@@ -57,6 +57,9 @@ class TradingDatabase:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("PRAGMA busy_timeout=15000;")
+        conn.execute("PRAGMA cache_size=-4000;")
+        conn.execute("PRAGMA temp_store=MEMORY;")
+        conn.execute("PRAGMA wal_autocheckpoint=1000;")
         try:
             with conn:
                 yield conn
