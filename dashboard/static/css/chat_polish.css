@@ -1,0 +1,366 @@
+/* ==========================================================================
+   Widget Flutuante do Chat da IA (Acesso Rápido Global)
+   ========================================================================== */
+.ai-chat-fab {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 1050;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.48rem;
+  padding: 0.72rem 1.05rem;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 242, 254, 0.45);
+  background: linear-gradient(135deg, rgba(8, 22, 42, 0.96), rgba(14, 116, 144, 0.92));
+  color: #f8fafc;
+  font-weight: 700;
+  font-size: 0.85rem;
+  cursor: pointer;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.48), 0 0 18px rgba(0, 242, 254, 0.22);
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+
+.ai-chat-fab:hover {
+  transform: translateY(-2px);
+  border-color: rgba(0, 242, 254, 0.85);
+  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.55), 0 0 24px rgba(0, 242, 254, 0.35);
+}
+
+.ai-chat-fab-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 8px #10b981;
+}
+
+.ai-chat-drawer {
+  position: fixed;
+  right: 22px;
+  bottom: 78px;
+  z-index: 1051;
+  width: 430px;
+  max-width: calc(100vw - 28px);
+  max-height: min(620px, calc(100vh - 104px));
+  display: flex;
+  flex-direction: column;
+  padding: 0.9rem;
+  border-radius: 16px;
+  background: rgba(11, 16, 28, 0.97);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(0, 242, 254, 0.32);
+  box-shadow: 0 22px 54px rgba(0, 0, 0, 0.65);
+  opacity: 0;
+  transform: translateY(16px) scale(0.97);
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.ai-chat-drawer.open {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  pointer-events: auto;
+}
+
+.ai-chat-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding-bottom: 0.55rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.ai-chat-drawer-header h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.ai-chat-close-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-main);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.ai-chat-close-btn:hover {
+  background: rgba(244, 63, 94, 0.2);
+  border-color: rgba(244, 63, 94, 0.45);
+}
+
+.ai-period-grid.compact {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.42rem;
+  margin-top: 0.55rem;
+}
+
+.ai-period-grid.compact .ai-period-box {
+  padding: 0.45rem 0.55rem;
+}
+
+.ai-period-grid.compact .ai-period-box strong {
+  font-size: 0.9rem;
+}
+
+.ai-period-grid.compact .market-metric-sub {
+  font-size: 0.65rem;
+}
+
+.ai-chat-drawer .ai-chat-messages {
+  flex: 1;
+  min-height: 190px;
+  max-height: 290px;
+}
+
+/* ==========================================================================
+   Polimento Institucional & Performance de Renderização (Tabular Nums + Sticky)
+   ========================================================================== */
+.mono-val,
+.ticker-price,
+.ticker-change,
+.ticker-latency,
+.kpi-value,
+.wl-price,
+.wl-chg,
+.xtb-btn-price,
+.data-table td {
+  font-variant-numeric: tabular-nums;
+}
+
+.wl-row {
+  contain: layout style;
+}
+
+.data-table thead th {
+  position: sticky;
+  top: 0;
+  background: #0e1629;
+  z-index: 2;
+  box-shadow: inset 0 -1px 0 rgba(148, 163, 184, 0.14);
+}
+
+.data-table tbody tr:hover {
+  background: rgba(56, 189, 248, 0.05);
+}
+
+input:focus-visible,
+select:focus-visible,
+button:focus-visible {
+  outline: 2px solid rgba(0, 242, 254, 0.55);
+  outline-offset: 1px;
+}
+
+/* ==========================================================================
+   Polimento de Organização, Espaçamento & Alinhamento Global (Todas as Áreas)
+   ========================================================================== */
+.dashboard-container {
+  padding: 1.15rem 1.45rem 5rem 1.45rem;
+  gap: 1.15rem;
+}
+
+.view-section.active {
+  display: flex;
+  flex-direction: column;
+  gap: 1.15rem;
+  animation: viewFadeIn 0.18s ease-out;
+}
+
+.view-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding-bottom: 0.2rem;
+}
+
+.view-header h2 {
+  font-size: 1.28rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.25;
+  margin-bottom: 0.18rem;
+}
+
+.view-subtitle {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+/* Cabeçalhos de Cards Padronizados */
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.85rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.85rem;
+  padding-bottom: 0.65rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.09);
+}
+
+.card-header.compact {
+  align-items: center;
+  margin-bottom: 0.65rem;
+  padding-bottom: 0.5rem;
+}
+
+.card-header > div:first-child {
+  min-width: 0;
+  flex: 1 1 260px;
+}
+
+.card-header h3 {
+  font-size: 0.96rem;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+
+.ticket-sub {
+  display: block;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  line-height: 1.38;
+  margin-top: 0.18rem;
+}
+
+/* KPI Grid Simétrico (4 colunas no desktop, 2 no tablet, 1 no mobile) */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+@media (max-width: 1220px) {
+  .kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .kpi-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.kpi-card {
+  min-height: 126px;
+  padding: 1rem 1.15rem;
+  justify-content: space-between;
+  gap: 0.35rem;
+}
+
+.kpi-value {
+  font-size: 1.55rem;
+  margin: 0.25rem 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Topbar alinhada sem estouro em telas de notebook */
+.topbar {
+  padding: 0.68rem 1.45rem;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.ticker-box {
+  padding: 0.38rem 0.9rem;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.topbar-actions {
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+
+select option,
+select optgroup {
+  background-color: #0d1424;
+  color: #f8fafc;
+}
+
+/* Tabelas bem enquadradas e sem texto cortado */
+.table-scroll {
+  overflow-x: auto;
+  border-radius: var(--radius-sm);
+}
+
+.copilot-btn-row {
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+}
+
+/* Radar Global & Macro Strip dentro de Cards */
+.card > .market-strip {
+  padding: 0.55rem 0 0.1rem 0;
+  gap: 0.5rem 0;
+}
+
+.market-metric-sub {
+  font-size: 0.71rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Detalhes do Modelo com respiro uniforme */
+.model-details-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.85rem;
+}
+
+@media (max-width: 1100px) {
+  .model-details-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.model-detail-item {
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(148, 163, 184, 0.09);
+  border-radius: var(--radius-sm);
+  padding: 0.65rem 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.22rem;
+  min-width: 0;
+}
+
+.detail-val {
+  font-size: 0.84rem;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+@keyframes viewFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -12,19 +12,10 @@ Antes de qualquer compra, valida 5 travas objetivas de proteção de capital:
 
 from __future__ import annotations
 
-import math
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-
-def _finite_float(value: Any) -> Optional[float]:
-    if value is None:
-        return None
-    try:
-        f = float(value)
-    except (TypeError, ValueError):
-        return None
-    return f if math.isfinite(f) else None
+from core.infra.utils import finite_float as _finite_float, parse_utc_str
 
 
 def evaluate_entry_safety(
@@ -99,13 +90,9 @@ def evaluate_entry_safety(
     # Parse exit_time da última operação (usado no circuit breaker temporário e no cooldown)
     last_exit_elapsed: Optional[float] = None
     if last_trade:
-        exit_time_str = str(last_trade.get("exit_time") or "").strip()
-        if exit_time_str:
-            try:
-                exit_dt = datetime.strptime(exit_time_str[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                last_exit_elapsed = (now_dt - exit_dt).total_seconds()
-            except Exception:
-                last_exit_elapsed = None
+        exit_dt = parse_utc_str(str(last_trade.get("exit_time") or ""))
+        if exit_dt is not None:
+            last_exit_elapsed = (now_dt - exit_dt).total_seconds()
 
     # 7. Proteção de Caixa contra Sequência de Perdas (Circuit Breaker com resfriamento automático — sem deadlock permanente)
     if max_consecutive_losses > 0 and consecutive_losses >= max_consecutive_losses:

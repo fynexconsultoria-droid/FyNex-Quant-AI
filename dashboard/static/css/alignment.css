@@ -1,0 +1,383 @@
+/* ==========================================================================
+   Polimento de Alinhamento, Tipografia Tabular e Responsividade Fina
+   ========================================================================== */
+
+/* Números tabulares: preços nunca "pulam" lateralmente ao atualizar */
+.mono-val,
+.ticker-price,
+.ticker-change,
+.ticker-latency,
+.kpi-value,
+.wl-price,
+.wl-chg,
+.xtb-btn-price,
+.market-metric-value,
+.data-table td {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Topbar perfeitamente alinhada em altura uniforme (36px) */
+.topbar {
+  min-height: 60px;
+  padding: 0.65rem 1.25rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.ticker-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.35rem 0.85rem;
+  min-height: 40px;
+  max-width: 100%;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.ticker-symbol-select {
+  height: 28px;
+  padding: 0 0.45rem;
+  font-size: 0.85rem;
+  line-height: 1;
+}
+
+.ticker-price {
+  font-size: 1.08rem;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.ticker-change,
+.ticker-badge,
+.ticker-latency,
+.asset-category-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.topbar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: nowrap;
+}
+
+.topbar-actions .btn,
+.topbar-actions .btn-binance,
+.topbar-actions .bot-status-pill,
+.topbar-actions select {
+  height: 36px;
+  padding-top: 0;
+  padding-bottom: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.topbar-actions .btn {
+  padding-left: 0.85rem;
+  padding-right: 0.85rem;
+  font-size: 0.82rem;
+}
+
+.topbar-actions .btn-binance {
+  padding-left: 0.75rem;
+  padding-right: 0.75rem;
+  font-size: 0.82rem;
+}
+
+.topbar-actions .bot-status-pill {
+  padding-left: 0.75rem;
+  padding-right: 0.75rem;
+  font-size: 0.8rem;
+}
+
+/* Sidebar alinhada */
+.sidebar-brand .brand-text {
+  line-height: 1.2;
+}
+
+.nav-item {
+  min-height: 42px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.nav-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.nav-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Market Strip: todos os 6 rótulos alinhados no topo + divisores limpos */
+.market-strip {
+  display: grid;
+  grid-template-columns: 1.35fr 0.85fr 1.35fr 1fr 0.8fr 1.25fr;
+  gap: 0;
+  padding: 0.75rem 0.5rem;
+  align-items: stretch;
+}
+
+.market-metric {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 0.35rem;
+  padding: 0.1rem 0.85rem;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  min-width: 0;
+}
+
+.market-metric:last-child {
+  border-right: none;
+}
+
+.market-metric-label {
+  font-size: 0.66rem;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.market-metric-value {
+  font-size: 0.95rem;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.market-range-row {
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.market-range-row .mono-val {
+  font-size: 0.7rem;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.market-bidask-row {
+  flex-wrap: nowrap;
+  gap: 0.3rem;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.market-bidask-row .mono-val {
+  font-size: 0.76rem;
+}
+
+.spread-pill {
+  flex-shrink: 0;
+  font-size: 0.65rem;
+}
+
+.conn-health-row {
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+@media (max-width: 1360px) {
+  .market-strip {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    row-gap: 0.85rem;
+  }
+  .market-metric:nth-child(3n) {
+    border-right: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .market-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .market-metric {
+    border-right: none;
+  }
+}
+
+/* Watchlist Header empilhado e abas simétricas */
+.watchlist-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin-bottom: 0.65rem;
+}
+
+.watchlist-header h3 {
+  font-size: 0.98rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.watchlist-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.25rem;
+  width: 100%;
+}
+
+.wl-tab {
+  text-align: center;
+  padding: 0.3rem 0.25rem;
+  white-space: nowrap;
+}
+
+.wl-row {
+  gap: 0.5rem;
+}
+
+.wl-left {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.wl-sym {
+  white-space: nowrap;
+  line-height: 1.2;
+}
+
+.wl-right {
+  flex-shrink: 0;
+  text-align: right;
+  line-height: 1.2;
+}
+
+/* Chart Header sempre alinhado sem encavalar */
+.chart-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.chart-card-header .header-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.chart-card-header .header-title h3 {
+  font-size: 0.98rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chart-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-shrink: 0;
+}
+
+.chart-tool-btn {
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+}
+
+.chart-meta-info {
+  white-space: nowrap;
+  font-size: 0.74rem;
+}
+
+/* Boleta XTB: alinhamento perfeito sem estourar largura */
+.xtb-ticket-card .card-header.compact {
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.xtb-ticket-card .card-header.compact h3 {
+  font-size: 1.02rem;
+  line-height: 1.2;
+}
+
+.xtb-btn {
+  min-width: 0;
+  padding: 0.7rem 0.4rem;
+}
+
+.xtb-btn-label {
+  white-space: nowrap;
+}
+
+.xtb-btn-price {
+  font-size: 0.92rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.ticket-label {
+  align-items: baseline;
+  gap: 0.35rem;
+  white-space: nowrap;
+}
+
+.ticket-sltp-grid > .ticket-field {
+  min-width: 0;
+}
+
+/* Tabelas estilo Corretora: alinhamento limpo por conteúdo sem quebrar textos */
+.data-table th,
+.data-table td {
+  vertical-align: middle;
+  text-align: left;
+}
+
+.data-table td.empty-cell {
+  text-align: center !important;
+  white-space: normal;
+  line-height: 1.45;
+  padding: 1.65rem 1rem !important;
+}
+
+.data-table th:last-child,
+.data-table td:last-child {
+  text-align: right;
+}
+
+/* KPI Cards alinhamento fino */
+.kpi-card {
+  gap: 0.25rem;
+}
+
+.kpi-value {
+  line-height: 1.2;
+}
+
+.mode-badge {
+  font-size: 1.02rem;
+  line-height: 1.25;
+}
+
+.kpi-subtext {
+  flex-wrap: wrap;
+  line-height: 1.3;
+}
+
+

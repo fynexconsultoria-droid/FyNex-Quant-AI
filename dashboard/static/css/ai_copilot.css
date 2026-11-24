@@ -1,0 +1,287 @@
+/* ==========================================================================
+   Barra de Progresso de Evolução da IA & Radar Global
+   ========================================================================== */
+
+.sidebar-evo-box {
+  background: linear-gradient(145deg, rgba(15, 23, 42, 0.9), rgba(139, 92, 246, 0.08));
+  border: 1px solid rgba(0, 242, 254, 0.22);
+  border-radius: var(--radius-md);
+  padding: 0.75rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  cursor: pointer;
+  transition: border-color 0.2s ease;
+}
+
+.sidebar-evo-box:hover {
+  border-color: var(--accent-cyan);
+}
+
+.sidebar-evo-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.evo-progress-track {
+  width: 100%;
+  height: 7px;
+  border-radius: var(--radius-full);
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.evo-progress-track.large {
+  height: 11px;
+  margin-bottom: 0.9rem;
+}
+
+.evo-progress-fill {
+  height: 100%;
+  border-radius: var(--radius-full);
+  background: linear-gradient(90deg, #00f2fe 0%, #8b5cf6 55%, #10b981 100%);
+  box-shadow: 0 0 12px rgba(0, 242, 254, 0.45);
+  transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.evo-pillars-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+@media (max-width: 900px) {
+  .evo-pillars-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.evo-pillar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 0.65rem 0.85rem;
+}
+
+@media (max-width: 1180px) {
+  .sidebar-evo-box {
+    display: none;
+  }
+}
+
+.watchlist-tabs.four-tabs {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.copilot-card {
+  border-color: rgba(56, 189, 248, 0.22);
+}
+
+.copilot-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.copilot-actions .btn {
+  height: 32px;
+  padding: 0 0.7rem;
+  font-size: 0.78rem;
+}
+
+.copilot-telegram-box {
+  margin-top: 0.65rem;
+  padding: 0.75rem;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(56, 189, 248, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.copilot-tg-grid {
+  display: grid;
+  grid-template-columns: 1fr 220px auto;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.copilot-wa-box {
+  border-color: rgba(16, 185, 129, 0.28);
+}
+
+.wa-guide-banner {
+  font-size: 0.76rem;
+  color: #cbd5e1;
+  line-height: 1.45;
+  padding: 0.45rem 0.6rem;
+  border-radius: 8px;
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+}
+
+.wa-guide-banner code {
+  color: #34d399;
+  font-family: var(--font-mono);
+  background: rgba(2, 6, 23, 0.55);
+  padding: 0.08rem 0.3rem;
+  border-radius: 4px;
+}
+
+.copilot-wa-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 140px auto auto auto;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.wa-toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--text-main);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.copilot-btn-row {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.copilot-mini-btn {
+  padding: 0.22rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-main);
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.copilot-mini-btn:hover {
+  background: rgba(0, 242, 254, 0.14);
+  border-color: rgba(0, 242, 254, 0.4);
+}
+
+.copilot-mini-btn.done {
+  background: rgba(16, 185, 129, 0.16);
+  border-color: rgba(16, 185, 129, 0.4);
+  color: #34d399;
+}
+
+@media (max-width: 900px) {
+  .copilot-tg-grid,
+  .copilot-wa-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.ai-chat-card {
+  border-color: rgba(0, 242, 254, 0.25);
+}
+
+.ai-period-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.65rem;
+  margin-top: 0.6rem;
+}
+
+.ai-period-box {
+  padding: 0.65rem 0.8rem;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 0.18rem;
+}
+
+.ai-period-box strong {
+  font-size: 1.05rem;
+}
+
+.ai-chat-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.7rem;
+}
+
+.ai-chat-messages {
+  margin-top: 0.65rem;
+  max-height: 290px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 0.7rem;
+  border-radius: 10px;
+  background: rgba(7, 10, 18, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.chat-msg {
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-msg.user {
+  align-items: flex-end;
+}
+
+.chat-msg.ai {
+  align-items: flex-start;
+}
+
+.chat-bubble {
+  max-width: 88%;
+  padding: 0.6rem 0.85rem;
+  border-radius: 12px;
+  font-size: 0.82rem;
+  line-height: 1.48;
+  white-space: pre-line;
+}
+
+.chat-msg.user .chat-bubble {
+  background: rgba(0, 242, 254, 0.16);
+  border: 1px solid rgba(0, 242, 254, 0.35);
+  color: #e2e8f0;
+}
+
+.chat-msg.ai .chat-bubble {
+  background: rgba(30, 41, 59, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #e2e8f0;
+}
+
+.ai-chat-input-row {
+  margin-top: 0.65rem;
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.ai-chat-input-row .search-input {
+  flex: 1;
+}
+
+@media (max-width: 900px) {
+  .ai-period-grid {
+    grid-template-columns: 1fr;
+  }
+}
+

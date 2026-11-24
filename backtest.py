@@ -21,17 +21,21 @@ ROOT = os.path.abspath(os.path.dirname(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from core.database import timeframe_to_seconds  # noqa: E402
-from position_manager import PAPER_FEE_PCT, PAPER_SLIPPAGE_PCT  # noqa: E402
-from strategy_config import get_strategy_profile, resolve_barriers  # noqa: E402
-from trading_bot import (  # noqa: E402
+from core.database import TradingDatabase, timeframe_to_seconds  # noqa: E402
+from core.market_data import get_latest_contiguous_segment  # noqa: E402
+from core.ml import (  # noqa: E402
     InsufficientLabelsError,
-    TradingDatabase,
     build_features,
     create_target,
-    get_latest_contiguous_segment,
     predict_signal,
     train_model,
+)
+from core.trading.profit_protection import compute_profit_protection_stop  # noqa: E402
+from strategy_config import (  # noqa: E402
+    PAPER_FEE_PCT,
+    PAPER_SLIPPAGE_PCT,
+    get_strategy_profile,
+    resolve_barriers,
 )
 
 
@@ -265,19 +269,17 @@ def run_walk_forward_backtest(
                 _close_trade(i, raw_exit_price, exit_reason)
                 exited_this_candle = True
             else:
-                # Proteção dinâmica de lucro (Breakeven + Trailing) aplicada para os candles seguintes
-                tp_dist = tp_price - entry_price
-                if tp_dist > 0 and highs[i] > entry_price:
-                    progress = (highs[i] - entry_price) / tp_dist
-                    be_sl = entry_price * 1.0025
-                    new_sl = sl_price
-                    if progress >= 0.80:
-                        trail_sl = entry_price + (highs[i] - entry_price) * 0.50
-                        new_sl = max(new_sl, be_sl, trail_sl)
-                    elif progress >= 0.60:
-                        new_sl = max(new_sl, be_sl)
-                    if new_sl > sl_price and new_sl < closes[i] * 0.9995:
-                        sl_price = new_sl
+                # Proteção dinâmica de lucro (Breakeven + Trailing) compartilhada com PositionManager
+                decision = compute_profit_protection_stop(
+                    entry_price=entry_price,
+                    tp_price=tp_price,
+                    current_sl=sl_price,
+                    high_check=highs[i],
+                    current_price=closes[i],
+                    is_real_with_oco=False,
+                )
+                if decision.should_update:
+                    sl_price = decision.new_sl
 
         # 2. Retreina periodicamente usando APENAS dados passados já resolvidos [i - purge - W : i - purge]
         if model is None or (i - last_train_idx) >= retrain_step:

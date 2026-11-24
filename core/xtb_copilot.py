@@ -1,44 +1,34 @@
 """
 Copiloto XTB (Modo Híbrido — FyNex Quant AI)
 ============================================
-Como a XTB encerrou oficialmente sua API pública (xAPI) em março de 2025,
-o Copiloto XTB registra cada sinal de alta convicção gerado pela IA para
-Forex, Ouro, Prata, Petróleo, Cobre e Índices Globais já no formato exato
-da plataforma xStation 5 (ticker XTB, direção, entrada, Stop Loss, Take Profit
-e lote sugerido), permitindo:
-  - Acompanhamento e alertas sonoros no painel local
-  - Botão de 1 clique para copiar os parâmetros ou marcar como "Executei na XTB"
-  - Envio opcional de alertas instantâneos no Telegram do usuário
+Registra sinais de alta convicção gerados pela IA para Forex, Metais, Energia e Índices
+no formato da xStation 5, reutilizando `core.notifications.telegram` e `core.infra.sqlite`.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import re
 import sqlite3
-import tempfile
-import threading
-import urllib.error
-import urllib.request
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterator, List, Optional
 
-from dotenv import dotenv_values
+from core.infra.env_store import scrub_secrets
+from core.infra.sqlite import SCHEMA_REGISTRY
+from core.notifications.telegram import (
+    DEFAULT_ENV_PATH as _DEFAULT_ENV_PATH,
+    get_telegram_config,
+    save_telegram_config,
+    send_telegram_message,
+)
 
-import alerts
+
+def _scrub_telegram_error(err: Any, token: str = "") -> str:
+    return scrub_secrets(err, (token,) if token else ())
 
 logger = logging.getLogger("QuantTradingBot")
 
-_DEFAULT_ENV_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
-_ENV_WRITE_LOCK = threading.Lock()
-_TELEGRAM_TOKEN_RE = re.compile(r"^\d{6,15}:[A-Za-z0-9_-]{20,64}$")
-_TELEGRAM_CHAT_ID_RE = re.compile(r"^-?\d{5,20}$")
-_TELEGRAM_TOKEN_SCRUB_RE = re.compile(r"bot\d{6,15}:[A-Za-z0-9_-]{10,}")
-
-# Mapeamento de símbolos internos -> tickers oficiais da XTB (xStation 5)
 XTB_SYMBOL_MAP: Dict[str, str] = {
     "EUR/USD": "EURUSD",
     "GBP/USD": "GBPUSD",
@@ -67,87 +57,6 @@ def to_xtb_symbol(symbol: str) -> str:
     return XTB_SYMBOL_MAP.get(key, key.replace("/", ""))
 
 
-def _scrub_telegram_error(err: Any, token: str = "") -> str:
-    msg = str(err or "")
-    if token:
-        msg = msg.replace(token, "***")
-    msg = _TELEGRAM_TOKEN_SCRUB_RE.sub("bot***", msg)
-    return msg[:300]
-
-
-def _load_telegram_creds(env_path: Optional[str] = None) -> tuple[str, str]:
-    path = env_path or _DEFAULT_ENV_PATH
-    env_data: Dict[str, Optional[str]] = {}
-    if os.path.exists(path):
-        try:
-            env_data = dotenv_values(path)
-        except Exception:
-            env_data = {}
-    token = (os.getenv("TELEGRAM_BOT_TOKEN") or env_data.get("TELEGRAM_BOT_TOKEN") or "").strip()
-    chat_id = (os.getenv("TELEGRAM_CHAT_ID") or env_data.get("TELEGRAM_CHAT_ID") or "").strip()
-    return token, chat_id
-
-
-def _atomic_write_text(path: str, content: str) -> None:
-    directory = os.path.dirname(os.path.abspath(path)) or "."
-    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".env.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(content)
-        os.replace(tmp_path, path)
-    except Exception:
-        if os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
-        raise
-
-
-def get_telegram_config(env_path: Optional[str] = None) -> Dict[str, Any]:
-    """Lê configuração opcional do Telegram a partir do .env e variáveis de ambiente."""
-    token, chat_id = _load_telegram_creds(env_path=env_path)
-    configured = bool(token and chat_id)
-    masked = ""
-    if token:
-        masked = f"{token[:6]}...{token[-4:]}" if len(token) > 12 else "****"
-    return {
-        "configured": configured,
-        "bot_token_masked": masked,
-        "chat_id": chat_id,
-    }
-
-
-def save_telegram_config(bot_token: str, chat_id: str, env_path: Optional[str] = None) -> Dict[str, Any]:
-    """Valida e salva TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID de forma atômica no .env e os.environ."""
-    token = (bot_token or "").strip()
-    cid = (chat_id or "").strip()
-
-    if any(ch in token for ch in ("\r", "\n")) or any(ch in cid for ch in ("\r", "\n")):
-        raise ValueError("Credenciais do Telegram não podem conter quebras de linha.")
-
-    updates: Dict[str, str] = {}
-    if token and "..." not in token and not token.startswith(("*", "•")):
-        if not _TELEGRAM_TOKEN_RE.match(token):
-            raise ValueError(
-                "TELEGRAM_BOT_TOKEN inválido. Use o formato oficial do BotFather (ex.: 123456789:AA...)."
-            )
-        updates["TELEGRAM_BOT_TOKEN"] = token
-
-    if cid:
-        if not _TELEGRAM_CHAT_ID_RE.match(cid):
-            raise ValueError("TELEGRAM_CHAT_ID inválido. Informe apenas o ID numérico do chat/grupo.")
-        updates["TELEGRAM_CHAT_ID"] = cid
-
-    if env_path is None:
-        env_path = _DEFAULT_ENV_PATH
-
-    if updates:
-        alerts._update_env_keys(updates, env_path=env_path)
-
-    return get_telegram_config(env_path=env_path)
-
-
 def format_copilot_copy_text(sig: Dict[str, Any]) -> str:
     """Formata um sinal em texto limpo pronto para replicar na xStation 5."""
     side_pt = "COMPRA (BUY)" if sig.get("side") == "BUY" else "VENDA (SELL)"
@@ -168,60 +77,18 @@ def format_copilot_copy_text(sig: Dict[str, Any]) -> str:
     )
 
 
-def send_telegram_message(text: str, timeout: float = 8.0) -> Dict[str, Any]:
-    """Envia mensagem via Telegram Bot API usando apenas stdlib (urllib) com sanitização."""
-    token, chat_id = _load_telegram_creds()
-    if not token or not chat_id:
-        return {"sent": False, "error": "Telegram não configurado (defina TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID)."}
-    if not _TELEGRAM_TOKEN_RE.match(token) or not _TELEGRAM_CHAT_ID_RE.match(chat_id):
-        return {"sent": False, "error": "Configuração de Telegram inválida."}
-
-    safe_text = str(text or "")
-    if len(safe_text) > 4000:
-        safe_text = safe_text[:3997] + "..."
-
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = json.dumps(
-        {
-            "chat_id": chat_id,
-            "text": safe_text,
-            "disable_web_page_preview": True,
-        }
-    ).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw_bytes = resp.read(65536)
-            body = json.loads(raw_bytes.decode("utf-8", errors="ignore") or "{}")
-            ok = bool(body.get("ok"))
-            return {"sent": ok, "error": None if ok else _scrub_telegram_error(body.get("description") or "Erro Telegram", token)}
-    except urllib.error.HTTPError as e:
-        return {"sent": False, "error": f"HTTP {e.code}: {e.reason}"}
-    except Exception as e:
-        return {"sent": False, "error": _scrub_telegram_error(e, token)}
-
-
-_COPILOT_INIT_LOCK = threading.Lock()
-_INITIALIZED_COPILOT_DBS: set = set()
-
-
 class XTBCopilotStore:
     """Armazena e gerencia sinais do Copiloto XTB em SQLite (WAL)."""
 
     def __init__(self, db_path: str):
         self.db_path = db_path
-        with _COPILOT_INIT_LOCK:
-            if db_path not in _INITIALIZED_COPILOT_DBS or not os.path.exists(db_path):
-                self._init_tables()
-                _INITIALIZED_COPILOT_DBS.add(db_path)
+        SCHEMA_REGISTRY.ensure_initialized("xtb_copilot", self.db_path, self._init_tables)
 
     @contextmanager
     def _connect(self, *, write_immediate: bool = False) -> Iterator[sqlite3.Connection]:
+        parent = os.path.dirname(os.path.abspath(self.db_path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         conn = sqlite3.connect(self.db_path, timeout=15.0, isolation_level=None if write_immediate else "")
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=15000;")
@@ -285,7 +152,7 @@ class XTBCopilotStore:
         notify_telegram: bool = True,
         dedup_minutes: int = 120,
     ) -> Dict[str, Any]:
-        """Registra um novo sinal para o Copiloto XTB (com deduplicação atômica por símbolo/direção)."""
+        """Registra um novo sinal para o Copiloto XTB com deduplicação atômica por símbolo/direção."""
         now_utc = datetime.now(timezone.utc)
         now_iso = now_utc.strftime("%Y-%m-%d %H:%M:%S")
         cutoff_iso = (now_utc - timedelta(minutes=dedup_minutes)).strftime("%Y-%m-%d %H:%M:%S")
@@ -319,16 +186,11 @@ class XTBCopilotStore:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'NEW', 0)
                 """,
                 (
-                    now_iso,
-                    sym,
-                    xtb_sym,
-                    side_u,
-                    float(score),
+                    now_iso, sym, xtb_sym, side_u, float(score),
                     float(entry_price),
                     float(sl_price) if sl_price is not None else None,
                     float(tp_price) if tp_price is not None else None,
-                    float(suggested_lots),
-                    int(leverage),
+                    float(suggested_lots), int(leverage),
                     reason or "Confluência técnica + macro",
                 ),
             )
@@ -373,8 +235,20 @@ class XTBCopilotStore:
             if row is None:
                 raise ValueError(f"Sinal #{signal_id} não encontrado.")
             conn.execute("UPDATE xtb_copilot_signals SET status = ? WHERE id = ?", (st, signal_id))
-            conn.commit()
             updated = conn.execute("SELECT * FROM xtb_copilot_signals WHERE id = ?", (signal_id,)).fetchone()
         d = dict(updated)
         d["copy_text"] = format_copilot_copy_text(d)
         return d
+
+
+__all__ = [
+    "XTB_SYMBOL_MAP",
+    "VALID_SIGNAL_STATUSES",
+    "_DEFAULT_ENV_PATH",
+    "to_xtb_symbol",
+    "get_telegram_config",
+    "save_telegram_config",
+    "format_copilot_copy_text",
+    "send_telegram_message",
+    "XTBCopilotStore",
+]

@@ -1,0 +1,176 @@
+"""
+Testes Unitários da Arquitetura Refatorada (FyNex Quant AI)
+===========================================================
+Cobre os novos módulos de infraestrutura (`core.infra`), proteção dinâmica de
+lucro compartilhada (`core.trading.profit_protection`), facades de compatibilidade
+e integridade dos módulos estáticos do frontend (ES Modules + CSS).
+"""
+
+from __future__ import annotations
+
+import math
+import os
+import re
+import time
+
+import pytest
+
+from core.infra.cache import CooldownTracker, TTLCache
+from core.infra.env_store import mask_secret, read_env_file, scrub_secrets, update_env_keys
+from core.infra.sqlite import SchemaRegistry, ensure_column, sqlite_connection, sqlite_readonly_optional, table_exists
+from core.infra.utils import finite_float, parse_utc_str, sanitize_token, tail_lines, to_float, utc_now_str
+from core.trading.profit_protection import compute_profit_protection_stop
+
+
+def test_infra_utils_numeric_time_and_tokens(tmp_path):
+    assert finite_float("12.5") == 12.5
+    assert finite_float(float("nan")) is None
+    assert finite_float(float("inf"), default=0.0) == 0.0
+    assert to_float("bad", 42.0) == 42.0
+
+    now_s = utc_now_str()
+    parsed = parse_utc_str(now_s)
+    assert parsed is not None
+    assert parsed.strftime("%Y-%m-%d %H:%M:%S") == now_s
+    assert parse_utc_str("invalid") is None
+
+    assert sanitize_token("BTC/USDT", "symbol") == "BTC_USDT"
+    with pytest.raises(ValueError):
+        sanitize_token("../etc/passwd", "symbol")
+
+    log_file = tmp_path / "sample.log"
+    log_file.write_text("\n".join(f"line-{i}" for i in range(1, 21)), encoding="utf-8")
+    assert tail_lines(str(log_file), max_lines=3) == ["line-18", "line-19", "line-20"]
+
+
+def test_ttl_cache_expiration_lru_and_cooldown():
+    cache: TTLCache[str, int] = TTLCache(max_size=2, default_ttl=5.0)
+    cache.set("a", 1)
+    cache.set("b", 2)
+    assert cache.get("a") == (True, 1)  # promove 'a' para MRU
+    cache.set("c", 3)  # deve despejar 'b' (LRU)
+    assert cache.get("b") == (False, None)
+    assert cache.get("a") == (True, 1)
+    assert cache.get("c") == (True, 3)
+
+    assert cache.delete_matching(lambda k: k == "a") == 1
+    assert len(cache) == 1
+    assert cache.get("c", ttl_seconds=0.0) == (False, None)
+
+    cd = CooldownTracker()
+    assert cd.allow("news", 10.0) is True
+    assert cd.allow("news", 10.0) is False
+    cd.clear()
+    assert cd.allow("news", 10.0) is True
+
+
+def test_env_store_atomic_update_preserves_comments_and_scrubs(tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text("# Comentario preservado\nFOO=old\nBAR=keep\n", encoding="utf-8")
+
+    update_env_keys({"FOO": "new", "BAZ": "added"}, str(env_path))
+    raw = env_path.read_text(encoding="utf-8")
+    assert "# Comentario preservado" in raw
+    parsed = read_env_file(str(env_path))
+    assert parsed["FOO"] == "new"
+    assert parsed["BAR"] == "keep"
+    assert parsed["BAZ"] == "added"
+
+    secret_msg = "Erro em https://api.telegram.org/bot123456789:ABCDEF1234567890/sendMessage?apikey=MYSECRETKEY99"
+    cleaned = scrub_secrets(secret_msg, ("MYSECRETKEY99",))
+    assert "ABCDEF1234567890" not in cleaned
+    assert "MYSECRETKEY99" not in cleaned
+    assert mask_secret("1234567890abcdef") == "1234...cdef"
+    assert mask_secret("short") == "****"
+
+
+def test_sqlite_infra_schema_registry_and_readonly_optional(tmp_path):
+    db_file = str(tmp_path / "infra.db")
+    with sqlite_readonly_optional(db_file) as conn:
+        assert conn is None
+
+    reg = SchemaRegistry()
+    calls = []
+
+    def init_schema():
+        calls.append(1)
+        with sqlite_connection(db_file) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT)")
+            ensure_column(conn.cursor(), "items", "extra", "INTEGER DEFAULT 0")
+            ensure_column(conn.cursor(), "items", "extra", "INTEGER DEFAULT 0")  # idempotente
+
+    reg.ensure_initialized("test_schema", db_file, init_schema)
+    reg.ensure_initialized("test_schema", db_file, init_schema)
+    assert len(calls) == 1
+
+    with sqlite_readonly_optional(db_file) as conn:
+        assert conn is not None
+        assert table_exists(conn, "items") is True
+
+
+def test_shared_profit_protection_breakeven_trailing_and_oco_clearance():
+    # Entrada 100, TP 110 (+10%), SL inicial 95
+    # 1. Progresso 50% (< 60%): não move
+    d1 = compute_profit_protection_stop(
+        entry_price=100.0, tp_price=110.0, current_sl=95.0, high_check=105.0, current_price=105.0
+    )
+    assert d1.should_update is False
+
+    # 2. Progresso 65% (>= 60%): ativa breakeven (+0.25% = 100.25)
+    d2 = compute_profit_protection_stop(
+        entry_price=100.0, tp_price=110.0, current_sl=95.0, high_check=106.5, current_price=106.5
+    )
+    assert d2.should_update is True
+    assert math.isclose(d2.new_sl, 100.25, rel_tol=1e-6)
+
+    # 3. Progresso 85% (>= 80%): trava 50% do lucro atual (100 + 8.5 * 0.5 = 104.25)
+    d3 = compute_profit_protection_stop(
+        entry_price=100.0, tp_price=110.0, current_sl=100.25, high_check=108.5, current_price=108.5
+    )
+    assert d3.should_update is True
+    assert math.isclose(d3.new_sl, 104.25, rel_tol=1e-6)
+
+    # 4. Preço recuou para perto do novo stop -> bloqueia atualização para evitar stop fantasma
+    d4 = compute_profit_protection_stop(
+        entry_price=100.0, tp_price=110.0, current_sl=100.25, high_check=108.5, current_price=104.20
+    )
+    assert d4.should_update is False
+
+
+def test_modular_packages_and_root_facades_exports():
+    import alerts
+    import binance_client
+    import position_manager
+    import trading_bot
+    from core import error_learning, forex_market, ml
+    from dashboard import server
+
+    assert hasattr(ml, "build_features") and hasattr(ml, "PlattCalibratedModel")
+    assert hasattr(error_learning, "ErrorLearningStore") and hasattr(error_learning, "compute_hard_example_multipliers")
+    assert hasattr(binance_client, "execute_spot_buy") and hasattr(binance_client, "place_protective_oco")
+    assert hasattr(position_manager, "PositionManager") and hasattr(position_manager, "RiskManager")
+    assert hasattr(alerts, "send_alert") and hasattr(alerts, "build_daily_summary")
+    assert hasattr(forex_market, "XTBDeskStore") and hasattr(forex_market, "fetch_watchlist")
+    assert hasattr(trading_bot, "TradingBotRunner") and trading_bot.LIVE_TRADING_ENABLED is False
+    assert server.app is not None
+
+
+def test_frontend_es_modules_and_css_manifest_integrity():
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    static_dir = os.path.join(root, "dashboard", "static")
+
+    index_html = open(os.path.join(static_dir, "index.html"), encoding="utf-8").read()
+    assert '<script type="module" src="/static/js/main.js"></script>' in index_html
+
+    js_dir = os.path.join(static_dir, "js")
+    main_js = open(os.path.join(js_dir, "main.js"), encoding="utf-8").read()
+    imported_js = re.findall(r'from\s+"\.\/([^"]+)"', main_js)
+    assert len(imported_js) >= 10
+    for rel in imported_js:
+        assert os.path.exists(os.path.join(js_dir, rel)), f"Módulo JS ausente: {rel}"
+
+    style_css = open(os.path.join(static_dir, "style.css"), encoding="utf-8").read()
+    imported_css = re.findall(r'@import\s+url\("/static/css/([^"]+)"\)', style_css)
+    assert len(imported_css) == 7
+    for fname in imported_css:
+        assert os.path.exists(os.path.join(static_dir, "css", fname)), f"Módulo CSS ausente: {fname}"

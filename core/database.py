@@ -5,15 +5,14 @@ Gerencia candles OHLCV, previsões com feedback vivo (Triple Barrier e t+1),
 histórico de operações (Paper / Testnet / Live) e estado em tempo real do robô.
 """
 
-import os
 import sqlite3
-import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, List, Optional
 
 import pandas as pd
 
+from core.infra.sqlite import SCHEMA_REGISTRY, ensure_column, sqlite_connection
 from core.logging_setup import DEFAULT_DB_PATH, logger
 
 TIMEFRAME_MS: Dict[str, int] = {
@@ -27,9 +26,6 @@ TIMEFRAME_MS: Dict[str, int] = {
     "1d": 24 * 60 * 60_000,
     "1w": 7 * 24 * 60 * 60_000,
 }
-
-_DB_INIT_LOCK = threading.Lock()
-_INITIALIZED_DBS: Dict[str, int] = {}
 
 
 def timeframe_to_ms(timeframe: str) -> int:
@@ -59,34 +55,17 @@ class TradingDatabase:
 
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self.db_path = db_path
-        abs_path = os.path.abspath(db_path)
-        with _DB_INIT_LOCK:
-            current_ino = os.stat(abs_path).st_ino if os.path.exists(abs_path) else -1
-            if _INITIALIZED_DBS.get(abs_path) != current_ino or current_ino == -1:
-                self._init_database()
-                new_ino = os.stat(abs_path).st_ino if os.path.exists(abs_path) else -1
-                _INITIALIZED_DBS[abs_path] = new_ino
+        SCHEMA_REGISTRY.ensure_initialized("trading_db", self.db_path, self._init_database)
 
     @contextmanager
     def _get_connection(self) -> Iterator[sqlite3.Connection]:
         """Cria uma conexão SQLite com busy_timeout primeiro e fechamento garantido."""
-        conn = sqlite3.connect(self.db_path, timeout=15.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=15000;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.execute("PRAGMA cache_size=-4000;")
-        conn.execute("PRAGMA temp_store=MEMORY;")
-        try:
-            with conn:
-                yield conn
-        finally:
-            conn.close()
+        with sqlite_connection(self.db_path, timeout=15.0) as conn:
+            yield conn
 
     @staticmethod
     def _ensure_column(cursor: sqlite3.Cursor, table: str, column: str, col_def: str) -> None:
-        cols = {row[1] for row in cursor.execute(f"PRAGMA table_info({table});").fetchall()}
-        if column not in cols:
-            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def};")
+        ensure_column(cursor, table, column, col_def)
 
     def _init_database(self) -> None:
         """Cria as tabelas, migrações seguras e índices necessários (executa 1x por banco)."""

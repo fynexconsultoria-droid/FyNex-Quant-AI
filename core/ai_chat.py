@@ -20,29 +20,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterator, List, Optional
 
 from core import error_learning, forex_ai_trader, macro_intelligence, xtb_copilot
-
-
-@contextmanager
-def _connect_readonly(db_path: str) -> Iterator[Optional[sqlite3.Connection]]:
-    if not db_path or not os.path.exists(db_path):
-        yield None
-        return
-    conn = sqlite3.connect(db_path, timeout=15.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA query_only=ON;")
-    conn.execute("PRAGMA busy_timeout=15000;")
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-
-def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (table_name,),
-    ).fetchone()
-    return row is not None
+from core.infra.sqlite import sqlite_readonly_optional as _connect_readonly, table_exists as _table_exists
 
 
 def _normalize_text(text: str) -> str:
