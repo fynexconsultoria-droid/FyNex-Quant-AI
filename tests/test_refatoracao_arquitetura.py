@@ -171,7 +171,7 @@ def test_frontend_es_modules_and_css_manifest_integrity():
 
     style_css = open(os.path.join(static_dir, "style.css"), encoding="utf-8").read()
     imported_css = re.findall(r'@import\s+url\("/static/css/([^"]+)"\)', style_css)
-    assert len(imported_css) == 7
+    assert len(imported_css) >= 9
     for fname in imported_css:
         assert os.path.exists(os.path.join(static_dir, "css", fname)), f"Módulo CSS ausente: {fname}"
 

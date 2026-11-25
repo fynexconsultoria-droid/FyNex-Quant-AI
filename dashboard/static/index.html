@@ -17,9 +17,10 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+  <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
   <div class="app-shell">
     <!-- Sidebar de Navegação Multi-Áreas -->
-    <aside class="sidebar">
+    <aside class="sidebar" id="appSidebar">
       <div class="sidebar-brand">
         <div class="brand-logo">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -59,6 +60,11 @@
         <button type="button" class="nav-item" data-view="ai">
           <span class="nav-icon">🤖</span>
           <span class="nav-label">Robô IA & Sinais</span>
+        </button>
+        <button type="button" class="nav-item" data-view="finance">
+          <span class="nav-icon">💰</span>
+          <span class="nav-label">Financeiro</span>
+          <span class="nav-pill" id="navFinancePnlBadge">$0</span>
         </button>
         <button type="button" class="nav-item" data-view="portfolio">
           <span class="nav-icon">💼</span>
@@ -111,6 +117,7 @@
       <!-- Topbar Global -->
       <header class="topbar">
         <div class="ticker-box">
+          <button type="button" class="mobile-menu-btn" id="btnMobileMenu" aria-label="Abrir Menu" title="Abrir Menu">☰</button>
           <select id="symbolSelect" class="ticker-symbol-select" title="Selecionar Ativo (Cripto ou Forex)">
             <optgroup label="Cripto (Binance Spot)">
               <option value="BTC/USDT" selected>BTC/USDT</option>
@@ -855,7 +862,272 @@
         </section>
 
         <!-- ================================================================
-             ÁREA 4: PORTFÓLIO, CARTEIRA BINANCE & HISTÓRICO XTB
+             ÁREA 4: CENTRAL FINANCEIRA COMPLETA & GRÁFICOS QUANTITATIVOS
+             ================================================================ -->
+        <section class="view-section" id="view-finance">
+          <div class="view-header">
+            <div>
+              <h2>Central Financeira &amp; Analytics</h2>
+              <p class="view-subtitle">Curva de patrimônio, drawdown, fluxo de PnL diário, alocação por classe, calendário de resultados e extrato completo</p>
+            </div>
+            <div class="finance-toolbar-actions">
+              <button type="button" class="btn btn-secondary" id="btnFinanceExportCsv" title="Baixar extrato financeiro completo em CSV para Excel">⬇️ Exportar CSV</button>
+              <button type="button" class="btn btn-primary" id="btnFinanceRefresh">🔄 Atualizar Finanças</button>
+            </div>
+          </div>
+
+          <!-- Filtros de Período e Origem -->
+          <div class="finance-toolbar">
+            <div class="finance-filter-group" id="financePeriodFilters" role="group" aria-label="Período Financeiro">
+              <button type="button" class="fin-pill" data-period="24h">24h</button>
+              <button type="button" class="fin-pill" data-period="7d">7 Dias</button>
+              <button type="button" class="fin-pill active" data-period="30d">30 Dias</button>
+              <button type="button" class="fin-pill" data-period="90d">90 Dias</button>
+              <button type="button" class="fin-pill" data-period="all">Tudo</button>
+            </div>
+
+            <div class="finance-filter-group" id="financeSourceFilters" role="group" aria-label="Origem das Operações">
+              <button type="button" class="fin-pill active" data-source="all">Consolidado</button>
+              <button type="button" class="fin-pill" data-source="xtb">Mesa XTB</button>
+              <button type="button" class="fin-pill" data-source="bot">Robô Spot</button>
+            </div>
+          </div>
+
+          <!-- Hero Patrimonial -->
+          <div class="card finance-hero-card">
+            <div class="finance-hero-grid">
+              <div class="finance-hero-primary">
+                <span class="finance-hero-eyebrow">💎 PATRIMÔNIO VIVO (EQUITY)</span>
+                <div class="finance-hero-equity" id="finHeroEquity">$10,000.00</div>
+                <div class="finance-hero-roi-row">
+                  <span class="finance-roi-badge neutral" id="finHeroRoiBadge">0.00% ROI</span>
+                  <span class="subtext-muted" id="finHeroBaseCap">Capital base: $10,000.00</span>
+                </div>
+              </div>
+
+              <div class="finance-hero-metric">
+                <span class="finance-hero-metric-label">Saldo Realizado</span>
+                <span class="finance-hero-metric-val" id="finHeroBalance">$10,000.00</span>
+                <span class="finance-hero-metric-sub" id="finHeroRealizedPeriod">Período: $0.00</span>
+              </div>
+
+              <div class="finance-hero-metric">
+                <span class="finance-hero-metric-label">PnL Flutuante (Aberto)</span>
+                <span class="finance-hero-metric-val" id="finHeroFloating">$0.00</span>
+                <span class="finance-hero-metric-sub" id="finHeroOpenCount">0 posições abertas</span>
+              </div>
+
+              <div class="finance-hero-metric">
+                <span class="finance-hero-metric-label">Margem Livre / Uso</span>
+                <span class="finance-hero-metric-val" id="finHeroFreeMargin">$10,000.00</span>
+                <span class="finance-hero-metric-sub" id="finHeroMarginLevel">Uso: $0.00 • Saúde 100%</span>
+                <div class="finance-margin-bar-track">
+                  <div class="finance-margin-bar-fill" id="finHeroMarginBar" style="width: 100%;"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Grid de 6 KPIs Quantitativos -->
+          <section class="finance-kpi-grid">
+            <div class="card kpi-card fin-kpi-card">
+              <div class="fin-kpi-top">
+                <span class="fin-kpi-label">Lucro Líquido</span>
+                <span class="fin-kpi-icon">💵</span>
+              </div>
+              <div class="fin-kpi-val" id="finKpiNetPnl">$0.00</div>
+              <div class="fin-kpi-sub">
+                <span class="text-up" id="finKpiGrossProfit">+$0.00</span>
+                <span class="text-down" id="finKpiGrossLoss">-$0.00</span>
+              </div>
+            </div>
+
+            <div class="card kpi-card fin-kpi-card">
+              <div class="fin-kpi-top">
+                <span class="fin-kpi-label">Taxa de Acerto</span>
+                <span class="fin-kpi-icon">🎯</span>
+              </div>
+              <div class="fin-kpi-val" id="finKpiWinRate">0.0%</div>
+              <div class="fin-split-bar"><div class="fin-split-win" id="finKpiWinBar" style="width: 0%;"></div></div>
+              <div class="fin-kpi-sub" id="finKpiWinLossCount">0W • 0L (0 trades)</div>
+            </div>
+
+            <div class="card kpi-card fin-kpi-card">
+              <div class="fin-kpi-top">
+                <span class="fin-kpi-label">Profit Factor</span>
+                <span class="fin-kpi-icon">⚖️</span>
+              </div>
+              <div class="fin-kpi-val" id="finKpiProfitFactor">0.00</div>
+              <div class="fin-kpi-sub" id="finKpiPayoff">Payoff: 0.00x</div>
+            </div>
+
+            <div class="card kpi-card fin-kpi-card">
+              <div class="fin-kpi-top">
+                <span class="fin-kpi-label">Expectativa / Trade</span>
+                <span class="fin-kpi-icon">📐</span>
+              </div>
+              <div class="fin-kpi-val" id="finKpiExpectancy">$0.00</div>
+              <div class="fin-kpi-sub" id="finKpiStreak">Sequência: neutra</div>
+            </div>
+
+            <div class="card kpi-card fin-kpi-card">
+              <div class="fin-kpi-top">
+                <span class="fin-kpi-label">Max Drawdown</span>
+                <span class="fin-kpi-icon">📉</span>
+              </div>
+              <div class="fin-kpi-val text-down" id="finKpiDrawdown">0.00%</div>
+              <div class="fin-kpi-sub" id="finKpiSharpe">$0.00 • Sharpe 0.00</div>
+            </div>
+
+            <div class="card kpi-card fin-kpi-card">
+              <div class="fin-kpi-top">
+                <span class="fin-kpi-label">Extremos (Melhor/Pior)</span>
+                <span class="fin-kpi-icon">🏆</span>
+              </div>
+              <div class="fin-kpi-val text-up" id="finKpiBestTrade">$0.00</div>
+              <div class="fin-kpi-sub">
+                <span>Pior:</span>
+                <strong class="mono-val text-down" id="finKpiWorstTrade">$0.00</strong>
+              </div>
+            </div>
+          </section>
+
+          <!-- Gráfico 1: Curva de Patrimônio & Drawdown -->
+          <div class="card">
+            <div class="finance-chart-header">
+              <div class="finance-chart-title-wrap">
+                <h3 id="finEquityChartTitle">Curva de Patrimônio (Equity Curve)</h3>
+                <p id="finEquityChartSub">Evolução cronológica do patrimônio real + posição flutuante atual</p>
+              </div>
+              <div class="finance-filter-group" id="finEquityModeTabs">
+                <button type="button" class="fin-pill active" data-mode="equity">Equity ($)</button>
+                <button type="button" class="fin-pill" data-mode="pnl">PnL Acumulado ($)</button>
+                <button type="button" class="fin-pill" data-mode="drawdown">Drawdown (%)</button>
+              </div>
+            </div>
+            <div class="finance-canvas-wrap tall" id="finEquityWrap">
+              <canvas id="finEquityCanvas"></canvas>
+              <div class="finance-tooltip" id="finEquityTooltip"></div>
+            </div>
+          </div>
+
+          <!-- Gráficos 2 e 3: PnL Diário + Donut Alocação / Motivos -->
+          <div class="finance-charts-row-2">
+            <div class="card">
+              <div class="finance-chart-header">
+                <div class="finance-chart-title-wrap">
+                  <h3>Fluxo de PnL Diário</h3>
+                  <p>Lucros e prejuízos realizados agrupados por dia (UTC)</p>
+                </div>
+                <span class="badge badge-subtle" id="finDailyDaysBadge">0 dias ativos</span>
+              </div>
+              <div class="finance-canvas-wrap compact" id="finDailyWrap">
+                <canvas id="finDailyCanvas"></canvas>
+                <div class="finance-tooltip" id="finDailyTooltip"></div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="finance-chart-header">
+                <div class="finance-chart-title-wrap">
+                  <h3 id="finDonutTitle">Alocação por Classe</h3>
+                  <p id="finDonutSub">Distribuição de volume financeiro</p>
+                </div>
+                <div class="finance-filter-group" id="finDonutModeTabs">
+                  <button type="button" class="fin-pill active" data-dmode="category">Classes</button>
+                  <button type="button" class="fin-pill" data-dmode="reasons">Saídas</button>
+                </div>
+              </div>
+              <div class="finance-donut-layout">
+                <div class="finance-donut-stage">
+                  <canvas id="finDonutCanvas"></canvas>
+                  <div class="finance-donut-center">
+                    <strong id="finDonutCenterVal">0</strong>
+                    <span id="finDonutCenterLbl">Trades</span>
+                  </div>
+                </div>
+                <div class="finance-donut-legend" id="finDonutLegend">
+                  <div class="empty-state">Sem dados no período.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Gráficos 4 e 5: Ranking por Ativo + Calendário Heatmap 35 Dias -->
+          <div class="finance-charts-row-equal">
+            <div class="card">
+              <div class="finance-chart-header">
+                <div class="finance-chart-title-wrap">
+                  <h3>Performance por Ativo</h3>
+                  <p>Ranking de lucro/prejuízo líquido e taxa de acerto por instrumento</p>
+                </div>
+                <span class="badge badge-subtle" id="finAssetsCountBadge">0 ativos</span>
+              </div>
+              <div class="finance-asset-bars" id="finAssetBars">
+                <div class="empty-state">Nenhuma operação fechada no período selecionado.</div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="finance-chart-header">
+                <div class="finance-chart-title-wrap">
+                  <h3>Calendário Heatmap de Resultados (35 Dias)</h3>
+                  <p>Intensidade diária de ganhos e perdas no diário de operações</p>
+                </div>
+                <div class="finance-heatmap-legend">
+                  <span>Perda</span>
+                  <span class="fin-hm-swatch" style="background: rgba(244,63,94,0.45);"></span>
+                  <span class="fin-hm-swatch" style="background: rgba(15,23,42,0.85); border: 1px solid rgba(148,163,184,0.2);"></span>
+                  <span class="fin-hm-swatch" style="background: rgba(16,185,129,0.45);"></span>
+                  <span>Lucro</span>
+                </div>
+              </div>
+              <div class="finance-heatmap-grid" id="finHeatmapGrid"></div>
+            </div>
+          </div>
+
+          <!-- Extrato Financeiro Unificado (Ledger) -->
+          <div class="card">
+            <div class="finance-chart-header">
+              <div class="finance-chart-title-wrap">
+                <h3>Extrato Financeiro Detalhado (Ledger)</h3>
+                <p id="finLedgerSub">Histórico consolidado de operações encerradas</p>
+              </div>
+              <div class="finance-ledger-controls">
+                <input type="text" id="finLedgerSearch" class="finance-ledger-search" placeholder="Filtrar ativo (ex: XAU, EUR, BTC)...">
+                <div class="finance-filter-group" id="finLedgerOutcomeFilters">
+                  <button type="button" class="fin-pill active" data-outcome="all">Todos</button>
+                  <button type="button" class="fin-pill" data-outcome="win">Lucro</button>
+                  <button type="button" class="fin-pill" data-outcome="loss">Prejuízo</button>
+                </div>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Data (UTC)</th>
+                    <th>Origem</th>
+                    <th>Ativo</th>
+                    <th>Lado</th>
+                    <th>Volume</th>
+                    <th>Entrada</th>
+                    <th>Saída</th>
+                    <th>Motivo</th>
+                    <th>PnL ($)</th>
+                    <th>ROI (%)</th>
+                  </tr>
+                </thead>
+                <tbody id="finLedgerBody">
+                  <tr><td colspan="10" class="empty-cell">Carregando extrato financeiro...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- ================================================================
+             ÁREA 5: PORTFÓLIO, CARTEIRA BINANCE & HISTÓRICO XTB
              ================================================================ -->
         <section class="view-section" id="view-portfolio">
           <div class="view-header">

@@ -39,6 +39,7 @@ import {
   sendDailySummaryWhatsAppUI,
   toggleCopilotSound,
 } from "./copilot_alerts.js";
+import { fetchFinanceOverview, initFinanceUI, renderAllFinanceCharts } from "./finance.js";
 import { fetchNewsFeed } from "./news.js";
 import { hooks, state } from "./state.js";
 import { connectLiveMarketStream, disconnectLiveMarketStream, updateCandleCountdown } from "./stream.js";
@@ -138,8 +139,25 @@ async function onTimeframeChange(newTf) {
   connectLiveMarketStream();
 }
 
+function closeMobileSidebar() {
+  const sb = document.getElementById("appSidebar");
+  const bd = document.getElementById("sidebarBackdrop");
+  if (sb) sb.classList.remove("mobile-open");
+  if (bd) bd.classList.remove("open");
+}
+
+function toggleMobileSidebar() {
+  const sb = document.getElementById("appSidebar");
+  const bd = document.getElementById("sidebarBackdrop");
+  if (!sb) return;
+  const open = !sb.classList.contains("mobile-open");
+  sb.classList.toggle("mobile-open", open);
+  if (bd) bd.classList.toggle("open", open);
+}
+
 function switchView(viewName) {
   state.activeView = viewName || "terminal";
+  closeMobileSidebar();
   document.querySelectorAll(".view-section").forEach((sec) => {
     sec.classList.toggle("active", sec.id === `view-${state.activeView}`);
   });
@@ -155,6 +173,9 @@ function switchView(viewName) {
     fetchXtbCopilotSignals();
     fetchAiPerformanceAndWelcome();
     pollAiTrainStatus();
+  }
+  if (state.activeView === "finance") {
+    fetchFinanceOverview(false).then(() => setTimeout(renderAllFinanceCharts, 30));
   }
   if (state.activeView === "news" && state.newsCacheItems.length === 0) fetchNewsFeed(false);
   if (state.activeView === "portfolio") {
@@ -173,6 +194,8 @@ function bindUIEvents() {
     if (el) el.addEventListener(evt, handler);
   };
 
+  on("btnMobileMenu", "click", toggleMobileSidebar);
+  on("sidebarBackdrop", "click", closeMobileSidebar);
   on("symbolSelect", "change", (e) => onSymbolChange(e.target.value));
   on("timeframeSelect", "change", (e) => onTimeframeChange(e.target.value));
   on("btnToggleEma", "click", toggleEmaOverlay);
@@ -318,7 +341,10 @@ function bindUIEvents() {
   on("btnOpenAiChatFab", "click", () => toggleAiChatDrawer());
   on("btnCloseAiChatDrawer", "click", () => toggleAiChatDrawer(false));
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") toggleAiChatDrawer(false);
+    if (e.key === "Escape") {
+      toggleAiChatDrawer(false);
+      closeMobileSidebar();
+    }
   });
   on("btnSendAiChat", "click", () => sendAiChatMessage());
   on("aiChatInput", "keydown", (e) => {
@@ -342,11 +368,16 @@ hooks.onRefreshStatus = fetchStatus;
 
 document.addEventListener("DOMContentLoaded", () => {
   bindUIEvents();
+  initFinanceUI();
   initTradingViewChart();
   fetchInitialData(syncActiveAssetUI);
+  fetchFinanceOverview(false);
   connectLiveMarketStream();
 
-  state.pollingInterval = setInterval(pollDashboardData, 3000);
+  state.pollingInterval = setInterval(() => {
+    pollDashboardData();
+    if (state.activeView === "finance") fetchFinanceOverview(false);
+  }, 3000);
   updateCandleCountdown();
   state.countdownInterval = setInterval(updateCandleCountdown, 1000);
 

@@ -70,6 +70,7 @@ from dashboard.routers.binance import (  # noqa: E402
     test_binance_endpoint,
 )
 from dashboard.routers.bot import start_bot, stop_bot  # noqa: E402
+from dashboard.routers.finance import export_finance_csv, get_finance_overview  # noqa: E402
 from dashboard.routers.market import (  # noqa: E402
     get_forex_ai_status,
     get_live_macro_intelligence,

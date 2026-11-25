@@ -1,0 +1,711 @@
+/* ==========================================================================
+   FyNex Quant AI — Área Financeira Completa & Gráficos Interativos
+   ========================================================================== */
+
+.finance-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.85rem;
+  flex-wrap: wrap;
+}
+
+.finance-filter-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.24rem;
+  background: rgba(10, 16, 30, 0.9);
+  border: 1px solid var(--border-hairline);
+  border-radius: 11px;
+}
+
+.fin-pill {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.38rem 0.72rem;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.16s ease;
+  white-space: nowrap;
+}
+
+.fin-pill:hover {
+  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.fin-pill.active {
+  background: linear-gradient(135deg, rgba(0, 242, 254, 0.18), rgba(56, 189, 248, 0.16));
+  border-color: rgba(0, 242, 254, 0.38);
+  color: #ffffff;
+  box-shadow: 0 2px 10px rgba(0, 242, 254, 0.14);
+}
+
+.finance-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+/* Hero Patrimonial Banner */
+.finance-hero-card {
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse 50% 100% at 92% 0%, rgba(0, 242, 254, 0.12) 0%, transparent 65%),
+    radial-gradient(ellipse 40% 90% at 10% 100%, rgba(16, 185, 129, 0.08) 0%, transparent 65%),
+    linear-gradient(135deg, rgba(13, 21, 38, 0.98) 0%, rgba(9, 14, 26, 0.98) 100%);
+  border: 1px solid rgba(56, 189, 248, 0.24);
+  padding: 1.35rem 1.5rem;
+}
+
+.finance-hero-grid {
+  display: grid;
+  grid-template-columns: 1.35fr 1fr 1fr 1.1fr;
+  gap: 1.25rem;
+  align-items: center;
+}
+
+.finance-hero-primary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding-right: 1rem;
+  border-right: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.finance-hero-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-cyan);
+}
+
+.finance-hero-equity {
+  font-family: var(--font-mono);
+  font-size: clamp(1.75rem, 2.5vw, 2.35rem);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  color: #ffffff;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.finance-hero-roi-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+  margin-top: 0.15rem;
+}
+
+.finance-roi-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 700;
+  padding: 0.22rem 0.62rem;
+  border-radius: 999px;
+}
+
+.finance-roi-badge.pos {
+  background: rgba(16, 185, 129, 0.18);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+}
+
+.finance-roi-badge.neg {
+  background: rgba(244, 63, 94, 0.18);
+  color: #fb7185;
+  border: 1px solid rgba(244, 63, 94, 0.35);
+}
+
+.finance-roi-badge.neutral {
+  background: rgba(148, 163, 184, 0.14);
+  color: #cbd5e1;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+.finance-hero-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+}
+
+.finance-hero-metric-label {
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.finance-hero-metric-val {
+  font-family: var(--font-mono);
+  font-size: 1.28rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.finance-hero-metric-sub {
+  font-size: 0.76rem;
+  color: var(--text-dim);
+}
+
+.finance-margin-bar-track {
+  width: 100%;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.16);
+  overflow: hidden;
+  margin-top: 0.3rem;
+}
+
+.finance-margin-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #10b981, #00f2fe);
+  transition: width 0.35s ease;
+}
+
+/* 6-KPI Quant Grid */
+.finance-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 0.9rem;
+}
+
+.fin-kpi-card {
+  padding: 0.95rem 1.05rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 0.45rem;
+  min-height: 118px;
+}
+
+.fin-kpi-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+
+.fin-kpi-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.fin-kpi-icon {
+  font-size: 0.95rem;
+  opacity: 0.9;
+}
+
+.fin-kpi-val {
+  font-family: var(--font-mono);
+  font-size: 1.32rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+}
+
+.fin-kpi-sub {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.fin-split-bar {
+  width: 100%;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(244, 63, 94, 0.4);
+  overflow: hidden;
+  display: flex;
+}
+
+.fin-split-win {
+  height: 100%;
+  background: linear-gradient(90deg, #10b981, #34d399);
+  transition: width 0.35s ease;
+}
+
+/* Chart Cards & Interactive Canvas Stage */
+.finance-chart-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.85rem;
+  flex-wrap: wrap;
+}
+
+.finance-chart-title-wrap h3 {
+  font-size: 0.98rem;
+  font-weight: 700;
+  color: var(--text-main);
+}
+
+.finance-chart-title-wrap p {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  margin-top: 0.1rem;
+}
+
+.finance-canvas-wrap {
+  position: relative;
+  width: 100%;
+  height: 290px;
+}
+
+.finance-canvas-wrap.tall {
+  height: 310px;
+}
+
+.finance-canvas-wrap.compact {
+  height: 260px;
+}
+
+.finance-canvas-wrap canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: crosshair;
+}
+
+.finance-tooltip {
+  position: absolute;
+  pointer-events: none;
+  z-index: 20;
+  min-width: 165px;
+  padding: 0.55rem 0.75rem;
+  border-radius: 10px;
+  background: rgba(7, 12, 24, 0.96);
+  border: 1px solid rgba(0, 242, 254, 0.35);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.65);
+  font-size: 0.76rem;
+  color: #f8fafc;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 0.12s ease, transform 0.12s ease;
+  backdrop-filter: blur(8px);
+}
+
+.finance-tooltip.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.finance-tooltip .tt-title {
+  font-weight: 700;
+  color: #e2e8f0;
+  margin-bottom: 0.25rem;
+  font-size: 0.78rem;
+}
+
+.finance-tooltip .tt-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.85rem;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  line-height: 1.45;
+}
+
+.finance-tooltip .tt-label {
+  color: #94a3b8;
+  font-family: var(--font-sans);
+}
+
+/* Grids de Gráficos */
+.finance-charts-row-2 {
+  display: grid;
+  grid-template-columns: 1.28fr 0.72fr;
+  gap: 1.1rem;
+}
+
+.finance-charts-row-equal {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.1rem;
+}
+
+/* Donut Layout */
+.finance-donut-layout {
+  display: grid;
+  grid-template-columns: 190px 1fr;
+  gap: 1rem;
+  align-items: center;
+  min-height: 255px;
+}
+
+.finance-donut-stage {
+  position: relative;
+  width: 185px;
+  height: 185px;
+  margin: 0 auto;
+}
+
+.finance-donut-stage canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.finance-donut-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  text-align: center;
+  padding: 1.6rem;
+}
+
+.finance-donut-center strong {
+  font-family: var(--font-mono);
+  font-size: 1.05rem;
+  font-weight: 800;
+  color: #fff;
+}
+
+.finance-donut-center span {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.finance-donut-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.fin-legend-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.42rem 0.55rem;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(148, 163, 184, 0.08);
+  font-size: 0.78rem;
+}
+
+.fin-legend-left {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.fin-legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.fin-legend-name {
+  font-weight: 600;
+  color: #e2e8f0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fin-legend-right {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  flex-shrink: 0;
+}
+
+/* Ranking Horizontal por Ativo */
+.finance-asset-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 0.62rem;
+  max-height: 270px;
+  overflow-y: auto;
+  padding-right: 0.25rem;
+}
+
+.fin-asset-row {
+  display: grid;
+  grid-template-columns: 102px 1fr 86px;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.42rem 0.55rem;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(148, 163, 184, 0.07);
+}
+
+.fin-asset-row:hover {
+  border-color: rgba(56, 189, 248, 0.25);
+  background: rgba(56, 189, 248, 0.05);
+}
+
+.fin-asset-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.fin-asset-sym {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #f8fafc;
+}
+
+.fin-asset-sub {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+}
+
+.fin-asset-track {
+  position: relative;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.12);
+  overflow: hidden;
+}
+
+.fin-asset-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.35s ease;
+}
+
+.fin-asset-fill.pos {
+  background: linear-gradient(90deg, #059669, #34d399);
+}
+
+.fin-asset-fill.neg {
+  background: linear-gradient(90deg, #e11d48, #fb7185);
+}
+
+.fin-asset-pnl {
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+/* Calendário Heatmap 35 dias */
+.finance-heatmap-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 0.42rem;
+}
+
+.fin-cal-cell {
+  border-radius: 9px;
+  padding: 0.45rem 0.38rem;
+  min-height: 54px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  border: 1px solid rgba(148, 163, 184, 0.1);
+  background: rgba(15, 23, 42, 0.72);
+  transition: transform 0.15s ease, border-color 0.15s ease;
+  cursor: default;
+}
+
+.fin-cal-cell:hover {
+  transform: translateY(-2px);
+  border-color: rgba(0, 242, 254, 0.45);
+}
+
+.fin-cal-cell.lvl-pos-1 {
+  background: rgba(16, 185, 129, 0.14);
+  border-color: rgba(16, 185, 129, 0.3);
+}
+
+.fin-cal-cell.lvl-pos-2 {
+  background: rgba(16, 185, 129, 0.28);
+  border-color: rgba(16, 185, 129, 0.5);
+}
+
+.fin-cal-cell.lvl-pos-3 {
+  background: rgba(16, 185, 129, 0.45);
+  border-color: rgba(52, 211, 153, 0.75);
+}
+
+.fin-cal-cell.lvl-neg-1 {
+  background: rgba(244, 63, 94, 0.14);
+  border-color: rgba(244, 63, 94, 0.3);
+}
+
+.fin-cal-cell.lvl-neg-2 {
+  background: rgba(244, 63, 94, 0.28);
+  border-color: rgba(244, 63, 94, 0.5);
+}
+
+.fin-cal-cell.lvl-neg-3 {
+  background: rgba(244, 63, 94, 0.44);
+  border-color: rgba(251, 113, 133, 0.75);
+}
+
+.fin-cal-date {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: #94a3b8;
+}
+
+.fin-cal-val {
+  font-family: var(--font-mono);
+  font-size: 0.73rem;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fin-cal-trades {
+  font-size: 0.62rem;
+  color: var(--text-dim);
+}
+
+.finance-heatmap-legend {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+
+.fin-hm-swatch {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+/* Ledger Controls */
+.finance-ledger-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.finance-ledger-search {
+  min-width: 185px;
+  height: 34px;
+  padding: 0 0.75rem;
+  border-radius: 9px;
+  border: 1px solid var(--border-hairline);
+  background: rgba(10, 16, 30, 0.9);
+  color: var(--text-main);
+  font-size: 0.82rem;
+}
+
+.fin-source-tag {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-weight: 700;
+  padding: 0.14rem 0.46rem;
+  border-radius: 6px;
+}
+
+.fin-source-tag.xtb {
+  background: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.32);
+}
+
+.fin-source-tag.bot {
+  background: rgba(139, 92, 246, 0.16);
+  color: #c4b5fd;
+  border: 1px solid rgba(139, 92, 246, 0.34);
+}
+
+.fin-reason-tag {
+  font-family: var(--font-mono);
+  font-size: 0.67rem;
+  font-weight: 700;
+  padding: 0.14rem 0.46rem;
+  border-radius: 6px;
+  background: rgba(148, 163, 184, 0.14);
+  color: #cbd5e1;
+}
+
+.fin-reason-tag.tp {
+  background: rgba(16, 185, 129, 0.16);
+  color: #34d399;
+}
+
+.fin-reason-tag.sl {
+  background: rgba(244, 63, 94, 0.16);
+  color: #fb7185;
+}
+
+.fin-reason-tag.be {
+  background: rgba(245, 158, 11, 0.16);
+  color: #fbbf24;
+}
+
+/* Responsividade da Área Financeira */
+@media (max-width: 1480px) {
+  .finance-kpi-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1200px) {
+  .finance-hero-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .finance-hero-primary {
+    border-right: none;
+    padding-right: 0;
+  }
+  .finance-charts-row-2,
+  .finance-charts-row-equal {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .finance-hero-grid,
+  .finance-kpi-grid {
+    grid-template-columns: 1fr;
+  }
+  .finance-donut-layout {
+    grid-template-columns: 1fr;
+  }
+  .finance-heatmap-grid {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}

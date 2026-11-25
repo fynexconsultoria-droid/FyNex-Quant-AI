@@ -1,0 +1,306 @@
+/* ==========================================================================
+   FyNex Quant AI — Global UI/UX Modernization Layer
+   Refina hierarquia visual, superfícies, sidebar, topbar, tabelas e mobile.
+   ========================================================================== */
+
+:root {
+  --surface-0: #050811;
+  --surface-1: #0b1120;
+  --surface-2: #10192d;
+  --surface-3: #16223b;
+  --border-hairline: rgba(148, 163, 184, 0.14);
+  --border-strong: rgba(148, 163, 184, 0.26);
+  --glow-emerald: rgba(16, 185, 129, 0.18);
+  --glow-rose: rgba(244, 63, 94, 0.18);
+  --glow-cyan: rgba(0, 242, 254, 0.16);
+}
+
+body {
+  background-color: var(--surface-0);
+  background-image:
+    radial-gradient(ellipse 65% 45% at 15% 0%, rgba(0, 242, 254, 0.065) 0%, transparent 60%),
+    radial-gradient(ellipse 55% 45% at 90% 100%, rgba(139, 92, 246, 0.07) 0%, transparent 60%),
+    linear-gradient(180deg, rgba(15, 23, 42, 0.35) 0%, rgba(5, 8, 17, 0.95) 100%);
+  color: var(--text-main);
+}
+
+/* Foco acessível visível */
+button:focus-visible,
+select:focus-visible,
+input:focus-visible {
+  outline: 2px solid rgba(0, 242, 254, 0.65);
+  outline-offset: 2px;
+}
+
+/* Sidebar Institucional Refinada */
+.sidebar {
+  width: 244px;
+  background: linear-gradient(180deg, rgba(9, 14, 27, 0.98) 0%, rgba(6, 10, 20, 0.98) 100%);
+  border-right: 1px solid var(--border-hairline);
+  box-shadow: 6px 0 28px rgba(0, 0, 0, 0.35);
+}
+
+.sidebar-nav .nav-item {
+  position: relative;
+  border-radius: 10px;
+  padding: 0.68rem 0.85rem;
+  font-size: 0.88rem;
+  color: #9fb0c8;
+  transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease, transform 0.15s ease;
+}
+
+.sidebar-nav .nav-item:hover {
+  background: rgba(148, 163, 184, 0.08);
+  color: #f8fafc;
+  transform: translateX(2px);
+}
+
+.sidebar-nav .nav-item.active {
+  background: linear-gradient(90deg, rgba(0, 242, 254, 0.14) 0%, rgba(56, 189, 248, 0.07) 65%, rgba(139, 92, 246, 0.08) 100%);
+  border-color: rgba(0, 242, 254, 0.34);
+  color: #ffffff;
+  font-weight: 600;
+  box-shadow: 0 6px 20px rgba(0, 242, 254, 0.09);
+}
+
+.sidebar-nav .nav-item.active::before {
+  content: "";
+  position: absolute;
+  left: -0.9rem;
+  top: 20%;
+  bottom: 20%;
+  width: 3px;
+  border-radius: 0 4px 4px 0;
+  background: linear-gradient(180deg, #00f2fe, #8b5cf6);
+  box-shadow: 0 0 10px rgba(0, 242, 254, 0.7);
+}
+
+.nav-pill.pos-pill {
+  background: rgba(16, 185, 129, 0.16);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+}
+
+.nav-pill.neg-pill {
+  background: rgba(244, 63, 94, 0.16);
+  color: #fb7185;
+  border: 1px solid rgba(244, 63, 94, 0.35);
+}
+
+/* Botão Menu Mobile na Topbar */
+.mobile-menu-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  border: 1px solid var(--border-hairline);
+  background: rgba(15, 23, 42, 0.85);
+  color: var(--text-main);
+  font-size: 1.15rem;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.18s ease;
+}
+
+.mobile-menu-btn:hover {
+  border-color: rgba(0, 242, 254, 0.45);
+  color: var(--accent-cyan);
+}
+
+.sidebar-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.65);
+  backdrop-filter: blur(4px);
+  z-index: 190;
+}
+
+.sidebar-backdrop.open {
+  display: block;
+}
+
+/* Topbar Glassmorphism & Ticker Polish */
+.topbar {
+  background: rgba(7, 11, 22, 0.84);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  border-bottom: 1px solid var(--border-hairline);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.28);
+}
+
+.ticker-box {
+  background: linear-gradient(135deg, rgba(15, 23, 42, 0.86), rgba(11, 18, 34, 0.92));
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+/* Cards Elevados com Hairline Superior */
+.card {
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.92) 0%, rgba(11, 17, 32, 0.95) 100%);
+  border: 1px solid var(--border-hairline);
+  border-radius: 14px;
+  box-shadow:
+    0 10px 30px -12px rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.055);
+  transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.card:hover {
+  border-color: rgba(148, 163, 184, 0.24);
+}
+
+.kpi-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.kpi-card::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(56, 189, 248, 0.35), transparent);
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.kpi-card:hover {
+  transform: translateY(-2px);
+  box-shadow:
+    0 14px 32px -12px rgba(0, 0, 0, 0.72),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+/* Tabelas mais limpas com sticky header */
+.table-scroll {
+  overflow-x: auto;
+  overflow-y: auto;
+  max-height: 460px;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.08);
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.data-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: rgba(10, 16, 30, 0.97);
+  backdrop-filter: blur(8px);
+  color: #94a3b8;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0.72rem 0.85rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+.data-table tbody tr {
+  transition: background 0.14s ease;
+}
+
+.data-table tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.data-table tbody tr:hover {
+  background: rgba(56, 189, 248, 0.06);
+}
+
+.data-table tbody td {
+  padding: 0.68rem 0.85rem;
+  font-size: 0.83rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.07);
+}
+
+/* View Header com destaque sutil */
+.view-header {
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.09);
+}
+
+.view-header h2 {
+  background: linear-gradient(90deg, #ffffff 0%, #cbd5e1 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Responsividade Mobile/Tablet Drawer (< 1180px) */
+@media (max-width: 1180px) {
+  .mobile-menu-btn {
+    display: inline-flex;
+  }
+
+  .sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 260px;
+    padding: 1.15rem 0.9rem;
+    transform: translateX(-104%);
+    transition: transform 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+    z-index: 200;
+  }
+
+  .sidebar.mobile-open {
+    transform: translateX(0);
+  }
+
+  .sidebar.mobile-open .brand-text,
+  .sidebar.mobile-open .nav-label,
+  .sidebar.mobile-open .nav-pill,
+  .sidebar.mobile-open .sidebar-account-box,
+  .sidebar.mobile-open .sidebar-evo-box {
+    display: flex;
+  }
+
+  .sidebar.mobile-open .brand-text {
+    display: flex;
+  }
+
+  .sidebar.mobile-open .nav-label {
+    display: block;
+  }
+
+  .sidebar.mobile-open .nav-pill {
+    display: inline-flex;
+  }
+
+  .sidebar.mobile-open .nav-item {
+    justify-content: flex-start;
+    padding: 0.68rem 0.85rem;
+  }
+
+  .topbar {
+    flex-wrap: wrap;
+    padding: 0.65rem 1rem;
+  }
+
+  .topbar-actions {
+    flex-wrap: wrap;
+    gap: 0.45rem;
+  }
+}
+
+@media (max-width: 720px) {
+  .dashboard-container {
+    padding: 0.85rem 0.85rem 2.2rem;
+  }
+
+  .ticker-box {
+    flex-wrap: wrap;
+    border-radius: 12px;
+    padding: 0.45rem 0.7rem;
+  }
+}
