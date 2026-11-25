@@ -164,10 +164,15 @@ class XTBDeskStore:
         return float(row["total"] or 0.0) if row else 0.0
 
     def _cached_floating_pnl_usd(self, conn: sqlite3.Connection) -> float:
-        rows = conn.execute("SELECT symbol, side, lots, contract_size, entry_price FROM xtb_positions").fetchall()
+        from core.exchange.connection import TICKER_CACHE
+
+        rows = conn.execute("SELECT symbol, category, side, lots, contract_size, entry_price FROM xtb_positions").fetchall()
         total = 0.0
         for r in rows:
-            hit, q = FOREX_QUOTE_CACHE.peek(r["symbol"])
+            if r["category"] == "crypto":
+                hit, q = TICKER_CACHE.peek((r["symbol"], False))
+            else:
+                hit, q = FOREX_QUOTE_CACHE.peek(r["symbol"])
             if not hit or not q:
                 continue
             mark = float((q.get("bid") if r["side"] == "BUY" else q.get("ask")) or q.get("price") or 0.0)
@@ -288,7 +293,9 @@ class XTBDeskStore:
         quote = quote_override if quote_override is not None else _resolve_fetch_any_quote()(pos["symbol"])
         exit_price = float((quote.get("bid") if pos["side"] == "BUY" else quote.get("ask")) or 0.0)
         if not _is_finite_pos(exit_price):
-            exit_price = float(quote.get("price") or pos["entry_price"])
+            exit_price = float(quote.get("price") or 0.0)
+        if not _is_finite_pos(exit_price):
+            raise ValueError(f"Cotação indisponível para encerrar posição #{position_id} ({pos['symbol']}).")
 
         pnl_usd = round(
             self.calculate_pnl_usd(
@@ -426,7 +433,11 @@ class XTBDeskStore:
             auto_reason = None
             if sl is not None:
                 if (pos["side"] == "BUY" and mark <= sl) or (pos["side"] == "SELL" and mark >= sl):
-                    auto_reason = "STOP_LOSS"
+                    sl_is_profit_locked = (
+                        (pos["side"] == "BUY" and float(sl) > float(pos["entry_price"]))
+                        or (pos["side"] == "SELL" and float(sl) < float(pos["entry_price"]))
+                    )
+                    auto_reason = "BREAKEVEN" if sl_is_profit_locked else "STOP_LOSS"
             if auto_reason is None and tp is not None:
                 if (pos["side"] == "BUY" and mark >= tp) or (pos["side"] == "SELL" and mark <= tp):
                     auto_reason = "TAKE_PROFIT"
@@ -452,7 +463,12 @@ class XTBDeskStore:
                         "closed_at": closed["closed_at"],
                     })
                 except ValueError:
-                    pass
+                    # Outra thread encerrou primeiro: ressincroniza saldo realizado e histórico
+                    with self._connect() as conn:
+                        realized_pnl = self._realized_pnl_usd(conn)
+                        trade_rows = [
+                            dict(r) for r in conn.execute("SELECT * FROM xtb_trades ORDER BY id DESC LIMIT 30").fetchall()
+                        ]
                 continue
 
             pnl_usd = round(

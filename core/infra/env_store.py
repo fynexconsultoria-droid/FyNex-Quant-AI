@@ -12,6 +12,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 from typing import Dict, List, Optional, Sequence
 
 from dotenv import dotenv_values
@@ -19,8 +20,10 @@ from dotenv import dotenv_values
 ENV_WRITE_LOCK = threading.Lock()
 
 _KEY_LINE_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")
+_VALID_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _TELEGRAM_TOKEN_SCRUB_RE = re.compile(r"bot\d{6,15}:[A-Za-z0-9_-]{10,}")
-_APIKEY_SCRUB_RE = re.compile(r"(apikey=)[^&\s]+", re.IGNORECASE)
+_APIKEY_SCRUB_RE = re.compile(r"((?:apikey|api_key|signature|secret)=)[^&\s]+", re.IGNORECASE)
+_HEADER_SECRET_SCRUB_RE = re.compile(r"((?:X-MBX-APIKEY|Authorization)\s*[:=]\s*(?:Bearer\s+)?)[A-Za-z0-9._\-+/=]{8,}", re.IGNORECASE)
 
 
 def atomic_write_text(path: str, content: str, prefix: str = ".env.") -> None:
@@ -37,7 +40,14 @@ def atomic_write_text(path: str, content: str, prefix: str = ".env.") -> None:
                 os.fsync(f.fileno())
             except OSError:
                 pass
-        os.replace(tmp_path, abs_path)
+        for attempt in range(4):
+            try:
+                os.replace(tmp_path, abs_path)
+                break
+            except PermissionError:
+                if attempt == 3:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
     except Exception:
         if os.path.exists(tmp_path):
             try:
@@ -94,36 +104,46 @@ def update_env_keys(
     preservando comentários e demais variáveis existentes.
     Se o arquivo não existir e `default_template` for fornecido, grava o template.
     """
+    # Valida nomes e valores antes de tocar no disco (bloqueia injeção de nova linha)
+    clean_updates: Dict[str, str] = {}
+    for k, v in updates.items():
+        key_s = str(k or "").strip()
+        if not _VALID_KEY_RE.match(key_s):
+            raise ValueError(f"Nome de variável .env inválido: {k!r}")
+        val_s = "" if v is None else str(v)
+        if "\r" in val_s or "\n" in val_s:
+            raise ValueError(f"Valor da variável {key_s} não pode conter quebras de linha.")
+        clean_updates[key_s] = val_s
+
     with ENV_WRITE_LOCK:
-        if not os.path.exists(env_path) and default_template is not None:
-            content = default_template
-        else:
-            lines: List[str] = []
-            if os.path.exists(env_path):
-                with open(env_path, "r", encoding="utf-8") as f:
-                    lines = f.read().splitlines()
+        lines: List[str] = []
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        elif default_template is not None:
+            lines = default_template.splitlines()
 
-            seen: set[str] = set()
-            new_lines: List[str] = []
-            for line in lines:
-                m = _KEY_LINE_RE.match(line)
-                if m and m.group(1) in updates:
-                    k = m.group(1)
-                    if k not in seen:
-                        new_lines.append(f"{k}={updates[k]}")
-                        seen.add(k)
-                else:
-                    new_lines.append(line)
-
-            for k, v in updates.items():
+        seen: set[str] = set()
+        new_lines: List[str] = []
+        for line in lines:
+            m = _KEY_LINE_RE.match(line)
+            if m and m.group(1) in clean_updates:
+                k = m.group(1)
                 if k not in seen:
-                    new_lines.append(f"{k}={v}")
+                    new_lines.append(f"{k}={clean_updates[k]}")
+                    seen.add(k)
+            else:
+                new_lines.append(line)
 
-            content = "\n".join(new_lines) + "\n"
+        for k, v in clean_updates.items():
+            if k not in seen:
+                new_lines.append(f"{k}={v}")
+
+        content = "\n".join(new_lines) + "\n"
 
         atomic_write_text(env_path, content)
         if sync_environ:
-            for k, v in updates.items():
+            for k, v in clean_updates.items():
                 os.environ[k] = v
 
 
@@ -133,13 +153,14 @@ def scrub_secrets(
     *,
     max_len: int = 300,
 ) -> str:
-    """Remove tokens de bot Telegram, apikeys de URLs e segredos literais de mensagens de erro."""
+    """Remove tokens de bot Telegram, apikeys/headers/assinaturas e segredos literais de mensagens de erro."""
     msg = str(err or "")
     for secret in secrets_to_hide:
         if secret:
             msg = msg.replace(secret, "***")
     msg = _TELEGRAM_TOKEN_SCRUB_RE.sub("bot***", msg)
     msg = _APIKEY_SCRUB_RE.sub(r"\1***", msg)
+    msg = _HEADER_SECRET_SCRUB_RE.sub(r"\1***", msg)
     return msg[:max_len]
 
 

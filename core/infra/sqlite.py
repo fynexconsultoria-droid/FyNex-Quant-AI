@@ -9,10 +9,28 @@ para consultas de dashboard/chat e registro de schemas inicializados.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import threading
 from contextlib import contextmanager
 from typing import Callable, Dict, Iterator, Optional, Tuple
+
+_SQL_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def ensure_wal_mode(db_path: str, timeout: float = 15.0) -> None:
+    """Ativa journal_mode=WAL fora de transação apenas se o banco ainda não estiver em WAL."""
+    parent = os.path.dirname(os.path.abspath(db_path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    conn = sqlite3.connect(db_path, timeout=timeout, isolation_level=None)
+    try:
+        conn.execute(f"PRAGMA busy_timeout={int(timeout * 1000)};")
+        cur_mode = str((conn.execute("PRAGMA journal_mode;").fetchone() or [""])[0]).lower()
+        if cur_mode != "wal":
+            conn.execute("PRAGMA journal_mode=WAL;")
+    finally:
+        conn.close()
 
 
 def connect_sqlite(
@@ -21,9 +39,14 @@ def connect_sqlite(
     timeout: float = 15.0,
     readonly: bool = False,
     configure_pragmas: bool = True,
+    isolation_level: Optional[str] = "",
 ) -> sqlite3.Connection:
     """Abre uma conexão SQLite configurada com `row_factory=sqlite3.Row` e busy_timeout."""
-    conn = sqlite3.connect(db_path, timeout=timeout)
+    if not readonly and db_path and db_path != ":memory:":
+        parent = os.path.dirname(os.path.abspath(db_path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+    conn = sqlite3.connect(db_path, timeout=timeout, isolation_level=isolation_level)
     conn.row_factory = sqlite3.Row
     conn.execute(f"PRAGMA busy_timeout={int(timeout * 1000)};")
     if readonly:
@@ -42,17 +65,29 @@ def sqlite_connection(
     timeout: float = 15.0,
     readonly: bool = False,
     configure_pragmas: bool = True,
+    write_immediate: bool = False,
 ) -> Iterator[sqlite3.Connection]:
-    """Context manager que garante transação (commit/rollback) e fechamento seguro da conexão."""
+    """Context manager que garante transação (incluindo BEGIN IMMEDIATE) e fechamento seguro."""
     conn = connect_sqlite(
         db_path,
         timeout=timeout,
         readonly=readonly,
         configure_pragmas=configure_pragmas,
+        isolation_level=None if write_immediate else "",
     )
     try:
         if readonly:
             yield conn
+        elif write_immediate:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield conn
+                if conn.in_transaction:
+                    conn.execute("COMMIT")
+            except Exception:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
         else:
             with conn:
                 yield conn
@@ -85,9 +120,15 @@ def table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
 
 def ensure_column(cursor: sqlite3.Cursor, table: str, column: str, col_def: str) -> None:
     """Executa migração idempotente adicionando `column` em `table` apenas se ainda não existir."""
+    if not _SQL_IDENT_RE.match(table) or not _SQL_IDENT_RE.match(column):
+        raise ValueError(f"Identificador SQL inválido: {table}.{column}")
     cols = {row[1] for row in cursor.execute(f"PRAGMA table_info({table});").fetchall()}
     if column not in cols:
-        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def};")
+        try:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def};")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
 
 
 class SchemaRegistry:

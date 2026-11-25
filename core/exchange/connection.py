@@ -40,7 +40,16 @@ BALANCE_CACHE: TTLCache[Tuple[str, bool], Dict[str, Any]] = TTLCache(max_size=32
 HEALTH_CACHE: TTLCache[bool, Dict[str, Any]] = TTLCache(max_size=4, default_ttl=5.0)
 
 _METRICS_LOCK = threading.Lock()
+_EXCHANGE_MUTATION_LOCK = threading.Lock()
 _ACTIVE_MIRROR_IDX = 0
+_AUTH_MIRROR_IDX = 0
+_AUTH_SPOT_MIRRORS: Tuple[str, ...] = (
+    "https://api.binance.com",
+    "https://api1.binance.com",
+    "https://api2.binance.com",
+    "https://api3.binance.com",
+    "https://api4.binance.com",
+)
 _CONNECTION_METRICS: Dict[str, Any] = {
     "total_requests": 0,
     "failed_requests": 0,
@@ -71,36 +80,43 @@ def clear_exchange_cache() -> None:
     HEALTH_CACHE.clear()
 
 
-def _get_active_mirror() -> str:
+def _get_active_mirror(authenticated: bool = False) -> str:
     with _METRICS_LOCK:
+        if authenticated:
+            return _AUTH_SPOT_MIRRORS[_AUTH_MIRROR_IDX % len(_AUTH_SPOT_MIRRORS)]
         return BINANCE_SPOT_MIRRORS[_ACTIVE_MIRROR_IDX % len(BINANCE_SPOT_MIRRORS)]
 
 
-def _rotate_mirror(reason: str = "") -> str:
-    """Avança para o próximo mirror oficial da Binance Spot em produção."""
-    global _ACTIVE_MIRROR_IDX
+def _rotate_mirror(reason: str = "", authenticated: bool = False) -> str:
+    """Avança para o próximo mirror oficial da Binance Spot (isolando pool autenticado do mirror público)."""
+    global _ACTIVE_MIRROR_IDX, _AUTH_MIRROR_IDX
     with _METRICS_LOCK:
-        _ACTIVE_MIRROR_IDX = (_ACTIVE_MIRROR_IDX + 1) % len(BINANCE_SPOT_MIRRORS)
+        if authenticated:
+            _AUTH_MIRROR_IDX = (_AUTH_MIRROR_IDX + 1) % len(_AUTH_SPOT_MIRRORS)
+            new_mirror = _AUTH_SPOT_MIRRORS[_AUTH_MIRROR_IDX]
+        else:
+            _ACTIVE_MIRROR_IDX = (_ACTIVE_MIRROR_IDX + 1) % len(BINANCE_SPOT_MIRRORS)
+            new_mirror = BINANCE_SPOT_MIRRORS[_ACTIVE_MIRROR_IDX]
         _CONNECTION_METRICS["mirror_switches"] += 1
-        new_mirror = BINANCE_SPOT_MIRRORS[_ACTIVE_MIRROR_IDX]
-    EXCHANGE_CACHE.delete_matching(lambda k: not k[2])
+    EXCHANGE_CACHE.delete_matching(lambda k: (not k[2]) and (bool(k[0]) == authenticated))
     logger.warning(f"🔀 Rotacionando mirror Binance Spot para {new_mirror} ({reason or 'falha de rede'}).")
     return new_mirror
 
 
 def _apply_mirror_to_exchange(exchange: ccxt.binance, mirror_base: str) -> None:
-    """Aplica o mirror base às URLs Spot do CCXT sem redirecionar endpoints privados para `data-api.binance.vision`."""
-    try:
-        api_urls = exchange.urls.get("api")
-        public_only = mirror_base == BINANCE_PUBLIC_FALLBACK_MIRROR
-        if isinstance(api_urls, dict):
-            for key, val in list(api_urls.items()):
-                if public_only and any(tok in str(key).lower() for tok in ("private", "sapi", "wapi", "dapi", "fapi")):
-                    continue
-                if isinstance(val, str) and _BINANCE_HOST_RE.search(val):
-                    api_urls[key] = _BINANCE_HOST_RE.sub(mirror_base, val)
-    except Exception:
-        pass
+    """Aplica o mirror base às URLs Spot do CCXT com trava thread-safe e proteção para endpoints privados."""
+    with _EXCHANGE_MUTATION_LOCK:
+        try:
+            api_urls = exchange.urls.get("api")
+            public_only = mirror_base == BINANCE_PUBLIC_FALLBACK_MIRROR
+            if isinstance(api_urls, dict):
+                for key, val in list(api_urls.items()):
+                    if public_only and any(tok in str(key).lower() for tok in ("private", "sapi", "wapi", "dapi", "fapi")):
+                        continue
+                    if isinstance(val, str) and _BINANCE_HOST_RE.search(val):
+                        api_urls[key] = _BINANCE_HOST_RE.sub(mirror_base, val)
+        except Exception:
+            pass
 
 
 def _record_request_result(latency_ms: Optional[float], error: Optional[str] = None, retried: bool = False) -> None:
@@ -182,13 +198,11 @@ def call_with_retry(
                     with _METRICS_LOCK:
                         _ACTIVE_MIRROR_IDX = BINANCE_SPOT_MIRRORS.index(BINANCE_PUBLIC_FALLBACK_MIRROR)
                         _CONNECTION_METRICS["mirror_switches"] += 1
-                    EXCHANGE_CACHE.delete_matching(lambda k: not k[2])
+                    EXCHANGE_CACHE.delete_matching(lambda k: (not k[2]) and (not k[0]))
                     new_mirror = BINANCE_PUBLIC_FALLBACK_MIRROR
                     logger.warning(f"🌎 Geo-block HTTP 451 detectado! Alternando para mirror público global {new_mirror}.")
                 else:
-                    new_mirror = _rotate_mirror(type(e).__name__)
-                    if is_authenticated and new_mirror == BINANCE_PUBLIC_FALLBACK_MIRROR:
-                        new_mirror = _rotate_mirror("skip_public_only_mirror_for_auth")
+                    new_mirror = _rotate_mirror(type(e).__name__, authenticated=is_authenticated)
                 if exchange is not None:
                     _apply_mirror_to_exchange(exchange, new_mirror)
             if attempt < max_attempts:
@@ -200,7 +214,8 @@ def call_with_retry(
             _record_request_result(None, error=str(e), retried=(attempt > 1))
             if "-1021" in str(e) and attempt < max_attempts and exchange is not None:
                 try:
-                    exchange.load_time_difference()
+                    with _EXCHANGE_MUTATION_LOCK:
+                        exchange.load_time_difference()
                 except Exception:
                     pass
                 _sleep(0.25)
@@ -250,7 +265,7 @@ def get_binance_exchange(
     if testnet:
         exchange.set_sandbox_mode(True)
     else:
-        active_mirror = _get_active_mirror()
+        active_mirror = _get_active_mirror(authenticated=bool(clean_key and clean_secret))
         if active_mirror != BINANCE_SPOT_MIRRORS[0]:
             _apply_mirror_to_exchange(exchange, active_mirror)
 

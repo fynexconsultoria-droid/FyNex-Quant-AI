@@ -29,7 +29,20 @@ from core.ml import (
     create_target,
     train_model,
 )
-from strategy_config import DEFAULT_TIMEFRAME, StrategyProfile, get_strategy_profile
+from strategy_config import DEFAULT_TIMEFRAME, PAPER_FEE_PCT, PAPER_SLIPPAGE_PCT, StrategyProfile, get_strategy_profile
+
+
+def _resolve_transaction_costs(symbol: str) -> Tuple[float, float]:
+    """Retorna `(fee_pct, slippage_pct)` realista por classe de ativo (evita aplicar taxa Spot 0.24% em Forex)."""
+    if forex_market.is_forex_symbol(symbol):
+        inst = forex_market.MARKET_INSTRUMENTS.get(symbol.upper(), {})
+        cat = str(inst.get("category", "forex")).lower()
+        if cat == "forex":
+            # Spread típico XTB em Forex major/minor: ~0.012% por lado (0.024% ida/volta)
+            return 0.0, 0.00012
+        # Metais, Energia & Índices (XAU/USD, OIL/USD, US500/USD): ~0.025% por lado (0.05% ida/volta)
+        return 0.0, 0.00025
+    return PAPER_FEE_PCT, PAPER_SLIPPAGE_PCT
 
 
 def _resolve_training_profile(symbol: str, timeframe: str) -> StrategyProfile:
@@ -165,6 +178,7 @@ def train_and_select_best_model(
     best_entry: Optional[Dict[str, Any]] = None
 
     total_cands = max(1, len(candidates))
+    fee_pct, slippage_pct = _resolve_transaction_costs(symbol)
     for idx, model_type in enumerate(candidates, start=1):
         if callable(progress_cb):
             progress_cb(f"Treinando arquitetura {model_type.upper()} ({idx}/{total_cands})...", 35 + int(idx / total_cands * 55))
@@ -179,6 +193,8 @@ def train_and_select_best_model(
             confidence_threshold=profile.confidence,
             model_type=model_type,
             extra_sample_weights=hard_weights,
+            fee_pct=fee_pct,
+            slippage_pct=slippage_pct,
         )
         m = getattr(model, "validation_metrics_", {})
         entry = {
@@ -198,11 +214,14 @@ def train_and_select_best_model(
         }
         results.append(entry)
 
-        # Critério quantitativo conservador:
-        # 1) Modelos com lucro simulado positivo e amostra mínima (>= 5 sinais) vencem sempre;
-        # 2) Entre modelos negativos, evita promover modelos que sangram muito com dezenas de falsos sinais
-        #    (um modelo seletivo/cauteloso com 0 sinais ou pequena perda é melhor que sangrar -50% em 200 erros).
+        # Critério quantitativo conservador (com custos reais por classe de ativo):
+        # Tier 3: lucrativo com amostra sólida (>= 5 sinais)
+        # Tier 2: lucrativo seletivo (1–4 sinais)
+        # Tier 1: neutro/seletivo (0 sinais — melhor que sangrar prejuízo)
+        # Tier 0: negativo com sinais
         if entry["buy_signals"] >= 5 and entry["sim_pnl_pct"] > 0:
+            tier = 3
+        elif entry["buy_signals"] > 0 and entry["sim_pnl_pct"] > 0:
             tier = 2
         elif entry["buy_signals"] == 0:
             tier = 1

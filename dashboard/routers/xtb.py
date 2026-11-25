@@ -13,6 +13,16 @@ from dashboard.schemas import CopilotStatusPayload, TelegramConfigPayload, XTBOr
 from dashboard.security import require_csrf
 
 router = APIRouter(tags=["xtb"])
+_FOREX_TRADER_CACHE: dict[str, forex_ai_trader.ForexAITrader] = {}
+
+
+def _get_forex_trader() -> forex_ai_trader.ForexAITrader:
+    path = _db_path()
+    trader = _FOREX_TRADER_CACHE.get(path)
+    if trader is None:
+        trader = forex_ai_trader.ForexAITrader(db_path=path)
+        _FOREX_TRADER_CACHE[path] = trader
+    return trader
 
 
 def _db_path() -> str:
@@ -54,8 +64,8 @@ def open_xtb_order(payload: XTBOrderPayload):
         }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Falha ao executar ordem: {e}")
+    except Exception:
+        raise HTTPException(status_code=503, detail="Falha interna ao executar ordem na mesa XTB.")
 
 
 @router.post("/api/xtb/close/{position_id}", dependencies=[Depends(require_csrf)])
@@ -70,8 +80,8 @@ def close_xtb_order(position_id: int):
         }
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Falha ao fechar posição: {e}")
+    except Exception:
+        raise HTTPException(status_code=503, detail="Falha interna ao fechar posição na mesa XTB.")
 
 
 @router.get("/api/xtb/copilot/signals")
@@ -99,13 +109,14 @@ def trigger_xtb_copilot_scan():
         macro_snap = macro_intelligence.fetch_macro_snapshot()
     except Exception:
         macro_snap = None
-    trader = forex_ai_trader.ForexAITrader(db_path=_db_path())
+    trader = _get_forex_trader()
     report = trader.run_cycle(macro_snapshot=macro_snap)
     signals = _get_xtb_copilot().list_signals(limit=25)
     return {
         "status": "scanned",
         "market_open": report.get("market_open", False),
         "status_message": report.get("status_message", ""),
+        "min_score": float(trader.min_score),
         "last_action": report.get("last_action"),
         "opportunities": report.get("opportunities", []),
         "signals": signals,

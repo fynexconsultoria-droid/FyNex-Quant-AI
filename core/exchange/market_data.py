@@ -23,6 +23,7 @@ from core.exchange.connection import (
     call_with_retry,
     get_binance_exchange,
 )
+from core.infra.env_store import scrub_secrets
 
 
 def _bc_fn(name: str, default):
@@ -229,8 +230,8 @@ def test_binance_connection(
         btc_total = float(raw_balance.get("total", {}).get("BTC", 0.0) or 0.0)
 
         account_info = raw_balance.get("info", {})
-        can_trade = account_info.get("canTrade", True)
-        can_withdraw = account_info.get("canWithdraw", False)
+        can_trade = bool(account_info.get("canTrade", False)) if account_info else True
+        can_withdraw = bool(account_info.get("canWithdraw", False))
 
         env_name = "Binance Spot Testnet (Sandbox)" if testnet else "Binance Spot Oficial (Produção Real)"
 
@@ -246,7 +247,7 @@ def test_binance_connection(
             "assets": assets[:10],
             "latency_ms": latency_ms,
             "clock_drift_ms": clock_drift_ms,
-            "active_mirror": "testnet.binance.vision" if testnet else _get_active_mirror(),
+            "active_mirror": "testnet.binance.vision" if testnet else _get_active_mirror(authenticated=True),
             "message": f"Conexão com a {env_name} estabelecida com sucesso ({latency_ms:.0f} ms)! Carteira sincronizada.",
         }
 
@@ -255,24 +256,24 @@ def test_binance_connection(
             "success": False,
             "error_code": "AUTH_ERROR",
             "message": "Erro de Autenticação Binance: API Key ou Secret inválida ou expirada.",
-            "detail": str(e),
+            "detail": scrub_secrets(e, (api_key, api_secret)),
         }
     except ccxt.ExchangeNotAvailable as e:
         return {
             "success": False,
             "error_code": "EXCHANGE_UNAVAILABLE",
             "message": "Servidores da Binance temporariamente inacessíveis ou sob manutenção.",
-            "detail": str(e),
+            "detail": scrub_secrets(e, (api_key, api_secret)),
         }
     except ccxt.NetworkError as e:
         return {
             "success": False,
             "error_code": "NETWORK_ERROR",
             "message": "Falha de rede ao conectar com a Binance. Verifique sua conexão com a internet.",
-            "detail": str(e),
+            "detail": scrub_secrets(e, (api_key, api_secret)),
         }
     except Exception as e:
-        error_msg = str(e)
+        error_msg = scrub_secrets(e, (api_key, api_secret))
         if "-2015" in error_msg:
             msg = "Chave de API inválida, IP não autorizado ou permissões insuficientes na Binance."
         elif "-1021" in error_msg:
@@ -300,7 +301,7 @@ def fetch_cached_balance(
     cache_key = (cfg["api_key_masked"], use_testnet)
     hit, cached = BALANCE_CACHE.get(cache_key, ttl_seconds=ttl_seconds)
     if hit and cached is not None:
-        return cached
+        return dict(cached)
 
     res = _bc_fn("test_binance_connection", test_binance_connection)(
         api_key=cfg["api_key"],
@@ -310,4 +311,4 @@ def fetch_cached_balance(
     res["connected"] = bool(res.get("success"))
     res["has_keys"] = True
     res["trading_mode"] = cfg["trading_mode"]
-    return BALANCE_CACHE.set(cache_key, res)
+    return dict(BALANCE_CACHE.set(cache_key, res))

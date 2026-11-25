@@ -9,7 +9,7 @@ import { fetchXtbCopilotSignals } from "./copilot_alerts.js";
 import { fetchNewsFeed } from "./news.js";
 import { state } from "./state.js";
 import { update24hStatsUI, updateBidAskUI, updateLiveTickerPrice } from "./stream.js";
-import { csrfHeaders, escapeHtml, isActiveForex } from "./utils.js";
+import { csrfHeaders, escapeHtml, isActiveForex, showToast } from "./utils.js";
 import { fetchInstrumentsCatalog, fetchWatchlist, fetchXtbAccount } from "./xtb_desk.js";
 
 export async function fetchLiveTickerFallback() {
@@ -401,24 +401,27 @@ export async function fetchLogs() {
 
 export async function toggleBot() {
   const btn = document.getElementById("btnToggleBot");
-  btn.disabled = true;
+  if (btn) btn.disabled = true;
   try {
+    let res;
     if (state.isBotOnline) {
-      const res = await fetch("/api/bot/stop", { method: "POST", headers: csrfHeaders() });
-      const data = await res.json().catch(() => ({}));
-      alert(data.message || data.detail || "Robô finalizado.");
+      res = await fetch("/api/bot/stop", { method: "POST", headers: csrfHeaders() });
     } else {
       const targetSymbol = isActiveForex() ? "BTC/USDT" : state.activeSymbol;
       const q = new URLSearchParams({ symbol: targetSymbol, timeframe: state.activeTimeframe });
-      const res = await fetch(`/api/bot/start?${q.toString()}`, { method: "POST", headers: csrfHeaders() });
-      const data = await res.json().catch(() => ({}));
-      alert(data.message || data.detail || "Robô iniciado em segundo plano!");
+      res = await fetch(`/api/bot/start?${q.toString()}`, { method: "POST", headers: csrfHeaders() });
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      showToast(data.detail || `Falha ao controlar o robô (HTTP ${res.status}).`, "error");
+    } else {
+      showToast(data.message || (state.isBotOnline ? "Robô finalizado." : "Robô iniciado em segundo plano!"), "success");
     }
     await fetchStatus();
   } catch (err) {
-    alert("Falha ao comunicar com o servidor: " + err);
+    showToast(`Falha ao comunicar com o servidor: ${err}`, "error");
   } finally {
-    btn.disabled = false;
+    if (btn) btn.disabled = false;
   }
 }
 

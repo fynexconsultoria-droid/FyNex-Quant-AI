@@ -170,7 +170,7 @@ def serve_index():
         meta_tag = f'<meta name="csrf-token" content="{CSRF_TOKEN}">'
         if 'name="csrf-token"' not in html:
             html = html.replace("<head>", f"<head>\n  {meta_tag}", 1)
-        return HTMLResponse(content=html)
+        return HTMLResponse(content=html, headers={"Cache-Control": "no-store, max-age=0"})
     return JSONResponse({"message": "Dashboard frontend pronto. Abra static/index.html."})
 
 
@@ -179,4 +179,4 @@ if __name__ == "__main__":
 
     host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "8000"))
-    uvicorn.run("server:app", host=host, port=port, reload=False, app_dir=os.path.dirname(__file__))
+    uvicorn.run("dashboard.server:app", host=host, port=port, reload=False, app_dir=BASE_DIR)

@@ -58,6 +58,11 @@ class ModelPersistence:
         os.close(fd)
         try:
             joblib.dump(obj, tmp_path, compress=3)
+            try:
+                with open(tmp_path, "rb") as f:
+                    os.fsync(f.fileno())
+            except OSError:
+                pass
             os.replace(tmp_path, target_path)
         except Exception:
             if os.path.exists(tmp_path):
@@ -130,8 +135,18 @@ class ModelPersistence:
             try:
                 shutil.move(fpath, dst)
                 moved += 1
-            except OSError:
-                pass
+            except OSError as e:
+                logger.warning(f"Falha ao arquivar modelo '{fpath}': {e}")
+        # Também remove/arquiva ponteiros latest e metadata incompatíveis
+        for extra_p in (
+            self._safe_model_path(f"latest_{clean_symbol}_{clean_tf}.joblib"),
+            self.get_meta_path(symbol, timeframe),
+        ):
+            if os.path.exists(extra_p):
+                try:
+                    shutil.move(extra_p, os.path.join(archive_dir, os.path.basename(extra_p)))
+                except OSError:
+                    pass
         if moved > 0:
             logger.info(f"📦 [ARQUIVO] {moved} modelo(s) incompatível(is) movido(s) para '{archive_dir}'.")
         return moved
@@ -178,11 +193,13 @@ class ModelPersistence:
         version_path = self._safe_model_path(version_filename)
         latest_path = self._safe_model_path(f"latest_{clean_symbol}_{clean_tf}.joblib")
 
+        # 1) Grava arquivo versionado primeiro -> 2) atualiza metadata apontando para ele -> 3) atualiza latest
+        # Evita leituras rasgadas (torn reads) onde latest já mudou mas metadata ainda é da versão antiga.
         self._atomic_dump_joblib(model, version_path)
-        self._atomic_dump_joblib(model, latest_path)
         self._prune_old_versions(clean_symbol, clean_tf, active_version=int(version))
 
-        metadata: Dict[str, Any] = {
+        metadata: Dict[str, Any] = dict(extra_meta) if isinstance(extra_meta, dict) else {}
+        metadata.update({
             "version": version,
             "accuracy": float(accuracy),
             "feature_cols": feature_cols,
@@ -191,13 +208,14 @@ class ModelPersistence:
             "timeframe": timeframe,
             "saved_at": utc_now_str(),
             "file": version_filename,
-        }
-        if extra_meta:
-            metadata.update(extra_meta)
+        })
 
         pair_meta_path = self.get_meta_path(symbol, timeframe)
         self._atomic_dump_json(metadata, pair_meta_path)
-        self._atomic_dump_json(metadata, self.meta_path)
+        # Atualiza metadata.json global apenas para BTC/USDT (ou se ainda não existir), evitando sobrescrita por treinos Forex em lote
+        if symbol == "BTC/USDT" or not os.path.exists(self.meta_path):
+            self._atomic_dump_json(metadata, self.meta_path)
+        self._atomic_dump_joblib(model, latest_path)
 
         logger.info(
             f"💾 [MODELO SALVO EM DISCO] Versão v{version} gravada em '{version_path}' (Score: {accuracy * 100:.2f}%)"
@@ -234,6 +252,7 @@ class ModelPersistence:
             return None
 
         try:
+            load_target = latest_path
             referenced_file = meta.get("file")
             if referenced_file:
                 try:
@@ -241,12 +260,18 @@ class ModelPersistence:
                 except ValueError:
                     logger.warning(f"Caminho inválido referenciado no metadata ('{referenced_file}'); ignorando.")
                     ref_path = ""
-                if ref_path and not os.path.exists(ref_path):
+                if ref_path and os.path.exists(ref_path):
+                    load_target = ref_path
+                elif ref_path:
                     logger.warning(f"Arquivo referenciado no metadata ('{referenced_file}') não existe; usando latest.")
-            model = joblib.load(latest_path)
+            features = list(meta.get("feature_cols", []))
+            expected_hash = meta.get("feature_schema_hash")
+            if expected_hash and features and self.feature_schema_hash(features) != expected_hash:
+                logger.warning(f"Hash de schema divergente no metadata de {symbol} {timeframe}; ignorando modelo.")
+                return None
+            model = joblib.load(load_target)
             version = int(meta.get("version", 1))
             acc = float(meta.get("accuracy", 0.5))
-            features = meta.get("feature_cols", [])
 
             logger.info(
                 f"🧠 [MODELO RECUPERADO DE DISCO] Carregado Modelo v{version} "

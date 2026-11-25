@@ -12,7 +12,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 import pandas as pd
 
-from core.infra.sqlite import SCHEMA_REGISTRY, ensure_column, sqlite_connection
+from core.infra.sqlite import SCHEMA_REGISTRY, ensure_column, ensure_wal_mode, sqlite_connection
 from core.logging_setup import DEFAULT_DB_PATH, logger
 
 TIMEFRAME_MS: Dict[str, int] = {
@@ -58,9 +58,9 @@ class TradingDatabase:
         SCHEMA_REGISTRY.ensure_initialized("trading_db", self.db_path, self._init_database)
 
     @contextmanager
-    def _get_connection(self) -> Iterator[sqlite3.Connection]:
+    def _get_connection(self, *, write_immediate: bool = False) -> Iterator[sqlite3.Connection]:
         """Cria uma conexão SQLite com busy_timeout primeiro e fechamento garantido."""
-        with sqlite_connection(self.db_path, timeout=15.0) as conn:
+        with sqlite_connection(self.db_path, timeout=15.0, write_immediate=write_immediate) as conn:
             yield conn
 
     @staticmethod
@@ -69,9 +69,9 @@ class TradingDatabase:
 
     def _init_database(self) -> None:
         """Cria as tabelas, migrações seguras e índices necessários (executa 1x por banco)."""
-        with self._get_connection() as conn:
+        ensure_wal_mode(self.db_path, timeout=15.0)
+        with self._get_connection(write_immediate=True) as conn:
             cursor = conn.cursor()
-            cursor.execute("PRAGMA journal_mode=WAL;")
             cursor.execute("PRAGMA wal_autocheckpoint=1000;")
 
             # 1. Tabela de candles históricos e em tempo real
@@ -417,7 +417,7 @@ class TradingDatabase:
         tf_ms = timeframe_to_ms(timeframe)
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         evaluated = []
-        with self._get_connection() as conn:
+        with self._get_connection(write_immediate=True) as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT id, candle_timestamp, prediction, prob_up, entry_price,

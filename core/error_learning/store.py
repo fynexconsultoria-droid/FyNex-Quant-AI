@@ -277,7 +277,7 @@ class ErrorLearningStore:
             enriched,
             source=src_u,
             outcome_reason=outcome_reason,
-            pnl_pct=pnl_pct if src_u == "TRADE_LOSS" else None,
+            pnl_pct=pnl_pct if "TRADE_LOSS" in src_u else None,
         )
         now_str = utc_now_str(now_utc)
         ts_val = int(candle_timestamp) if candle_timestamp is not None else None
@@ -294,11 +294,15 @@ class ErrorLearningStore:
                 ).fetchone()
                 if existing is not None:
                     ex_src = str(existing["source"]).upper()
-                    if ex_src == "TRADE_LOSS" and src_u == "PREDICTION_MISS":
+                    if ex_src == src_u or ("TRADE_LOSS" in ex_src and src_u == "PREDICTION_MISS"):
                         try:
                             ex_causes = json.loads(existing["causes_json"] or "[]")
                         except Exception:
                             ex_causes = []
+                        try:
+                            ex_params = json.loads(existing["parameters_json"] or "{}")
+                        except Exception:
+                            ex_params = enriched
                         return {
                             "id": int(existing["id"]),
                             "created_at": existing["created_at"],
@@ -313,10 +317,10 @@ class ErrorLearningStore:
                             "causes": ex_causes,
                             "severity": float(existing["severity"] or 1.0),
                             "lesson_text": existing["lesson_text"],
-                            "parameters": enriched,
+                            "parameters": ex_params,
                             "deduplicated": True,
                         }
-                    if ex_src == "PREDICTION_MISS" and src_u == "TRADE_LOSS":
+                    if ex_src == "PREDICTION_MISS" and "TRADE_LOSS" in src_u:
                         conn.execute(
                             """
                             UPDATE error_postmortems
@@ -433,14 +437,17 @@ class ErrorLearningStore:
         now_dt = now_utc or datetime.now(timezone.utc)
         if now_dt.tzinfo is None:
             now_dt = now_dt.replace(tzinfo=timezone.utc)
-        now_str = now_dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            now_dt = now_dt.astimezone(timezone.utc)
+        now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
         cutoff = (now_dt - timedelta(days=max(1, int(lookback_days)))).strftime("%Y-%m-%d %H:%M:%S")
 
         clauses = ["symbol = ?", "timeframe = ?", "created_at >= ?", "created_at <= ?"]
         params: List[Any] = [symbol, timeframe, cutoff, now_str]
         if max_candle_ts_ms is not None:
-            clauses.append("(candle_timestamp IS NULL OR candle_timestamp <= ?)")
-            params.append(int(max_candle_ts_ms))
+            max_ts_dt = datetime.fromtimestamp(int(max_candle_ts_ms) / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            clauses.append("((candle_timestamp IS NOT NULL AND candle_timestamp <= ?) OR (candle_timestamp IS NULL AND created_at <= ?))")
+            params.extend([int(max_candle_ts_ms), max_ts_dt])
 
         with self._connect() as conn:
             raw_rows = conn.execute(
@@ -466,12 +473,12 @@ class ErrorLearningStore:
             prev = by_ts.get(ts_int)
             if prev is None:
                 by_ts[ts_int] = r
-            elif str(prev["source"]).upper() != "TRADE_LOSS" and str(r["source"]).upper() == "TRADE_LOSS":
+            elif "TRADE_LOSS" not in str(prev["source"]).upper() and "TRADE_LOSS" in str(r["source"]).upper():
                 by_ts[ts_int] = r
         dedup_rows.extend(by_ts.values())
         dedup_rows.sort(key=lambda r: int(r["id"]), reverse=True)
 
-        latest_err_at = str(dedup_rows[0]["created_at"]) if dedup_rows else None
+        latest_err_at = max((str(r["created_at"]) for r in dedup_rows), default=None)
         recovery_wins = self._recent_recovery_streak(
             symbol, timeframe, since_utc_str=latest_err_at, now_utc_str=now_str
         )
@@ -482,12 +489,13 @@ class ErrorLearningStore:
         failed_timestamps: Dict[int, float] = {}
 
         for r in dedup_rows:
-            src_mult = 1.5 if str(r["source"]).upper() == "TRADE_LOSS" else 1.0
+            is_trade_loss = "TRADE_LOSS" in str(r["source"]).upper()
+            src_mult = 1.5 if is_trade_loss else 1.0
             sev = float(r["severity"] or 1.0)
             ts = r["candle_timestamp"]
             if ts is not None:
                 ts_int = int(ts)
-                boost = 2.2 if str(r["source"]).upper() == "TRADE_LOSS" else 1.7
+                boost = 2.2 if is_trade_loss else 1.7
                 failed_timestamps[ts_int] = max(failed_timestamps.get(ts_int, 1.0), boost)
 
             try:

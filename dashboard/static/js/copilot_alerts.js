@@ -86,11 +86,15 @@ export async function updateCopilotSignalStatus(signalId, status) {
       headers: csrfHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ status }),
     });
-    if (!res.ok) return;
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      showToast(errData.detail || "Falha ao atualizar status do sinal.", "error");
+      return;
+    }
     showToast(status === "EXECUTED_XTB" ? "✅ Marcado como executado na XTB!" : "Sinal dispensado.", "info");
     await fetchXtbCopilotSignals();
-  } catch (_) {
-    // silencioso
+  } catch (err) {
+    showToast(`Erro ao atualizar sinal: ${err}`, "error");
   }
 }
 
@@ -211,11 +215,12 @@ export async function scanXtbCopilotNow() {
   }
   try {
     const res = await fetch("/api/xtb/copilot/scan", { method: "POST", headers: csrfHeaders() });
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       showToast(data.detail || "Falha ao escanear mercados XTB.", "error");
       return;
     }
+    const minSc = Number(data.min_score || 78);
     if (!data.market_open) {
       showToast(`⏸️ ${data.status_message}`, "info");
     } else if (data.last_action) {
@@ -224,8 +229,8 @@ export async function scanXtbCopilotNow() {
     } else {
       const top = (data.opportunities || [])[0];
       const msg = top
-        ? `Varredura concluída. Melhor score atual: ${top.symbol} (${top.side} ${Number(top.score || 0).toFixed(0)}/100) — aguardando >= 72.`
-        : "Varredura concluída. Nenhuma entrada forte acima de 72/100 agora.";
+        ? `Varredura concluída. Melhor score atual: ${top.symbol} (${top.side} ${Number(top.score || 0).toFixed(0)}/100) — aguardando >= ${minSc}.`
+        : `Varredura concluída. Nenhuma entrada forte acima de ${minSc}/100 agora.`;
       showToast(msg, "info");
     }
     await fetchXtbCopilotSignals();

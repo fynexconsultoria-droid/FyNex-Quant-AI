@@ -102,6 +102,7 @@ def _run_ai_training_job(symbol: str, timeframe: str, candles: int, offline: boo
             progress_pct=0,
             stage="Falha no treinamento",
             error=str(e),
+            last_result=None,
         )
 
 
@@ -119,6 +120,7 @@ def start_training_job(symbol: str, timeframe: str, candles: int, offline: bool)
             "progress_pct": 5,
             "stage": "Iniciando treinamento...",
             "error": None,
+            "last_result": None,
         })
 
     threading.Thread(

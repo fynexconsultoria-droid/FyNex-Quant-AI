@@ -139,13 +139,30 @@ export async function submitXtbOrder(side) {
     return;
   }
 
+  let slPrice = null;
+  if (slRaw) {
+    slPrice = parseFloat(slRaw.replace(",", "."));
+    if (!Number.isFinite(slPrice) || slPrice <= 0) {
+      showToast("Stop Loss inválido. Informe um preço numérico positivo ou deixe em branco.", "error");
+      return;
+    }
+  }
+  let tpPrice = null;
+  if (tpRaw) {
+    tpPrice = parseFloat(tpRaw.replace(",", "."));
+    if (!Number.isFinite(tpPrice) || tpPrice <= 0) {
+      showToast("Take Profit inválido. Informe um preço numérico positivo ou deixe em branco.", "error");
+      return;
+    }
+  }
+
   const payload = {
     symbol: state.activeSymbol,
     side,
     lots,
     leverage,
-    sl_price: slRaw ? parseFloat(slRaw) : null,
-    tp_price: tpRaw ? parseFloat(tpRaw) : null,
+    sl_price: slPrice,
+    tp_price: tpPrice,
   };
 
   xtbOrderInFlight = true;

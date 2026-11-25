@@ -15,6 +15,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import math
+import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -29,6 +30,7 @@ from core.database import TradingDatabase
 from core.infra.utils import parse_utc_str
 from core.logging_setup import DEFAULT_MODELS_DIR
 from core.ml import ModelPersistence, build_features, predict_prob_up
+from core.trading.risk import KILL_SWITCH_PATH
 
 logger = logging.getLogger("QuantTradingBot")
 _FOREX_CYCLE_LOCK = threading.Lock()
@@ -321,6 +323,8 @@ class ForexAITrader:
         sl_cooldown_hours: float = 4.0,
         block_correlated_usd: bool = True,
         models_dir: str = DEFAULT_MODELS_DIR,
+        kill_switch_path: str = KILL_SWITCH_PATH,
+        max_daily_loss_usd: float = 200.0,
     ):
         self.db_path = db_path
         self.pairs = pairs
@@ -330,6 +334,8 @@ class ForexAITrader:
         self.sl_cooldown_hours = max(0.0, float(sl_cooldown_hours))
         self.block_correlated_usd = bool(block_correlated_usd)
         self.models_dir = models_dir
+        self.kill_switch_path = kill_switch_path
+        self.max_daily_loss_usd = abs(float(max_daily_loss_usd))
         self.db = TradingDatabase(db_path=db_path)
         self.model_storage = ModelPersistence(models_dir=models_dir)
         self._ml_cache: Dict[str, Tuple[int, Any, List[str]]] = {}
@@ -380,7 +386,7 @@ class ForexAITrader:
                 closed_dt = parse_utc_str(str(tr.get("closed_at") or ""))
                 if closed_dt is not None:
                     elapsed_h = (now_dt - closed_dt).total_seconds() / 3600.0
-                    if 0.0 <= elapsed_h < self.sl_cooldown_hours:
+                    if elapsed_h < self.sl_cooldown_hours:
                         return True
             break
         return False
@@ -401,22 +407,57 @@ class ForexAITrader:
             logger.info(f"💱 [FOREX IA] {open_msg}")
             return self.last_scan_report
 
-        # 1. Atualiza posições existentes (dispara SL/TP automaticamente se atingido)
+        # 1. Atualiza posições existentes (dispara SL/TP automaticamente mesmo com kill-switch ativo)
         snap = self.store.get_account_snapshot()
         open_forex = [p for p in snap.get("open_positions", []) if p.get("category") != "crypto"]
         open_syms = {p["symbol"] for p in open_forex}
 
+        # Respeita o kill-switch global STOP e o limite diário de perda na mesa XTB
+        if self.kill_switch_path and os.path.exists(self.kill_switch_path):
+            self.last_scan_report = {
+                "market_open": True,
+                "status_message": f"Kill-switch ativo ({self.kill_switch_path}) — novas entradas Forex/XTB suspensas.",
+                "open_forex_positions": len(open_forex),
+                "opportunities": [],
+                "last_action": None,
+            }
+            logger.warning(f"⛔ [FOREX IA] {self.last_scan_report['status_message']}")
+            return self.last_scan_report
+
+        now_dt_check = now_utc or datetime.now(timezone.utc)
+        if now_dt_check.tzinfo is None:
+            now_dt_check = now_dt_check.replace(tzinfo=timezone.utc)
+        today_prefix = now_dt_check.strftime("%Y-%m-%d")
+        today_xtb_pnl = sum(
+            float(t.get("pnl_usd") or 0.0)
+            for t in (snap.get("recent_trades") or [])
+            if str(t.get("closed_at") or "").startswith(today_prefix)
+        )
+        effective_xtb_pnl = today_xtb_pnl + min(0.0, float(snap.get("floating_pnl_usd") or 0.0))
+        if self.max_daily_loss_usd > 0 and effective_xtb_pnl <= -self.max_daily_loss_usd:
+            self.last_scan_report = {
+                "market_open": True,
+                "status_message": (
+                    f"Limite diário de perda Forex/XTB atingido (${effective_xtb_pnl:+.2f} <= -${self.max_daily_loss_usd:.2f})."
+                ),
+                "open_forex_positions": len(open_forex),
+                "opportunities": [],
+                "last_action": None,
+            }
+            logger.warning(f"⛔ [FOREX IA] {self.last_scan_report['status_message']}")
+            return self.last_scan_report
+
         opportunities: List[Dict[str, Any]] = []
 
-        now_epoch = int((now_utc or datetime.now(timezone.utc)).timestamp())
+        now_epoch = int(now_dt_check.timestamp())
 
         def _analyze_one(sym: str) -> Optional[Dict[str, Any]]:
             try:
-                raw_candles = forex_market.fetch_forex_candles(sym, timeframe="1h", limit=80)
+                raw_candles = forex_market.fetch_forex_candles(sym, timeframe="1h", limit=150)
                 if not raw_candles or len(raw_candles) < 35:
                     return None
-                # Descarta o último candle em formação (evita repainting em vela 1h ainda aberta)
-                if len(raw_candles) > 35 and (int(raw_candles[-1]["time"]) + 3600) > now_epoch:
+                # Descarta sempre o último candle em formação (evita repainting e gravação de vela aberta)
+                if (int(raw_candles[-1]["time"]) + 3600) > now_epoch:
                     raw_candles = raw_candles[:-1]
                 if len(raw_candles) < 35:
                     return None

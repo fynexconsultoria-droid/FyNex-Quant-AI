@@ -395,26 +395,23 @@ class MacroLearningStore:
     """
 
     def __init__(self, db_path: str):
+        from core.infra.sqlite import SCHEMA_REGISTRY
+
         self.db_path = db_path
-        with _MACRO_DB_INIT_LOCK:
-            if db_path not in _INITIALIZED_MACRO_DBS or not os.path.exists(db_path):
-                self._init_tables()
-                _INITIALIZED_MACRO_DBS.add(db_path)
+        SCHEMA_REGISTRY.ensure_initialized("macro_learning", self.db_path, self._init_tables)
 
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.db_path, timeout=15.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=15000;")
-        try:
-            with conn:
-                yield conn
-        finally:
-            conn.close()
+    def _connect(self, *, write_immediate: bool = False) -> Iterator[sqlite3.Connection]:
+        from core.infra.sqlite import sqlite_connection
+
+        with sqlite_connection(self.db_path, timeout=15.0, write_immediate=write_immediate) as conn:
+            yield conn
 
     def _init_tables(self) -> None:
-        with self._connect() as conn:
-            conn.execute("PRAGMA journal_mode=WAL;")
+        from core.infra.sqlite import ensure_wal_mode
+
+        ensure_wal_mode(self.db_path, timeout=15.0)
+        with self._connect(write_immediate=True) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS macro_context_snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -453,6 +450,12 @@ class MacroLearningStore:
                     notes TEXT DEFAULT ''
                 );
             """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_macro_ts ON macro_context_snapshots(candle_timestamp DESC);"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_learning_sym_tf ON learning_history(symbol, timeframe, id DESC);"
+            )
 
     def save_macro_snapshot(
         self,

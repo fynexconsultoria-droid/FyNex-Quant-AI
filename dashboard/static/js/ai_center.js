@@ -81,14 +81,18 @@ export async function pollAiTrainStatus() {
       btn.textContent = st.running ? "⏳ Treinando..." : "🧠 Treinar IA Agora";
     }
 
+    if (st.running && !aiTrainPollTimer) {
+      aiTrainPollTimer = setInterval(pollAiTrainStatus, 2000);
+    }
+
     if (!st.running && aiTrainPollTimer) {
       clearInterval(aiTrainPollTimer);
       aiTrainPollTimer = null;
-      if (st.last_result) {
+      if (st.error) {
+        showToast(`❌ ${st.error}`, "error");
+      } else if (st.last_result) {
         showToast(`✅ Treinamento concluído! ${st.stage}`, "success");
         if (typeof hooks.onRefreshStatus === "function") hooks.onRefreshStatus();
-      } else if (st.error) {
-        showToast(`❌ ${st.error}`, "error");
       }
     }
 
@@ -220,8 +224,9 @@ export async function fetchAiEvolution() {
 
 export async function fetchAiErrorLessons() {
   try {
-    const sym = isActiveForex() ? "BTC/USDT" : state.activeSymbol;
-    const q = new URLSearchParams({ symbol: sym, timeframe: state.activeTimeframe, limit: "8" });
+    const sym = state.activeSymbol || "BTC/USDT";
+    const tf = isActiveForex() ? "1h" : state.activeTimeframe;
+    const q = new URLSearchParams({ symbol: sym, timeframe: tf, limit: "8" });
     const res = await fetch(`/api/ai/error-lessons?${q.toString()}`);
     if (!res.ok) return;
     const rep = await res.json();
@@ -260,11 +265,11 @@ export async function fetchAiErrorLessons() {
       } else {
         tbody.innerHTML = items
           .map((e) => {
-            const srcLabel = e.source === "TRADE_LOSS" ? "Trade (Prejuízo)" : "Previsão (Falso +)";
-            const metric =
-              e.source === "TRADE_LOSS"
-                ? `$${Number(e.pnl_usd || 0).toFixed(2)} (${Number(e.pnl_pct || 0).toFixed(2)}%)`
-                : `Prob. ${(Number(e.prob_up || 0) * 100).toFixed(1)}%`;
+            const isTradeLoss = e.source === "TRADE_LOSS" || e.source === "XTB_TRADE_LOSS";
+            const srcLabel = e.source === "XTB_TRADE_LOSS" ? "XTB (Prejuízo)" : isTradeLoss ? "Trade (Prejuízo)" : "Previsão (Falso +)";
+            const metric = isTradeLoss
+              ? `$${Number(e.pnl_usd || 0).toFixed(2)} (${Number(e.pnl_pct || 0).toFixed(2)}%)`
+              : `Prob. ${(Number(e.prob_up || 0) * 100).toFixed(1)}%`;
             return `
               <tr>
                 <td class="dim">${escapeHtml(e.created_at || "")}</td>

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, fields as dataclass_fields
 from typing import Optional
 
 from core.infra.sqlite import ensure_column
 from core.infra.utils import utc_now_str
 from core.trading.models import Position
+
+_POSITION_FIELD_NAMES = frozenset(f.name for f in dataclass_fields(Position))
 
 
 class PositionStore:
@@ -58,7 +60,7 @@ class PositionStore:
             ).fetchone()
         if not row:
             return None
-        fields = {k: row[k] for k in row.keys() if k != "updated_at"}
+        fields = {k: row[k] for k in row.keys() if k in _POSITION_FIELD_NAMES}
         return Position(**fields)
 
     def delete(self, symbol: str, timeframe: str, mode: str) -> None:

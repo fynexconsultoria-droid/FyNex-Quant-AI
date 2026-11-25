@@ -11,6 +11,8 @@ import base64
 import os
 import secrets
 import sys
+import threading
+from typing import Dict, Optional, Tuple
 from urllib.parse import urlparse
 
 from fastapi import HTTPException, Request
@@ -21,6 +23,8 @@ from core.logging_setup import BASE_DIR
 
 ENV_PATH = os.path.join(BASE_DIR, ".env")
 CSRF_TOKEN = secrets.token_urlsafe(32)
+_AUTH_ENV_CACHE_LOCK = threading.Lock()
+_AUTH_ENV_CACHE: Tuple[str, int, int, Dict[str, Optional[str]]] = ("", -1, -1, {})
 
 _SERVER_PORT = int(os.environ.get("PORT", "8000") or "8000")
 ALLOWED_HOSTS = {
@@ -77,7 +81,7 @@ def _register_cloud_hosts() -> None:
             continue
         _PUBLIC_HOSTS_REGISTERED = True
         ALLOWED_HOSTS.add(h)
-        host_only = h.split(":")[0]
+        host_only = _parse_host_header(h) or h.split(":")[0]
         ALLOWED_HOSTS.add(host_only)
         ALLOWED_ORIGIN_TUPLES.add(("https", host_only, None))
         ALLOWED_ORIGIN_TUPLES.add(("https", host_only, 443))
@@ -93,12 +97,31 @@ def _resolve_server_attr(name: str, default):
     return default
 
 
+def _read_env_cached(env_path: str) -> Dict[str, Optional[str]]:
+    """Lê `.env` com cache invalidado automaticamente por `(path, mtime_ns, size)`."""
+    global _AUTH_ENV_CACHE
+    if not env_path or not os.path.exists(env_path):
+        return {}
+    try:
+        st = os.stat(env_path)
+        sig = (env_path, st.st_mtime_ns, st.st_size)
+    except OSError:
+        return {}
+    with _AUTH_ENV_CACHE_LOCK:
+        if _AUTH_ENV_CACHE[:3] == sig:
+            return _AUTH_ENV_CACHE[3]
+    data = read_env_file(env_path)
+    with _AUTH_ENV_CACHE_LOCK:
+        _AUTH_ENV_CACHE = (sig[0], sig[1], sig[2], data)
+    return data
+
+
 def _get_auth_env(key: str, default: str = "") -> str:
     val = os.environ.get(key)
     if val is not None and val.strip():
         return val.strip()
     env_path = str(_resolve_server_attr("ENV_PATH", ENV_PATH))
-    env_data = read_env_file(env_path)
+    env_data = _read_env_cached(env_path)
     env_val = env_data.get(key)
     if env_val is not None and env_val.strip():
         return env_val.strip()
@@ -138,9 +161,12 @@ def _check_basic_auth(request: Request) -> bool:
     expected_pw = _get_auth_env("FYNEX_DASHBOARD_PASSWORD", "")
     bind_host = os.environ.get("HOST", "127.0.0.1").strip().lower()
     req_hostname = _parse_host_header((request.headers.get("host") or "").strip().lower())
+    client_host = ((request.client.host if request.client else "") or "").strip().lower()
     public_reg = bool(_resolve_server_attr("_PUBLIC_HOSTS_REGISTERED", _PUBLIC_HOSTS_REGISTERED))
+    is_non_local_client = bool(client_host) and client_host not in ("127.0.0.1", "::1", "localhost", "testclient")
     is_public_exposure = (
         public_reg
+        or is_non_local_client
         or (bind_host not in ("127.0.0.1", "localhost", "::1", ""))
         or (req_hostname != "" and not _is_loopback_host(req_hostname))
     )
@@ -153,7 +179,9 @@ def _check_basic_auth(request: Request) -> bool:
     try:
         decoded = base64.b64decode(auth.split(" ", 1)[1].strip()).decode("utf-8")
         user, _, pw = decoded.partition(":")
-        return secrets.compare_digest(user, expected_user) and secrets.compare_digest(pw, expected_pw)
+        user_ok = secrets.compare_digest(user, expected_user)
+        pw_ok = secrets.compare_digest(pw, expected_pw)
+        return user_ok and pw_ok
     except Exception:
         return False
 
@@ -179,10 +207,13 @@ def is_allowed_origin(origin: str) -> bool:
     return (parsed.scheme.lower(), (parsed.hostname or "").lower(), parsed.port) in ALLOWED_ORIGIN_TUPLES
 
 
-def _apply_security_headers(response):
+def _apply_security_headers(response, *, is_api: bool = False):
     response.headers["Content-Security-Policy"] = CSP_HEADER
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    if is_api and "Cache-Control" not in response.headers:
+        response.headers["Cache-Control"] = "no-store, max-age=0"
     return response
 
 
@@ -219,7 +250,7 @@ async def security_middleware(request: Request, call_next):
         )
 
     response = await call_next(request)
-    return _apply_security_headers(response)
+    return _apply_security_headers(response, is_api=request.url.path.startswith("/api/"))
 
 
 def require_csrf(request: Request) -> None:

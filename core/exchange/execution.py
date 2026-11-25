@@ -101,7 +101,8 @@ def quote_fee_from_order(order: Dict[str, Any], quote: str) -> float:
 
 def net_filled_quantity(order: Dict[str, Any], base: str, fallback_qty: float) -> float:
     """Quantidade realmente recebida = executado bruto - taxas cobradas no ativo base."""
-    filled = float(order.get("filled") or fallback_qty)
+    raw_filled = order.get("filled")
+    filled = float(fallback_qty) if raw_filled is None else float(raw_filled)
     return max(0.0, filled - base_fee_from_order(order, base))
 
 
@@ -315,21 +316,54 @@ def execute_spot_buy(
             order = exchange.create_market_buy_order(symbol, quantity, params={"newClientOrderId": cid})
         except (ccxt.NetworkError, ccxt.RequestTimeout) as net_err:
             logger.warning(f"⚠️ Timeout/rede na compra [{cid}]: {net_err}. Reconciliando na Binance...")
-            order = _bc_fn("reconcile_order_by_client_id", reconcile_order_by_client_id)(exchange, symbol, cid)
+            reconcile_fn = _bc_fn("reconcile_order_by_client_id", reconcile_order_by_client_id)
+            reconcile_net_err = False
+            try:
+                try:
+                    order = reconcile_fn(exchange, symbol, cid, raise_on_network_error=True)
+                except TypeError:
+                    order = reconcile_fn(exchange, symbol, cid)
+            except Exception as rec_err:
+                logger.warning(f"⚠️ Falha de rede ao reconciliar compra [{cid}]: {rec_err}")
+                order = None
+                reconcile_net_err = True
+            rec_status = str((order or {}).get("status", "")).lower()
+            is_open_unfilled = order is not None and rec_status in ("new", "open", "partially_filled", "pending_new")
             if order is None or float(order.get("filled") or 0.0) <= 0:
                 return {
                     "success": False,
                     "client_order_id": cid,
                     "reconciled": False,
-                    "ambiguous_network": order is None,
+                    "ambiguous_network": bool(order is None or reconcile_net_err or is_open_unfilled),
                     "message": f"Falha de rede na compra e ordem não confirmada na Binance: {net_err}",
                 }
             logger.info(f"✅ Compra [{cid}] confirmada via reconciliação na Binance (order_id={order.get('id')}).")
 
+        if not isinstance(order, dict):
+            return {"success": False, "client_order_id": cid, "message": "Resposta vazia da Binance na compra."}
+        raw_filled = order.get("filled")
+        order_status = str(order.get("status", "")).lower()
+        if (raw_filled is not None and float(raw_filled) <= 0.0) or (
+            order_status in ("canceled", "cancelled", "rejected", "expired") and float(raw_filled or 0.0) <= 0.0
+        ):
+            return {
+                "success": False,
+                "client_order_id": cid,
+                "order_id": str(order.get("id") or ""),
+                "message": f"Ordem de compra retornou sem execução (status={order_status or 'unknown'}, filled={raw_filled}).",
+            }
+
         exec_ms = round((time.perf_counter() - t_start) * 1000.0, 1)
-        gross_qty = float(order.get("filled") or quantity)
+        gross_qty = float(quantity) if raw_filled is None else float(raw_filled)
         net_qty = net_filled_quantity(order, base, quantity)
-        cost = float(order.get("cost") or calculated_cost)
+        if net_qty <= 0.0:
+            return {
+                "success": False,
+                "client_order_id": cid,
+                "message": f"Quantidade líquida comprada inválida ({net_qty}).",
+            }
+        raw_cost = order.get("cost")
+        cost = float(calculated_cost) if (raw_cost is None or float(raw_cost) <= 0.0) else float(raw_cost)
         avg_price = float(order.get("average") or (cost / gross_qty if gross_qty > 0 else ref_ask))
         slippage_pct = round(((avg_price - ref_ask) / ref_ask * 100.0), 4) if ref_ask > 0 else 0.0
 
@@ -405,19 +439,43 @@ def execute_spot_sell(
             order = exchange.create_market_sell_order(symbol, sell_qty, params={"newClientOrderId": cid})
         except (ccxt.NetworkError, ccxt.RequestTimeout) as net_err:
             logger.warning(f"⚠️ Timeout/rede na venda [{cid}]: {net_err}. Reconciliando na Binance...")
-            order = _bc_fn("reconcile_order_by_client_id", reconcile_order_by_client_id)(exchange, symbol, cid)
+            reconcile_fn = _bc_fn("reconcile_order_by_client_id", reconcile_order_by_client_id)
+            try:
+                try:
+                    order = reconcile_fn(exchange, symbol, cid, raise_on_network_error=True)
+                except TypeError:
+                    order = reconcile_fn(exchange, symbol, cid)
+            except Exception as rec_err:
+                logger.warning(f"⚠️ Falha de rede ao reconciliar venda [{cid}]: {rec_err}")
+                order = None
             if order is None or float(order.get("filled") or 0.0) <= 0:
                 return {
                     "success": False,
                     "client_order_id": cid,
                     "reconciled": False,
+                    "ambiguous_network": True,
                     "message": f"Falha de rede na venda e ordem não encontrada na Binance: {net_err}",
                 }
             logger.info(f"✅ Venda [{cid}] confirmada via reconciliação na Binance (order_id={order.get('id')}).")
 
+        if not isinstance(order, dict):
+            return {"success": False, "client_order_id": cid, "message": "Resposta vazia da Binance na venda."}
+        raw_filled = order.get("filled")
+        order_status = str(order.get("status", "")).lower()
+        if (raw_filled is not None and float(raw_filled) <= 0.0) or (
+            order_status in ("canceled", "cancelled", "rejected", "expired") and float(raw_filled or 0.0) <= 0.0
+        ):
+            return {
+                "success": False,
+                "client_order_id": cid,
+                "order_id": str(order.get("id") or ""),
+                "message": f"Ordem de venda retornou sem execução (status={order_status or 'unknown'}, filled={raw_filled}).",
+            }
+
         exec_ms = round((time.perf_counter() - t_start) * 1000.0, 1)
-        filled_qty = float(order.get("filled") or sell_qty)
-        cost = float(order.get("cost") or filled_qty * ref_bid)
+        filled_qty = float(sell_qty) if raw_filled is None else float(raw_filled)
+        raw_cost = order.get("cost")
+        cost = float(filled_qty * ref_bid) if (raw_cost is None or float(raw_cost) <= 0.0) else float(raw_cost)
         avg_price = float(order.get("average") or (cost / filled_qty if filled_qty > 0 else ref_bid))
         slippage_pct = round(((ref_bid - avg_price) / ref_bid * 100.0), 4) if ref_bid > 0 else 0.0
 
@@ -460,7 +518,24 @@ def execute_spot_sell_with_retry(
 
     for attempt in range(1, attempts + 1):
         if prev_cid is not None:
-            reconciled = reconcile_fn(exchange, symbol, prev_cid)
+            try:
+                try:
+                    reconciled = reconcile_fn(exchange, symbol, prev_cid, raise_on_network_error=True)
+                except TypeError:
+                    reconciled = reconcile_fn(exchange, symbol, prev_cid)
+            except Exception as rec_err:
+                logger.warning(
+                    f"⚠️ Erro de rede na reconciliação pré-retry da venda [{prev_cid}]: {rec_err}. "
+                    f"Evitando nova ordem duplicada."
+                )
+                last = {
+                    "success": False,
+                    "client_order_id": prev_cid,
+                    "message": f"Reconciliação pré-retry incerta: {rec_err}",
+                }
+                if attempt < attempts:
+                    _sleep(base_delay_seconds * (2 ** (attempt - 1)))
+                continue
             if reconciled and float(reconciled.get("filled") or 0.0) > 0:
                 filled_qty = float(reconciled["filled"])
                 avg_price = float(reconciled.get("average") or 0.0)
@@ -478,6 +553,11 @@ def execute_spot_sell_with_retry(
                     "execution_latency_ms": 0.0,
                     "raw_order": reconciled,
                 }
+            if reconciled is not None and str(reconciled.get("status", "")).lower() in ("new", "open", "pending_new"):
+                logger.warning(f"⏳ Venda anterior [{prev_cid}] ainda ativa na Binance; aguardando antes de reenviar.")
+                if attempt < attempts:
+                    _sleep(base_delay_seconds * (2 ** (attempt - 1)))
+                continue
         last = sell_fn(exchange, symbol, quantity)
         prev_cid = last.get("client_order_id")
         if last.get("success"):
@@ -519,9 +599,10 @@ def place_protective_oco(
             pass
 
         stop_limit_price = stop_price * (1.0 - stop_limit_offset_pct)
+        list_cid = generate_client_order_id("fynexoco")
         params = {
             "symbol": market["id"],
-            "listClientOrderId": generate_client_order_id("fynexoco"),
+            "listClientOrderId": list_cid,
             "side": "SELL",
             "quantity": qty,
             "aboveType": "LIMIT_MAKER",
@@ -531,26 +612,48 @@ def place_protective_oco(
             "belowPrice": exchange.price_to_precision(symbol, stop_limit_price),
             "belowTimeInForce": "GTC",
         }
-        response = call_with_retry(
-            lambda: exchange.privatePostOrderListOco(params),
-            exchange=exchange,
-            testnet=testnet,
-            max_attempts=1,
-            allow_mirror_failover=False,
-        )
-        list_id = str(response.get("orderListId"))
+        try:
+            response = call_with_retry(
+                lambda: exchange.privatePostOrderListOco(params),
+                exchange=exchange,
+                testnet=testnet,
+                max_attempts=1,
+                allow_mirror_failover=False,
+            )
+        except (ccxt.NetworkError, ccxt.RequestTimeout) as net_err:
+            logger.warning(f"⚠️ Timeout ao enviar OCO [{list_cid}]: {net_err}. Tentando reconciliar na Binance...")
+            try:
+                response = call_with_retry(
+                    lambda: exchange.privateGetOrderList({"origClientOrderId": list_cid}),
+                    exchange=exchange,
+                    testnet=testnet,
+                    max_attempts=2,
+                )
+            except Exception:
+                raise net_err
+
+        raw_list_id = response.get("orderListId") if isinstance(response, dict) else None
+        if raw_list_id is None or str(raw_list_id).strip() in ("", "None"):
+            return {"success": False, "message": f"Binance retornou orderListId inválido na OCO: {raw_list_id}"}
+        list_id = str(raw_list_id)
         logger.info(
             f"🛡️ OCO de proteção enviada (orderListId={list_id}) | TP {params['abovePrice']} | "
             f"Stop {params['belowStopPrice']} / Limite {params['belowPrice']} | Qtd {qty}"
         )
-        return {"success": True, "order_list_id": list_id, "raw": response}
+        return {
+            "success": True,
+            "order_list_id": list_id,
+            "take_profit_price": float(params["abovePrice"]),
+            "stop_price": float(params["belowStopPrice"]),
+            "raw": response,
+        }
     except Exception as e:
         logger.error(f"Falha ao enviar OCO de proteção: {e}")
         return {"success": False, "message": str(e)}
 
 
 def get_oco_status(exchange: ccxt.binance, symbol: str, order_list_id: str) -> Dict[str, Any]:
-    """Consulta o status de uma OCO na Binance."""
+    """Consulta o status de uma OCO na Binance (incluindo fills parciais e taxas)."""
     try:
         testnet = _is_testnet_exchange(exchange)
         response = call_with_retry(
@@ -560,8 +663,35 @@ def get_oco_status(exchange: ccxt.binance, symbol: str, order_list_id: str) -> D
             max_attempts=2,
         )
         list_status = response.get("listOrderStatus")
-        result: Dict[str, Any] = {"success": True, "list_status": list_status, "filled": False}
+        result: Dict[str, Any] = {
+            "success": True,
+            "list_status": list_status,
+            "filled": False,
+            "partially_filled": False,
+            "fee_usd": 0.0,
+        }
+        quote = _quote_asset(symbol) if "/" in symbol else "USDT"
+
         if list_status != "ALL_DONE":
+            # Detecta execução parcial em OCO ainda aberta sem quebrar chamadas existentes
+            for leg in response.get("orders", []):
+                try:
+                    order = call_with_retry(
+                        lambda lid=str(leg["orderId"]): exchange.fetch_order(lid, symbol),
+                        exchange=exchange,
+                        testnet=testnet,
+                        max_attempts=1,
+                    )
+                    fqty = float(order.get("filled") or 0.0)
+                    if fqty > 0:
+                        result["partially_filled"] = True
+                        result["partial_quantity"] = fqty
+                        result["order_id"] = str(order.get("id"))
+                        result["price"] = float(order.get("average") or order.get("price") or 0.0)
+                        result["fee_usd"] = quote_fee_from_order(order, quote)
+                        break
+                except Exception:
+                    continue
             return result
 
         for leg in response.get("orders", []):
@@ -571,13 +701,18 @@ def get_oco_status(exchange: ccxt.binance, symbol: str, order_list_id: str) -> D
                 testnet=testnet,
                 max_attempts=2,
             )
-            if float(order.get("filled") or 0.0) > 0:
+            fqty = float(order.get("filled") or 0.0)
+            if fqty > 0:
                 info_type = str(order.get("info", {}).get("type", "")).upper()
+                rem_qty = float(order.get("remaining") or 0.0)
                 result.update({
                     "filled": True,
+                    "partially_filled": rem_qty > 1e-12,
+                    "remaining": rem_qty,
                     "order_id": str(order.get("id")),
                     "price": float(order.get("average") or order.get("price") or 0.0),
-                    "quantity": float(order.get("filled") or 0.0),
+                    "quantity": fqty,
+                    "fee_usd": quote_fee_from_order(order, quote),
                     "reason": "TAKE_PROFIT" if info_type == "LIMIT_MAKER" else "STOP_LOSS",
                 })
                 break

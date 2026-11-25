@@ -299,6 +299,8 @@ def evaluate_model_on_dataset(
     tp_pct: float = 0.008,
     sl_pct: float = 0.005,
     confidence_threshold: float = 0.55,
+    fee_pct: float = PAPER_FEE_PCT,
+    slippage_pct: float = PAPER_SLIPPAGE_PCT,
 ) -> Dict[str, float]:
     """Avalia um modelo já treinado em um dataset (usado para comparar campeão vs desafiante)."""
     if df.empty or "Target" not in df.columns:
@@ -316,6 +318,7 @@ def evaluate_model_on_dataset(
     return _compute_validation_metrics(
         y, probs_up, preds,
         tp_pct=tp_pct, sl_pct=sl_pct, confidence_threshold=confidence_threshold,
+        fee_pct=fee_pct, slippage_pct=slippage_pct,
     )
 
 
@@ -330,6 +333,8 @@ def evaluate_walk_forward(
     model_type: str = "ensemble",
     calibrate_probabilities: bool = True,
     extra_sample_weights: Optional[np.ndarray] = None,
+    fee_pct: float = PAPER_FEE_PCT,
+    slippage_pct: float = PAPER_SLIPPAGE_PCT,
 ) -> Dict[str, float]:
     """Validação cruzada temporal com purge (`TimeSeriesSplit(gap=horizon_candles)`)."""
     X = df[feature_cols]
@@ -398,12 +403,16 @@ def evaluate_walk_forward(
         tp_pct=tp_pct,
         sl_pct=sl_pct,
         confidence_threshold=confidence_threshold,
+        fee_pct=fee_pct,
+        slippage_pct=slippage_pct,
     )
     opt_th, opt_pnl = optimize_confidence_threshold(
         all_y,
         all_p,
         tp_pct=tp_pct,
         sl_pct=sl_pct,
+        fee_pct=fee_pct,
+        slippage_pct=slippage_pct,
         default_threshold=confidence_threshold,
     )
     agg["optimal_threshold"] = opt_th
@@ -485,6 +494,8 @@ def train_model(
     model_type: str = "ensemble",
     run_walk_forward_eval: bool = True,
     extra_sample_weights: Optional[np.ndarray] = None,
+    fee_pct: float = PAPER_FEE_PCT,
+    slippage_pct: float = PAPER_SLIPPAGE_PCT,
 ) -> Tuple[Any, float]:
     """
     Treina/Retreina o classificador (`ensemble`, `hgb`, `et` ou `rf`) preservando a cronologia
@@ -541,6 +552,7 @@ def train_model(
             evaluate_model_on_dataset(
                 base_eval_model, df.iloc[split_index:], feature_cols,
                 tp_pct=tp_pct, sl_pct=sl_pct, confidence_threshold=confidence_threshold,
+                fee_pct=fee_pct, slippage_pct=slippage_pct,
             )
             if len(X_test) > 0
             else _empty_validation_metrics()
@@ -551,6 +563,8 @@ def train_model(
             model_type=model_type,
             calibrate_probabilities=calibrate_probabilities,
             extra_sample_weights=None,
+            fee_pct=fee_pct,
+            slippage_pct=slippage_pct,
         )
     else:
         holdout_m = _empty_validation_metrics()
@@ -599,7 +613,7 @@ def train_model(
         "optimal_threshold": float(optimal_threshold),
         "optimal_sim_pnl_pct": float(optimal_sim_pnl_pct),
         "top_features": top_features_list,
-        "log_loss": float(wf_metrics.get("log_loss", 0.693)),
+        "log_loss": float(src.get("log_loss", 0.693)),
         "folds": int(wf_metrics.get("folds", 0)),
         "samples": int(len(df)),
         "positive_rate": float(pos_rate),

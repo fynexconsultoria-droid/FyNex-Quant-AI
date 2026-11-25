@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
@@ -74,15 +75,24 @@ class RiskManager:
     def can_open(self, amount_usdt: float, unrealized_pnl_usd: float = 0.0) -> Tuple[bool, str]:
         if self.kill_switch_active():
             return False, f"Kill-switch ativo (arquivo '{self.kill_switch_path}' existe)."
-        if amount_usdt > self.max_trade_amount_usdt:
+        try:
+            amt = float(amount_usdt)
+            unr = float(unrealized_pnl_usd)
+        except (TypeError, ValueError):
+            return False, "Valor de ordem ou PnL flutuante inválido."
+        if not (math.isfinite(amt) and amt > 0.0):
+            return False, f"Valor por ordem inválido (${amount_usdt})."
+        if not math.isfinite(unr):
+            return False, "PnL flutuante inválido (NaN/Inf)."
+        if amt > self.max_trade_amount_usdt:
             return False, (
-                f"Valor por ordem ${amount_usdt:.2f} acima do máximo permitido "
+                f"Valor por ordem ${amt:.2f} acima do máximo permitido "
                 f"${self.max_trade_amount_usdt:.2f} (MAX_TRADE_AMOUNT_USDT)."
             )
         trades_today, pnl_today = self._today_stats()
         if trades_today >= self.max_trades_per_day:
             return False, f"Limite diário de trades atingido ({trades_today}/{self.max_trades_per_day})."
-        effective_pnl = pnl_today + min(0.0, float(unrealized_pnl_usd))
+        effective_pnl = pnl_today + min(0.0, unr)
         if effective_pnl <= -self.max_daily_loss_usdt:
             return False, (
                 f"Limite de perda diária atingido (PnL efetivo hoje ${effective_pnl:+.2f} | "

@@ -99,23 +99,23 @@ def evaluate_entry_safety(
         cb_still_active = (
             last_exit_elapsed is None
             or circuit_breaker_cooldown_seconds <= 0
-            or (0 <= last_exit_elapsed < circuit_breaker_cooldown_seconds)
+            or (last_exit_elapsed < circuit_breaker_cooldown_seconds)
         )
         if cb_still_active:
             rem_note = ""
             if last_exit_elapsed is not None and circuit_breaker_cooldown_seconds > 0:
-                rem_min = max(1, int((circuit_breaker_cooldown_seconds - last_exit_elapsed) / 60))
+                rem_min = max(1, int((circuit_breaker_cooldown_seconds - max(0.0, last_exit_elapsed)) / 60))
                 rem_note = f" ({rem_min} min restantes de resfriamento)"
             reasons.append(
                 f"Circuit breaker de caixa: {consecutive_losses} perdas seguidas — pausando entradas até estabilizar{rem_note}."
             )
 
-    # 8. Cooldown após Stop Loss
+    # 8. Cooldown após Stop Loss (defensivo mesmo sob ajuste retroativo de relógio)
     if last_trade and cooldown_seconds > 0 and last_exit_elapsed is not None:
         last_reason = str(last_trade.get("reason", "")).upper()
         last_pnl = _finite_float(last_trade.get("pnl_usd")) or 0.0
-        if ("STOP" in last_reason or last_pnl < 0) and (0 <= last_exit_elapsed < cooldown_seconds):
-            rem_min = max(1, int((cooldown_seconds - last_exit_elapsed) / 60))
+        if ("STOP" in last_reason or last_pnl < 0) and (last_exit_elapsed < cooldown_seconds):
+            rem_min = max(1, int((cooldown_seconds - max(0.0, last_exit_elapsed)) / 60))
             reasons.append(
                 f"Cooldown pós-Stop Loss ativo ({rem_min} min restante(s) para estabilização do mercado)."
             )
@@ -150,9 +150,12 @@ def compute_safe_position_size(
     base_f = _finite_float(base_amount_usdt)
     if base_f is None or base_f <= 0:
         base_f = max(10.0, _finite_float(min_order_usdt) or 10.0)
-    min_ord = _finite_float(min_order_usdt) or 10.0
-    daily_pnl_f = _finite_float(daily_pnl_usd) or 0.0
-    max_loss_f = _finite_float(max_daily_loss_usdt) or 20.0
+    min_ord_f = _finite_float(min_order_usdt)
+    min_ord = min_ord_f if min_ord_f is not None else 10.0
+    daily_pnl_val = _finite_float(daily_pnl_usd)
+    daily_pnl_f = daily_pnl_val if daily_pnl_val is not None else 0.0
+    max_loss_val = _finite_float(max_daily_loss_usdt)
+    max_loss_f = max_loss_val if max_loss_val is not None else 20.0
 
     mult = 1.0
     notes: List[str] = []
@@ -169,7 +172,7 @@ def compute_safe_position_size(
 
     # 2. Tendência fraca / Lateralização moderada (ADX < 18)
     adx = _finite_float(features_row.get("adx_14"))
-    if adx is not None and 0 < adx < 0.18:
+    if adx is not None and 0.0 <= adx < 0.18:
         mult *= 0.65
         notes.append(f"Mercado lateral/tendência fraca (ADX {adx*100:.1f} → 65%)")
 

@@ -86,65 +86,82 @@ def _query_status_metrics(
         return latest_candle, rolling_acc, trade_stats, paper_pnl_usd
 
     cursor = conn.cursor()
-    c_row = cursor.execute(
-        """
-        SELECT datetime_utc, close, open, high, low, volume, timestamp
-        FROM ohlcv_candles
-        WHERE symbol = ? AND timeframe = ?
-        ORDER BY timestamp DESC LIMIT 1
-        """,
-        (symbol, timeframe),
-    ).fetchone()
-    if c_row:
-        latest_candle = dict(c_row)
+    if table_exists(conn, "ohlcv_candles"):
+        try:
+            c_row = cursor.execute(
+                """
+                SELECT datetime_utc, close, open, high, low, volume, timestamp
+                FROM ohlcv_candles
+                WHERE symbol = ? AND timeframe = ?
+                ORDER BY timestamp DESC LIMIT 1
+                """,
+                (symbol, timeframe),
+            ).fetchone()
+            if c_row:
+                latest_candle = dict(c_row)
+        except sqlite3.OperationalError:
+            pass
 
-    p_rows = cursor.execute(
-        """
-        SELECT is_correct
-        FROM predictions
-        WHERE symbol = ? AND timeframe = ? AND is_correct IS NOT NULL
-        ORDER BY id DESC LIMIT 30
-        """,
-        (symbol, timeframe),
-    ).fetchall()
-    if p_rows:
-        total_eval = len(p_rows)
-        correct_eval = sum(1 for r in p_rows if r["is_correct"] == 1)
-        rolling_acc = {
-            "total": total_eval,
-            "correct": correct_eval,
-            "accuracy_pct": (correct_eval / total_eval * 100.0),
-        }
+    if table_exists(conn, "predictions"):
+        try:
+            p_rows = cursor.execute(
+                """
+                SELECT prediction, is_correct
+                FROM predictions
+                WHERE symbol = ? AND timeframe = ? AND is_correct IS NOT NULL
+                ORDER BY id DESC LIMIT 30
+                """,
+                (symbol, timeframe),
+            ).fetchall()
+            if p_rows:
+                total_eval = len(p_rows)
+                correct_eval = sum(1 for r in p_rows if r["is_correct"] == 1)
+                buy_rows = [r for r in p_rows if r["prediction"] == 1]
+                buy_total = len(buy_rows)
+                buy_hits = sum(1 for r in buy_rows if r["is_correct"] == 1)
+                rolling_acc = {
+                    "total": total_eval,
+                    "correct": correct_eval,
+                    "accuracy_pct": (correct_eval / total_eval * 100.0),
+                    "buy_total": buy_total,
+                    "buy_precision_pct": (buy_hits / buy_total * 100.0) if buy_total > 0 else None,
+                }
+        except sqlite3.OperationalError:
+            pass
 
-    t_row = cursor.execute(
-        """
-        SELECT COUNT(*) as total_trades,
-               SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
-               SUM(CASE WHEN pnl_pct <= 0 THEN 1 ELSE 0 END) as losses,
-               SUM(pnl_pct) as total_pnl_pct,
-               SUM(pnl_usd) as total_pnl_usd
-        FROM simulated_trades
-        WHERE symbol = ? AND timeframe = ?
-        """,
-        (symbol, timeframe),
-    ).fetchone()
-    if t_row and t_row["total_trades"]:
-        tot = t_row["total_trades"]
-        w = t_row["wins"] or 0
-        l = t_row["losses"] or 0
-        trade_stats = {
-            "total_trades": tot,
-            "wins": w,
-            "losses": l,
-            "win_rate": (w / tot * 100.0) if tot > 0 else 0.0,
-            "total_pnl_pct": t_row["total_pnl_pct"] or 0.0,
-            "total_pnl_usd": t_row["total_pnl_usd"] or 0.0,
-        }
+    if table_exists(conn, "simulated_trades"):
+        try:
+            t_row = cursor.execute(
+                """
+                SELECT COUNT(*) as total_trades,
+                       SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
+                       SUM(CASE WHEN pnl_pct <= 0 THEN 1 ELSE 0 END) as losses,
+                       SUM(pnl_pct) as total_pnl_pct,
+                       SUM(pnl_usd) as total_pnl_usd
+                FROM simulated_trades
+                WHERE symbol = ? AND timeframe = ?
+                """,
+                (symbol, timeframe),
+            ).fetchone()
+            if t_row and t_row["total_trades"]:
+                tot = t_row["total_trades"]
+                w = t_row["wins"] or 0
+                l = t_row["losses"] or 0
+                trade_stats = {
+                    "total_trades": tot,
+                    "wins": w,
+                    "losses": l,
+                    "win_rate": (w / tot * 100.0) if tot > 0 else 0.0,
+                    "total_pnl_pct": t_row["total_pnl_pct"] or 0.0,
+                    "total_pnl_usd": t_row["total_pnl_usd"] or 0.0,
+                }
 
-    p_row = cursor.execute(
-        "SELECT COALESCE(SUM(pnl_usd), 0.0) AS paper_pnl FROM simulated_trades WHERE mode = 'paper'"
-    ).fetchone()
-    paper_pnl_usd = float(p_row["paper_pnl"] or 0.0) if p_row else 0.0
+            p_row = cursor.execute(
+                "SELECT COALESCE(SUM(pnl_usd), 0.0) AS paper_pnl FROM simulated_trades WHERE mode = 'paper'"
+            ).fetchone()
+            paper_pnl_usd = float(p_row["paper_pnl"] or 0.0) if p_row else 0.0
+        except sqlite3.OperationalError:
+            pass
     return latest_candle, rolling_acc, trade_stats, paper_pnl_usd
 
 
@@ -262,25 +279,28 @@ def get_candles(
     db_path = str(_srv_attr("DB_PATH", DEFAULT_DB_PATH))
     candles = []
     with sqlite_readonly_optional(db_path) as conn:
-        if conn is not None:
-            rows = conn.execute(
-                """
-                SELECT timestamp, open, high, low, close, volume
-                FROM ohlcv_candles
-                WHERE symbol = ? AND timeframe = ?
-                ORDER BY timestamp DESC LIMIT ?
-                """,
-                (symbol, timeframe, limit),
-            ).fetchall()
-            for r in reversed(rows):
-                candles.append({
-                    "time": int(r["timestamp"] / 1000),
-                    "open": float(r["open"]),
-                    "high": float(r["high"]),
-                    "low": float(r["low"]),
-                    "close": float(r["close"]),
-                    "volume": float(r["volume"]),
-                })
+        if conn is not None and table_exists(conn, "ohlcv_candles"):
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT timestamp, open, high, low, close, volume
+                    FROM ohlcv_candles
+                    WHERE symbol = ? AND timeframe = ?
+                    ORDER BY timestamp DESC LIMIT ?
+                    """,
+                    (symbol, timeframe, limit),
+                ).fetchall()
+                for r in reversed(rows):
+                    candles.append({
+                        "time": int(r["timestamp"] / 1000),
+                        "open": float(r["open"]),
+                        "high": float(r["high"]),
+                        "low": float(r["low"]),
+                        "close": float(r["close"]),
+                        "volume": float(r["volume"]),
+                    })
+            except sqlite3.OperationalError:
+                pass
 
     if source == "auto":
         try:
@@ -311,19 +331,22 @@ def get_predictions(
     """Retorna as últimas previsões e seus status de validação."""
     db_path = str(_srv_attr("DB_PATH", DEFAULT_DB_PATH))
     with sqlite_readonly_optional(db_path) as conn:
-        if conn is None:
+        if conn is None or not table_exists(conn, "predictions"):
             return []
-        rows = conn.execute(
-            """
-            SELECT id, symbol, timeframe, predicted_at, model_version, prediction, prob_up, prob_down,
-                   entry_price, actual_close, actual_direction, is_correct
-            FROM predictions
-            WHERE symbol = ? AND timeframe = ?
-            ORDER BY id DESC LIMIT ?
-            """,
-            (symbol, timeframe, limit),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, symbol, timeframe, predicted_at, model_version, prediction, prob_up, prob_down,
+                       entry_price, actual_close, actual_direction, is_correct
+                FROM predictions
+                WHERE symbol = ? AND timeframe = ?
+                ORDER BY id DESC LIMIT ?
+                """,
+                (symbol, timeframe, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except sqlite3.OperationalError:
+            return []
 
 
 @router.get("/api/trades")
@@ -335,23 +358,26 @@ def get_trades(
     """Retorna histórico de operações executadas (filtrável por par e timeframe)."""
     db_path = str(_srv_attr("DB_PATH", DEFAULT_DB_PATH))
     with sqlite_readonly_optional(db_path) as conn:
-        if conn is None:
+        if conn is None or not table_exists(conn, "simulated_trades"):
             return []
-        clauses = []
-        params: list[Any] = []
-        if symbol:
-            clauses.append("symbol = ?")
-            params.append(symbol)
-        if timeframe:
-            clauses.append("timeframe = ?")
-            params.append(timeframe)
-        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        params.append(limit)
-        rows = conn.execute(
-            f"SELECT * FROM simulated_trades {where_sql} ORDER BY id DESC LIMIT ?",
-            tuple(params),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        try:
+            clauses = []
+            params: list[Any] = []
+            if symbol:
+                clauses.append("symbol = ?")
+                params.append(symbol)
+            if timeframe:
+                clauses.append("timeframe = ?")
+                params.append(timeframe)
+            where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            params.append(limit)
+            rows = conn.execute(
+                f"SELECT * FROM simulated_trades {where_sql} ORDER BY id DESC LIMIT ?",
+                tuple(params),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except sqlite3.OperationalError:
+            return []
 
 
 @router.get("/api/logs")
@@ -364,5 +390,5 @@ def get_recent_logs(lines: int = Query(default=50, ge=1, le=500)):
         return {"logs": ["Arquivo de log ainda não encontrado."]}
     try:
         return {"logs": tail_lines(target_log, max_lines=lines)}
-    except Exception as e:
-        return {"logs": [f"Erro ao ler log: {e}"]}
+    except Exception:
+        return {"logs": ["Erro interno ao ler arquivo de log."]}

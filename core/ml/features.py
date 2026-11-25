@@ -115,16 +115,20 @@ def build_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
     df["upper_wick_pct"] = ((df["high"] - body_top) / candle_range).fillna(0.0).clip(0.0, 1.0)
     df["lower_wick_pct"] = ((body_bot - df["low"]) / candle_range).fillna(0.0).clip(0.0, 1.0)
 
-    # 9. Sazonalidade intradiária cíclica
+    # 9. Sazonalidade intradiária cíclica (auto-detecta timestamps em segundos, ms ou strings ISO)
     if "timestamp" in df.columns:
         ts_col = df["timestamp"]
         if pd.api.types.is_datetime64_any_dtype(ts_col):
             hours = ts_col.dt.hour + ts_col.dt.minute / 60.0
         elif pd.api.types.is_numeric_dtype(ts_col):
-            ts_dt = pd.to_datetime(ts_col, unit="ms", errors="coerce")
+            num_ts = pd.to_numeric(ts_col, errors="coerce")
+            med_ts = float(num_ts.dropna().median()) if not num_ts.dropna().empty else 0.0
+            ts_unit = "s" if 0 < med_ts < 100_000_000_000 else "ms"
+            ts_dt = pd.to_datetime(num_ts, unit=ts_unit, errors="coerce")
             hours = (ts_dt.dt.hour + ts_dt.dt.minute / 60.0).fillna(0.0)
         else:
-            hours = pd.Series(0.0, index=df.index)
+            ts_dt = pd.to_datetime(ts_col, errors="coerce")
+            hours = (ts_dt.dt.hour + ts_dt.dt.minute / 60.0).fillna(0.0)
     else:
         hours = pd.Series(0.0, index=df.index)
     df["hour_sin"] = np.sin(2.0 * np.pi * hours / 24.0)

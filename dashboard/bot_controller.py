@@ -84,7 +84,10 @@ def is_bot_running(use_cache: bool = True) -> Tuple[bool, Optional[int]]:
             if "python" not in name:
                 continue
             cmdline = proc.info.get("cmdline") or []
-            if any(os.path.basename(str(arg).strip('"').strip("'")).lower() == "trading_bot.py" for arg in cmdline):
+            if any(
+                os.path.basename(str(arg).strip('"').strip("'")).lower() in ("trading_bot.py", "supervisor.py")
+                for arg in cmdline
+            ):
                 found_pid = proc.info["pid"]
                 break
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
@@ -164,16 +167,20 @@ def start_bot_process(
             if trade_amount:
                 cmd.extend(["--trade-amount", str(trade_amount)])
 
-            creation_flags = (0x00000008 | 0x08000000) if os.name == "nt" else 0
-            proc = subprocess.Popen(
-                cmd,
-                cwd=BASE_DIR,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=creation_flags,
-                close_fds=True,
-            )
+            popen_kwargs: Dict[str, Any] = {
+                "cwd": BASE_DIR,
+                "stdin": subprocess.DEVNULL,
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+                "close_fds": True,
+            }
+            if os.name == "nt":
+                popen_kwargs["creationflags"] = 0x00000008 | 0x08000000
+            else:
+                popen_kwargs["start_new_session"] = True
+            proc = subprocess.Popen(cmd, **popen_kwargs)
+            # Evita processos zumbis (<defunct>) em sistemas POSIX recolhendo o exit code em daemon
+            threading.Thread(target=proc.wait, daemon=True).start()
             _LAST_BOT_START_MONO = _get_time_mod().monotonic()
             invalidate_bot_status_cache()
             return {
@@ -186,48 +193,60 @@ def start_bot_process(
 
 
 def stop_bot_process() -> Dict[str, Any]:
-    """Sinaliza parada limpa via `bot.stop`, aguardando até 45s e protegendo `order_in_flight == 1`."""
-    invalidate_bot_status_cache()
-    running, pid = _check_is_bot_running(use_cache=False)
-    if not running or not pid:
-        return {"status": "not_running", "message": "O robô não está em execução."}
-
-    p: Optional[psutil.Process] = None
-    orig_create_time: Optional[float] = None
+    """Sinaliza parada limpa via `bot.stop`, aguardando saída ordenada e protegendo `order_in_flight == 1`."""
+    if not _BOT_START_LOCK.acquire(blocking=False):
+        return {"status": "stopping", "message": "Operação de controle do robô já está em andamento."}
     try:
-        request_bot_stop(STOP_SIGNAL_PATH)
-        p = psutil.Process(pid)
-        orig_create_time = p.create_time()
-        for _ in range(180):
-            if not p.is_running():
-                invalidate_bot_status_cache()
-                return {"status": "stopped", "message": f"Robô (PID {pid}) encerrado de forma limpa."}
-            time.sleep(0.25)
-
-        if is_order_in_flight():
-            return {
-                "status": "order_in_flight",
-                "message": "Há uma ordem em andamento na exchange. A parada limpa foi solicitada e aguardará a conclusão.",
-            }
-
-        if is_pid_alive_bot(pid, expected_create_time=orig_create_time):
-            p.terminate()
-            p.wait(timeout=3.0)
         invalidate_bot_status_cache()
-        return {"status": "stopped", "message": f"Robô (PID {pid}) encerrado com sucesso."}
-    except psutil.NoSuchProcess:
-        invalidate_bot_status_cache()
-        return {"status": "stopped", "message": f"Robô (PID {pid}) encerrado com sucesso."}
-    except Exception:
-        if is_order_in_flight():
-            return {
-                "status": "order_in_flight",
-                "message": "Ordem em andamento; encerramento forçado abortado por segurança.",
-            }
+        running, pid = _check_is_bot_running(use_cache=False)
+        if not running or not pid:
+            return {"status": "not_running", "message": "O robô não está em execução."}
+
+        p: Optional[psutil.Process] = None
+        orig_create_time: Optional[float] = None
         try:
-            if p is not None and is_pid_alive_bot(pid, expected_create_time=orig_create_time):
-                p.kill()
+            request_bot_stop(STOP_SIGNAL_PATH)
+            p = psutil.Process(pid)
+            orig_create_time = p.create_time()
+            for _ in range(180):
+                if not p.is_running():
+                    invalidate_bot_status_cache()
+                    return {"status": "stopped", "message": f"Robô (PID {pid}) encerrado de forma limpa."}
+                time.sleep(0.25)
+
+            if is_order_in_flight():
+                return {
+                    "status": "order_in_flight",
+                    "message": "Há uma ordem em andamento na exchange. A parada limpa foi solicitada e aguardará a conclusão.",
+                }
+
+            # Regrava bot.stop antes de forçar encerramento para evitar respawn pelo supervisor.py
+            request_bot_stop(STOP_SIGNAL_PATH)
+            if is_pid_alive_bot(pid, expected_create_time=orig_create_time):
+                p.terminate()
+                p.wait(timeout=3.0)
             invalidate_bot_status_cache()
-            return {"status": "killed", "message": f"Processo forçado a fechar (PID {pid})."}
+            return {"status": "stopped", "message": f"Robô (PID {pid}) encerrado com sucesso."}
+        except psutil.NoSuchProcess:
+            invalidate_bot_status_cache()
+            return {"status": "stopped", "message": f"Robô (PID {pid}) encerrado com sucesso."}
         except Exception:
-            raise HTTPException(status_code=500, detail="Falha ao parar o processo do robô.")
+            if is_order_in_flight():
+                return {
+                    "status": "order_in_flight",
+                    "message": "Ordem em andamento; encerramento forçado abortado por segurança.",
+                }
+            try:
+                request_bot_stop(STOP_SIGNAL_PATH)
+                if p is not None and is_pid_alive_bot(pid, expected_create_time=orig_create_time):
+                    p.kill()
+                    try:
+                        p.wait(timeout=2.0)
+                    except Exception:
+                        pass
+                invalidate_bot_status_cache()
+                return {"status": "killed", "message": f"Processo forçado a fechar (PID {pid})."}
+            except Exception:
+                raise HTTPException(status_code=500, detail="Falha ao parar o processo do robô.")
+    finally:
+        _BOT_START_LOCK.release()

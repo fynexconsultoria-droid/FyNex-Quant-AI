@@ -472,32 +472,17 @@ class TradingBotRunner:
                 refit_full=False,
                 extra_sample_weights=hard_weights,
             )
-            eval_slice = retrain_dataset.iloc[int(len(retrain_dataset) * 0.8):]
+            # Compara Campeão vs Desafiante estritamente em métricas walk-forward OUT-OF-SAMPLE
+            # (evita viés in-sample onde o campeão refitado em 100% já treinou sobre 95% do eval_slice)
             with self.model_lock:
-                cur_champ = self.model
                 cur_champ_metrics = self.champion_metrics
                 cur_ver = self.model_version
 
-            if cur_champ is not None and len(eval_slice) >= 20:
-                champ_eval = evaluate_model_on_dataset(
-                    cur_champ, eval_slice, f_cols,
-                    tp_pct=self.take_profit_pct, sl_pct=self.stop_loss_pct,
-                    confidence_threshold=self.confidence_threshold,
-                )
-                chal_eval = evaluate_model_on_dataset(
-                    challenger_oos, eval_slice, f_cols,
-                    tp_pct=self.take_profit_pct, sl_pct=self.stop_loss_pct,
-                    confidence_threshold=self.confidence_threshold,
-                )
-            else:
-                champ_eval = cur_champ_metrics
-                chal_eval = getattr(
-                    challenger_oos, "validation_metrics_",
-                    {"accuracy": new_acc, "precision_buy": new_acc},
-                )
-
-            chal_metrics = getattr(challenger_oos, "validation_metrics_", chal_eval)
-            promoted = should_promote_challenger(chal_eval, champ_eval)
+            chal_metrics = getattr(
+                challenger_oos, "validation_metrics_",
+                {"accuracy": new_acc, "precision_buy": new_acc},
+            )
+            promoted = should_promote_challenger(chal_metrics, cur_champ_metrics)
             if promoted:
                 challenger_final, final_acc = train_model(
                     retrain_dataset,
@@ -899,12 +884,13 @@ class TradingBotRunner:
         final_amount = cfg["amount"]
         final_testnet = cfg["testnet"]
 
-        consume_stop_signal()
         self._install_shutdown_handlers()
         if not acquire_single_instance_lock(self.symbol, self.timeframe, self.final_mode):
             other_pid = get_running_bot_pid()
             logger.error(f"⛔ Já existe uma instância do robô em execução (PID {other_pid}). Abortando nova instância.")
             return
+        # Só consome bot.stop APÓS adquirir o lock exclusivo (nunca engole sinal de parada de outra instância ativa)
+        consume_stop_signal()
 
         exit_code = 0
         try:

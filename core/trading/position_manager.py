@@ -97,6 +97,7 @@ class PositionManager:
         exit_order_id: str = "",
         quantity: Optional[float] = None,
         fee_usd: float = 0.0,
+        clear_position: bool = True,
     ) -> Dict[str, Any]:
         pos = self.position
         assert pos is not None
@@ -116,21 +117,49 @@ class PositionManager:
             pnl_pct = (pnl_usd / gross_entry_cost) * 100.0 if gross_entry_cost > 0 else 0.0
             recorded_exit_price = exit_price
 
-        self.db.record_trade(
-            self.symbol,
-            self.timeframe,
-            pos.model_version,
-            pos.entry_time,
-            pos.entry_price,
-            utc_now_str(),
-            recorded_exit_price,
-            reason,
-            pnl_pct,
-            pnl_usd,
-            mode=self.mode,
-            order_id=exit_order_id or pos.order_id,
-            quantity=qty,
-        )
+        exit_time_str = utc_now_str()
+        final_order_id = exit_order_id or pos.order_id
+        # Transação atômica: grava trade e remove/atualiza posição aberta ANTES de alertas/rede externa
+        if clear_position and hasattr(self.db, "_get_connection"):
+            with self.db._get_connection() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO simulated_trades
+                    (symbol, timeframe, model_version, entry_time, entry_price, exit_time, exit_price,
+                     reason, pnl_pct, pnl_usd, mode, order_id, quantity)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        self.symbol, self.timeframe, pos.model_version, pos.entry_time, pos.entry_price,
+                        exit_time_str, recorded_exit_price, reason, pnl_pct, pnl_usd,
+                        self.mode, final_order_id, qty,
+                    ),
+                )
+                conn.execute(
+                    "DELETE FROM open_positions WHERE symbol = ? AND timeframe = ? AND mode = ?",
+                    (self.symbol, self.timeframe, self.mode),
+                )
+                conn.commit()
+            self.position = None
+            self.consecutive_sell_failures = 0
+        else:
+            self.db.record_trade(
+                self.symbol,
+                self.timeframe,
+                pos.model_version,
+                pos.entry_time,
+                pos.entry_price,
+                exit_time_str,
+                recorded_exit_price,
+                reason,
+                pnl_pct,
+                pnl_usd,
+                mode=self.mode,
+                order_id=final_order_id,
+                quantity=qty,
+            )
+            if clear_position:
+                self._clear()
 
         lesson_suffix = ""
         if pnl_usd < 0 and getattr(self.db, "db_path", None):
@@ -176,7 +205,6 @@ class PositionManager:
         )
         logger.warning(msg.replace("\n", " | "))
         alerts.send_alert(msg, level="TRADE_EXIT")
-        self._clear()
         return {"pnl_pct": pnl_pct, "pnl_usd": pnl_usd}
 
     def restore(self) -> None:
@@ -212,12 +240,23 @@ class PositionManager:
                 base = self.symbol.split("/")[0]
                 net_qty = binance_client.net_filled_quantity(reconciled, base, float(reconciled["filled"]))
                 avg_price = float(reconciled.get("average") or pos.entry_price)
+                # Preserva percentuais dinâmicos (ATR + error_learning) gravados na ordem PENDING
+                dyn_sl_pct = (
+                    (pos.entry_price - pos.sl_price) / pos.entry_price
+                    if pos.entry_price > 0 and 0 < pos.sl_price < pos.entry_price
+                    else self.stop_loss_pct
+                )
+                dyn_tp_pct = (
+                    (pos.tp_price - pos.entry_price) / pos.entry_price
+                    if pos.entry_price > 0 and pos.tp_price > pos.entry_price
+                    else self.take_profit_pct
+                )
                 old_cid = pos.order_id
                 pos.order_id = str(reconciled.get("id") or pos.order_id)
                 pos.entry_price = avg_price
                 pos.quantity = net_qty
-                pos.sl_price = avg_price * (1.0 - self.stop_loss_pct)
-                pos.tp_price = avg_price * (1.0 + self.take_profit_pct)
+                pos.sl_price = avg_price * (1.0 - dyn_sl_pct)
+                pos.tp_price = avg_price * (1.0 + dyn_tp_pct)
                 pos.status = "OPEN"
                 self._persist()
                 if getattr(self.db, "db_path", None):
@@ -247,10 +286,25 @@ class PositionManager:
         if pos.oco_list_id:
             status = binance_client.get_oco_status(self.exchange, self.symbol, pos.oco_list_id)
             if status.get("success") and status.get("filled"):
+                filled_qty = float(status.get("quantity") or pos.quantity)
+                rem_qty = max(0.0, pos.quantity - filled_qty)
+                is_partial = bool(status.get("partially_filled")) and rem_qty > pos.quantity * 0.02
                 logger.warning("   A OCO de proteção foi executada enquanto o robô estava offline.")
-                self._record_exit(status["price"], status["reason"], status["order_id"], status["quantity"])
-                return
-            if status.get("success") and status.get("list_status") != "EXECUTING":
+                self._record_exit(
+                    status["price"],
+                    status["reason"],
+                    status["order_id"],
+                    filled_qty,
+                    fee_usd=float(status.get("fee_usd") or 0.0),
+                    clear_position=not is_partial,
+                )
+                if is_partial:
+                    pos.quantity = rem_qty
+                    pos.oco_list_id = ""
+                    self._persist()
+                else:
+                    return
+            elif status.get("success") and status.get("list_status") != "EXECUTING":
                 pos.oco_list_id = ""
                 self._persist()
 
@@ -601,7 +655,23 @@ class PositionManager:
             status = binance_client.get_oco_status(self.exchange, self.symbol, pos.oco_list_id)
             if status.get("success"):
                 if status.get("filled"):
-                    self._record_exit(status["price"], status["reason"], status["order_id"], status["quantity"])
+                    filled_qty = float(status.get("quantity") or pos.quantity)
+                    rem_qty = max(0.0, pos.quantity - filled_qty)
+                    is_partial = bool(status.get("partially_filled")) and rem_qty > pos.quantity * 0.02
+                    self._record_exit(
+                        status["price"],
+                        status["reason"],
+                        status["order_id"],
+                        filled_qty,
+                        fee_usd=float(status.get("fee_usd") or 0.0),
+                        clear_position=not is_partial,
+                    )
+                    if is_partial:
+                        pos.quantity = rem_qty
+                        pos.oco_list_id = ""
+                        self._persist()
+                        if self.use_exchange_oco:
+                            self._place_oco()
                     return
                 if status.get("list_status") != "EXECUTING":
                     logger.warning(
@@ -627,14 +697,21 @@ class PositionManager:
                 logger.warning(f"   Falha ao consultar OCO: {status.get('message')}")
                 return
 
-        if self._apply_profit_protection(high_check, current_price):
-            return
-
+        # Avalia SL/TP com o stop vigente ANTES de subir o stop (evita look-ahead intra-candle com pavio passado)
         if low_check <= pos.sl_price:
             exit_reason = "TRAILING_PROFIT" if pos.sl_price > pos.entry_price else "STOP_LOSS"
             self.close(exit_reason, min(current_price, pos.sl_price))
-        elif high_check >= pos.tp_price:
-            self.close("TAKE_PROFIT", max(current_price, pos.tp_price))
+            return
+        if high_check >= pos.tp_price:
+            self.close("TAKE_PROFIT", pos.tp_price)
+            return
+
+        if self._apply_profit_protection(high_check, current_price):
+            return
+
+        if current_price <= pos.sl_price:
+            exit_reason = "TRAILING_PROFIT" if pos.sl_price > pos.entry_price else "STOP_LOSS"
+            self.close(exit_reason, min(current_price, pos.sl_price))
         elif self._is_time_barrier_expired(pos, now_utc=now_utc):
             self.close("TIME_BARRIER", current_price)
 

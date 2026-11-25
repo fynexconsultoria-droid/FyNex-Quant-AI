@@ -46,11 +46,19 @@ def compute_profit_protection_stop(
 
     progress = (high_check - entry_price) / tp_dist
     new_sl = current_sl
-    be_sl = entry_price * (1.0 + breakeven_buffer_pct)
+    be_sl = min(entry_price * (1.0 + breakeven_buffer_pct), tp_price * 0.999)
+    eff_clearance = oco_clearance_pct if is_real_with_oco else price_clearance_pct
+    max_safe_sl = current_price * (1.0 - eff_clearance)
 
     if progress >= trailing_trigger:
-        trail_sl = entry_price + (high_check - entry_price) * trailing_lock_ratio
-        new_sl = max(new_sl, be_sl, trail_sl)
+        trail_sl = min(entry_price + (high_check - entry_price) * trailing_lock_ratio, tp_price * 0.999)
+        if trail_sl < max_safe_sl:
+            new_sl = max(new_sl, be_sl, trail_sl)
+        elif be_sl < max_safe_sl:
+            # Se o preço recuou após um pico impedindo trailing, ainda garante breakeven se seguro
+            new_sl = max(new_sl, be_sl)
+        else:
+            return ProfitProtectionDecision(False, current_sl, progress)
     elif progress >= breakeven_trigger:
         new_sl = max(new_sl, be_sl)
 

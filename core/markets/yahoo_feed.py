@@ -202,14 +202,17 @@ def fetch_forex_candles(
         if t_int in seen_times:
             continue
         seen_times.add(t_int)
+        o_f, h_f, l_f, c_f = float(o) * scale, float(h) * scale, float(l) * scale, float(c) * scale
+        if not (c_f > 0 and h_f >= l_f):
+            continue
         v = float(volumes[i]) if i < len(volumes) and volumes[i] is not None else 0.0
         candles.append({
             "time": t_int,
-            "open": float(o) * scale,
-            "high": float(h) * scale,
-            "low": float(l) * scale,
-            "close": float(c) * scale,
-            "volume": v,
+            "open": o_f,
+            "high": h_f,
+            "low": l_f,
+            "close": c_f,
+            "volume": max(0.0, v),
         })
 
     candles.sort(key=lambda x: x["time"])

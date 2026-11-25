@@ -95,7 +95,12 @@ function syncActiveAssetUI() {
   }
   if (levSel) {
     const targetLev = isGlobal ? Math.min(30, meta.max_leverage || 20) : Math.min(10, meta.max_leverage || 10);
-    levSel.value = String(targetLev);
+    const validOpts = Array.from(levSel.options)
+      .map((o) => Number(o.value))
+      .filter((v) => Number.isFinite(v) && v > 0)
+      .sort((a, b) => a - b);
+    const chosen = validOpts.filter((v) => v <= targetLev).pop() || validOpts[0] || 10;
+    levSel.value = String(chosen);
   }
   updateXtbMarginEstimate();
 }
@@ -105,6 +110,7 @@ async function onSymbolChange(newSym) {
   const sel = document.getElementById("symbolSelect");
   if (sel && sel.value !== state.activeSymbol) sel.value = state.activeSymbol;
 
+  disconnectLiveMarketStream();
   state.lastKnownPrice = 0;
   state.currentBidPrice = 0;
   state.currentAskPrice = 0;
@@ -121,6 +127,7 @@ async function onSymbolChange(newSym) {
 
 async function onTimeframeChange(newTf) {
   state.activeTimeframe = newTf || "1m";
+  disconnectLiveMarketStream();
   state.chartInitializedWithData = false;
   state.loadedCandles = [];
   clearPositionPriceLines();

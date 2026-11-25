@@ -243,17 +243,20 @@ export function connectLiveMarketStream() {
     };
 
     ws.onerror = () => {
+      if (ws !== state.liveWs) return;
       state.liveWsConnected = false;
       setLiveBadgeState("reconnecting");
     };
 
     ws.onclose = () => {
+      if (ws !== state.liveWs) return;
       state.liveWsConnected = false;
       if (state.liveWsWatchdogTimer) {
         clearInterval(state.liveWsWatchdogTimer);
         state.liveWsWatchdogTimer = null;
       }
       setLiveBadgeState("reconnecting");
+      if (document.hidden) return;
       state.liveWsReconnectAttempts += 1;
       state.liveWsEndpointIndex += 1;
       const delayMs = Math.min(15000, 1000 * Math.pow(2, Math.min(state.liveWsReconnectAttempts - 1, 4)));
