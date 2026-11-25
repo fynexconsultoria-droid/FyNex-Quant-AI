@@ -137,6 +137,17 @@
   border-radius: 4px;
 }
 
+.wa-guide-banner a {
+  color: #38bdf8;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.wa-guide-banner a:hover {
+  color: #7dd3fc;
+}
+
 .copilot-wa-grid {
   display: grid;
   grid-template-columns: 1fr 1fr 140px auto auto auto;

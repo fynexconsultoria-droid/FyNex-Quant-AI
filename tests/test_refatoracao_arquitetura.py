@@ -174,3 +174,116 @@ def test_frontend_es_modules_and_css_manifest_integrity():
     assert len(imported_css) == 7
     for fname in imported_css:
         assert os.path.exists(os.path.join(static_dir, "css", fname)), f"Módulo CSS ausente: {fname}"
+
+
+def test_forex_anti_correlation_sl_cooldown_and_xtb_breakeven(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from core import forex_ai_trader, forex_market
+
+    # 1. Classificação de exposição ao Dólar (anti-correlação)
+    assert forex_ai_trader._usd_exposure_direction("USD/JPY", "BUY") == "LONG_USD"
+    assert forex_ai_trader._usd_exposure_direction("USD/CHF", "BUY") == "LONG_USD"
+    assert forex_ai_trader._usd_exposure_direction("GBP/USD", "SELL") == "LONG_USD"
+    assert forex_ai_trader._usd_exposure_direction("EUR/USD", "BUY") == "SHORT_USD"
+    assert forex_ai_trader._usd_exposure_direction("US500/USD", "BUY") is None
+
+    # 2. Cooldown pós-Stop Loss bloqueia reentrada no mesmo par por 4h
+    trader = forex_ai_trader.ForexAITrader(db_path=str(tmp_path / "fx_cd.db"), sl_cooldown_hours=4.0)
+    now = datetime(2026, 11, 24, 15, 0, 0, tzinfo=timezone.utc)
+    recent_1h = [{"symbol": "USD/CHF", "reason": "STOP_LOSS", "pnl_usd": -33.5, "closed_at": (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")}]
+    recent_5h = [{"symbol": "USD/CHF", "reason": "STOP_LOSS", "pnl_usd": -33.5, "closed_at": (now - timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")}]
+    assert trader._is_symbol_in_sl_cooldown("USD/CHF", recent_1h, now) is True
+    assert trader._is_symbol_in_sl_cooldown("USD/CHF", recent_5h, now) is False
+
+    # 3. Proteção automática de Breakeven na mesa XTB em >= 60% do alvo TP
+    store = forex_market.XTBDeskStore(db_path=str(tmp_path / "xtb_be.db"))
+    pos = store.open_position(
+        symbol="EUR/USD", side="BUY", lots=0.10, leverage=20,
+        sl_price=1.0900, tp_price=1.1100,
+        quote_override={"price": 1.1000, "bid": 1.0999, "ask": 1.1000},
+    )
+    # Progresso 70% até o TP (1.1070) -> deve elevar SL automaticamente para Breakeven (> 1.1000)
+    snap = store.get_account_snapshot(live_prices={"EUR/USD": {"price": 1.1070, "bid": 1.1070, "ask": 1.1071}})
+    assert len(snap["open_positions"]) == 1
+    assert snap["open_positions"][0]["sl_price"] > 1.1000
+    assert snap["open_positions"][0]["sl_price"] < 1.1070
+
+
+def test_forex_weekend_history_training_and_ml_confluence(tmp_path):
+    import numpy as np
+    import pandas as pd
+    import train_ai
+    from core import forex_ai_trader
+    from core.market_data import prepare_training_history
+
+    # Cria 260 velas de 1h com uma lacuna de fim de semana (50h) no meio
+    ts_list = []
+    t = 1_700_000_000_000
+    for i in range(260):
+        if i == 120:
+            t += 50 * 3600 * 1000  # salto de fim de semana
+        ts_list.append(t)
+        t += 3600 * 1000
+
+    rng = np.random.default_rng(123)
+    rets = rng.normal(0.0002, 0.0045, size=260)
+    closes = 2600.0 * np.cumprod(1.0 + rets)
+    highs = closes * (1.0 + np.abs(rng.normal(0.003, 0.002, size=260)))
+    lows = closes * (1.0 - np.abs(rng.normal(0.003, 0.002, size=260)))
+    opens = np.roll(closes, 1)
+    opens[0] = closes[0]
+    df = pd.DataFrame({
+        "timestamp": pd.to_datetime(ts_list, unit="ms"),
+        "open": opens,
+        "high": highs,
+        "low": lows,
+        "close": closes,
+        "volume": rng.uniform(100.0, 500.0, size=260),
+    })
+
+    # Com allow_weekend_gaps=True, preserva todas as 260 velas através do fim de semana
+    cleaned = prepare_training_history(df, "1h", allow_weekend_gaps=True)
+    assert len(cleaned) == 260
+
+    # Treina modelo ML para XAU/USD com sucesso
+    summary = train_ai.train_and_select_best_model(
+        df,
+        symbol="XAU/USD",
+        timeframe="1h",
+        candidates=("rf", "et"),
+        models_dir=str(tmp_path / "fx_models"),
+        save_winner=True,
+        db_path=str(tmp_path / "fx_train.db"),
+    )
+    assert summary["winner"] is not None
+    assert summary["candles_used"] == 260
+    assert os.path.exists(summary["saved_path"])
+
+    # Confluência ML em evaluate_forex_opportunity: modelo bullish reforça BUY
+    class _FakeBullModel:
+        classes_ = np.array([0, 1])
+
+        def predict_proba(self, X):
+            return np.tile(np.array([[0.20, 0.80]]), (len(X), 1))
+
+    up_closes = []
+    px = 1.0700
+    for i in range(60):
+        px += 0.0006 if (i % 2 == 0) else -0.0004
+        up_closes.append(round(px, 5))
+    up_df = pd.DataFrame({
+        "timestamp": pd.to_datetime([1_700_000_000 + i * 3600 for i in range(60)], unit="s"),
+        "open": [c - 0.0002 for c in up_closes],
+        "high": [c + 0.0006 for c in up_closes],
+        "low": [c - 0.0005 for c in up_closes],
+        "close": up_closes,
+        "volume": [1000.0] * 60,
+    })
+    opp_plain = forex_ai_trader.evaluate_forex_opportunity("EUR/USD", up_df, macro_snapshot={"dxy_change_pct": -0.35})
+    opp_ml = forex_ai_trader.evaluate_forex_opportunity(
+        "EUR/USD", up_df, macro_snapshot={"dxy_change_pct": -0.35}, ml_model=_FakeBullModel()
+    )
+    assert opp_plain is not None and opp_ml is not None
+    assert opp_ml["ml_active"] is True
+    assert opp_ml["ml_prob_up"] == pytest.approx(0.80)
+    assert "ML BUY" in opp_ml["reason"]

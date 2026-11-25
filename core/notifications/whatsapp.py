@@ -25,8 +25,10 @@ logger = logging.getLogger("QuantTradingBot")
 
 DEFAULT_ENV_PATH = os.path.join(BASE_DIR, ".env")
 CALLMEBOT_API_URL = "https://api.callmebot.com/whatsapp.php"
-CALLMEBOT_ACTIVATION_NUMBER = "+34 644 71 98 39"
+CALLMEBOT_ACTIVATION_NUMBER = "+34 623 78 64 49"
 CALLMEBOT_ACTIVATION_TEXT = "I allow callmebot to send me messages"
+CALLMEBOT_WA_LINK = "https://wa.me/34623786449?text=I%20allow%20callmebot%20to%20send%20me%20messages"
+CALLMEBOT_GUIDE_URL = "https://www.callmebot.com/blog/free-api-whatsapp-messages/"
 
 _PHONE_VALID_RE = re.compile(r"^\+[1-9]\d{9,14}$")
 _APIKEY_VALID_RE = re.compile(r"^[A-Za-z0-9_-]{4,64}$")
@@ -147,6 +149,8 @@ def get_whatsapp_config(env_path: Optional[str] = None) -> Dict[str, Any]:
         "daily_report_hour": daily_hour,
         "activation_number": CALLMEBOT_ACTIVATION_NUMBER,
         "activation_text": CALLMEBOT_ACTIVATION_TEXT,
+        "activation_link": CALLMEBOT_WA_LINK,
+        "guide_url": CALLMEBOT_GUIDE_URL,
     }
 
 

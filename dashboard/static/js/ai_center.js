@@ -15,18 +15,22 @@ function setText(id, text, cls = null) {
 }
 
 export async function startAiTraining() {
-  if (isActiveForex()) {
-    showToast("Selecione um par Cripto (ex: BTC/USDT) para treinar o modelo da Binance.", "error");
-    return;
-  }
+  const targetSymbol = state.activeSymbol || "BTC/USDT";
   const btn = document.getElementById("btnStartAiTrain");
+  const stageEl = document.getElementById("aiTrainStage");
+  const progEl = document.getElementById("aiTrainProgress");
   const trainTf = document.getElementById("aiTrainTimeframe")?.value || "1h";
   const candles = document.getElementById("aiTrainCandles")?.value || "3000";
-  if (btn) btn.disabled = true;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "⏳ Iniciando...";
+  }
+  if (stageEl) stageEl.textContent = `Iniciando download e treino de ${targetSymbol} (${trainTf}, ${candles} candles)...`;
+  if (progEl) progEl.style.width = "5%";
 
   try {
     const q = new URLSearchParams({
-      symbol: state.activeSymbol,
+      symbol: targetSymbol,
       timeframe: trainTf,
       candles: String(candles),
     });
@@ -34,10 +38,15 @@ export async function startAiTraining() {
       method: "POST",
       headers: csrfHeaders(),
     });
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      showToast(data.detail || "Falha ao iniciar treinamento.", "error");
-      if (btn) btn.disabled = false;
+      const errMsg = data.detail || `Falha ao iniciar treinamento (HTTP ${res.status}).`;
+      if (stageEl) stageEl.textContent = `❌ ${errMsg}`;
+      showToast(errMsg, "error");
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "🧠 Treinar IA Agora";
+      }
       return;
     }
     showToast(`🧠 ${data.message}`, "success");
@@ -45,8 +54,12 @@ export async function startAiTraining() {
     if (aiTrainPollTimer) clearInterval(aiTrainPollTimer);
     aiTrainPollTimer = setInterval(pollAiTrainStatus, 2000);
   } catch (err) {
+    if (stageEl) stageEl.textContent = `❌ Erro ao iniciar treino: ${err}`;
     showToast(`Erro ao iniciar treino: ${err}`, "error");
-    if (btn) btn.disabled = false;
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "🧠 Treinar IA Agora";
+    }
   }
 }
 

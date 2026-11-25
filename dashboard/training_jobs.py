@@ -51,7 +51,9 @@ def _run_ai_training_job(symbol: str, timeframe: str, candles: int, offline: boo
     try:
         db = TradingDatabase(db_path=db_path)
         if not offline:
-            _set_train_state(stage=f"Baixando até {candles} candles contíguos da Binance...", progress_pct=15)
+            from core import forex_market
+            src_label = "Yahoo Finance (Forex/XTB)" if forex_market.is_forex_symbol(symbol) else "Binance"
+            _set_train_state(stage=f"Baixando histórico de {symbol} via {src_label} para o SQLite...", progress_pct=15)
             train_ai.download_deep_history(db, symbol=symbol, timeframe=timeframe, target_candles=candles)
         else:
             _set_train_state(stage="Carregando candles salvos no banco SQLite...", progress_pct=20)

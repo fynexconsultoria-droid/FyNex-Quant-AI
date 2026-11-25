@@ -57,11 +57,12 @@ def predict_signal(model: Any, X: Any) -> Tuple[int, float, float]:
 
 def _base_rf() -> RandomForestClassifier:
     return RandomForestClassifier(
-        n_estimators=120,
-        max_depth=5,
-        min_samples_split=10,
-        min_samples_leaf=5,
-        class_weight="balanced_subsample",
+        n_estimators=180,
+        max_depth=4,
+        min_samples_split=16,
+        min_samples_leaf=12,
+        max_features="sqrt",
+        class_weight=None,
         random_state=42,
         n_jobs=1,
     )
@@ -69,11 +70,12 @@ def _base_rf() -> RandomForestClassifier:
 
 def _base_et() -> ExtraTreesClassifier:
     return ExtraTreesClassifier(
-        n_estimators=140,
-        max_depth=6,
-        min_samples_split=10,
-        min_samples_leaf=5,
-        class_weight="balanced_subsample",
+        n_estimators=200,
+        max_depth=5,
+        min_samples_split=16,
+        min_samples_leaf=12,
+        max_features="sqrt",
+        class_weight=None,
         random_state=42,
         n_jobs=1,
     )
@@ -81,12 +83,13 @@ def _base_et() -> ExtraTreesClassifier:
 
 def _base_hgb() -> HistGradientBoostingClassifier:
     return HistGradientBoostingClassifier(
-        max_iter=150,
-        max_depth=4,
-        learning_rate=0.05,
-        min_samples_leaf=20,
-        l2_regularization=1.0,
-        class_weight="balanced",
+        max_iter=120,
+        max_depth=3,
+        learning_rate=0.035,
+        min_samples_leaf=30,
+        l2_regularization=5.0,
+        max_bins=128,
+        class_weight=None,
         random_state=42,
     )
 
@@ -101,7 +104,7 @@ def _build_estimator(model_type: str = "ensemble") -> Any:
     return VotingClassifier(
         estimators=[("rf", _base_rf()), ("et", _base_et()), ("hgb", _base_hgb())],
         voting="soft",
-        weights=[1, 1, 2],
+        weights=[2, 2, 1],
     )
 
 
@@ -187,9 +190,20 @@ def _fit_calibrated_pipeline(
                 classes = list(getattr(pre_model, "classes_", []))
                 if 1 in classes:
                     p_cal_raw = pre_model.predict_proba(X_fit.iloc[cal_split:])[:, classes.index(1)]
+                    y_cal_arr = y_cal.to_numpy(dtype=int)
                     platt = LogisticRegression(C=1.0, solver="lbfgs", max_iter=200)
-                    platt.fit(PlattCalibratedModel._to_logit(p_cal_raw), y_cal.to_numpy(dtype=int))
-                    return PlattCalibratedModel(base_estimator=base_full, calibrator=platt)
+                    platt.fit(PlattCalibratedModel._to_logit(p_cal_raw), y_cal_arr)
+                    slope = float(platt.coef_[0][0]) if getattr(platt, "coef_", None) is not None else 0.0
+                    # Trava anti-inversão: só aceita Platt quando a inclinação é estritamente positiva
+                    # (slope <= 0 inverteria o ranking do modelo, comprando nos piores setups!).
+                    if slope >= 0.15:
+                        p_cal_fit = platt.predict_proba(PlattCalibratedModel._to_logit(p_cal_raw))[:, list(platt.classes_).index(1)]
+                        if brier_score_loss(y_cal_arr, p_cal_fit) <= brier_score_loss(y_cal_arr, p_cal_raw) + 0.01:
+                            return PlattCalibratedModel(base_estimator=base_full, calibrator=platt)
+                    else:
+                        logger.debug(
+                            f"Calibração Platt descartada por inclinação não-monotônica (slope={slope:.3f}); mantendo estimador base."
+                        )
             except Exception as exc:
                 logger.warning(f"⚠️ Calibração Platt cronológica falhou ({exc}); usando estimador base.")
     return base_full

@@ -283,9 +283,12 @@ export async function saveWhatsAppConfigUI() {
   const apikey = document.getElementById("waApiKeyInput")?.value?.trim() || "";
   const dailyHour = Number(document.getElementById("waDailyHourSelect")?.value || 21);
   const enabled = Boolean(document.getElementById("waEnabledCheck")?.checked ?? true);
+  const statusEl = document.getElementById("waConfigStatus");
 
   if (!phone) {
-    showToast("Informe o seu número de WhatsApp com DDD (ex.: 62986290913).", "error");
+    const msg = "Informe o seu número de WhatsApp com DDD (ex.: 62986290913).";
+    if (statusEl) statusEl.textContent = `⚠️ ${msg}`;
+    showToast(msg, "error");
     return;
   }
   const btn = document.getElementById("btnSaveWhatsApp");
@@ -301,7 +304,9 @@ export async function saveWhatsAppConfigUI() {
     });
     const data = await res.json();
     if (!res.ok) {
-      showToast(data.detail || "Falha ao salvar configuração do WhatsApp.", "error");
+      const errMsg = data.detail || "Falha ao salvar configuração do WhatsApp.";
+      if (statusEl) statusEl.textContent = `❌ ${errMsg}`;
+      showToast(errMsg, "error");
       return;
     }
     const hourSel = document.getElementById("waDailyHourSelect");
@@ -314,12 +319,12 @@ export async function saveWhatsAppConfigUI() {
     } else if (data.test_result && data.test_result.sent) {
       showToast("✅ WhatsApp conectado! Mensagem de teste enviada para o seu celular.", "success");
     } else {
-      showToast(
-        `⚠️ Config salva, mas o envio de teste falhou: ${(data.test_result && data.test_result.error) || "verifique a API Key do CallMeBot"}`,
-        "error"
-      );
+      const errDetail = (data.test_result && data.test_result.error) || "verifique a API Key do CallMeBot";
+      if (statusEl) statusEl.textContent = `⚠️ Config salva, mas o envio de teste falhou: ${errDetail}`;
+      showToast(`⚠️ Config salva, mas o envio de teste falhou: ${errDetail}`, "error");
     }
   } catch (err) {
+    if (statusEl) statusEl.textContent = `❌ Erro ao salvar WhatsApp: ${err}`;
     showToast(`Erro ao salvar WhatsApp: ${err}`, "error");
   } finally {
     if (btn) {

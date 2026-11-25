@@ -319,6 +319,31 @@ class XTBDeskStore:
 
         icon = "✅" if pnl_usd > 0 else ("❌" if pnl_usd < 0 else "⚪")
         verdict = "DEU RESULTADO (LUCRO)" if pnl_usd > 0 else ("PREJUÍZO" if pnl_usd < 0 else "EMPATE")
+        if pnl_usd < 0:
+            try:
+                from core.error_learning import ErrorLearningStore
+                sl_dist_pct = (
+                    abs(float(pos["entry_price"]) - float(exit_price)) / float(pos["entry_price"])
+                    if float(pos.get("entry_price") or 0) > 0
+                    else 0.0
+                )
+                ErrorLearningStore(self.db_path).record_error_postmortem(
+                    source="XTB_TRADE_LOSS",
+                    symbol=pos["symbol"],
+                    timeframe="1h",
+                    params={
+                        "side": pos["side"],
+                        "category": pos["category"],
+                        "entry_price": pos["entry_price"],
+                        "exit_price": exit_price,
+                        "sl_pct": round(sl_dist_pct, 5),
+                    },
+                    outcome_reason=reason,
+                    pnl_usd=pnl_usd,
+                    pnl_pct=pnl_pct,
+                )
+            except Exception:
+                pass
         alerts.send_alert(
             (
                 f"{icon} [{reason} • Forex/XTB] {pos['symbol']} ({pos['side']}) — {verdict}\n"
@@ -370,6 +395,34 @@ class XTBDeskStore:
 
             sl = pos.get("sl_price")
             tp = pos.get("tp_price")
+
+            # Proteção automática de lucro (Breakeven em >= 60% do caminho até o TP)
+            if sl is not None and tp is not None and pos["entry_price"] > 0:
+                entry = float(pos["entry_price"])
+                inst_dec = int(MARKET_INSTRUMENTS.get(pos["symbol"], {}).get("decimals", 5))
+                if pos["side"] == "BUY" and tp > entry:
+                    prog = (mark - entry) / (tp - entry)
+                    be_sl = round(entry * 1.0005, inst_dec)
+                    if prog >= 0.60 and be_sl > float(sl) and be_sl < mark:
+                        try:
+                            with self._connect(write_immediate=True) as conn:
+                                conn.execute("UPDATE xtb_positions SET sl_price = ? WHERE id = ?", (be_sl, pos["id"]))
+                            sl = be_sl
+                            pos["sl_price"] = be_sl
+                        except Exception:
+                            pass
+                elif pos["side"] == "SELL" and tp < entry:
+                    prog = (entry - mark) / (entry - tp)
+                    be_sl = round(entry * 0.9995, inst_dec)
+                    if prog >= 0.60 and be_sl < float(sl) and be_sl > mark:
+                        try:
+                            with self._connect(write_immediate=True) as conn:
+                                conn.execute("UPDATE xtb_positions SET sl_price = ? WHERE id = ?", (be_sl, pos["id"]))
+                            sl = be_sl
+                            pos["sl_price"] = be_sl
+                        except Exception:
+                            pass
+
             auto_reason = None
             if sl is not None:
                 if (pos["side"] == "BUY" and mark <= sl) or (pos["side"] == "SELL" and mark >= sl):

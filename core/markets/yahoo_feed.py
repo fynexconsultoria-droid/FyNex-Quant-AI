@@ -32,6 +32,16 @@ _YAHOO_TF_MAP: Dict[str, Tuple[str, str]] = {
     "1h": ("60m", "1mo"),
 }
 
+_YAHOO_HISTORY_MAP: Dict[str, Tuple[str, str, int]] = {
+    "1m": ("1m", "7d", 60),
+    "3m": ("2m", "7d", 120),
+    "5m": ("5m", "60d", 300),
+    "15m": ("15m", "60d", 900),
+    "30m": ("30m", "60d", 1800),
+    "1h": ("60m", "2y", 3600),
+    "1d": ("1d", "5y", 86400),
+}
+
 
 def _fm_fn(name: str, default):
     fm = sys.modules.get("core.forex_market")
@@ -205,6 +215,73 @@ def fetch_forex_candles(
     candles.sort(key=lambda x: x["time"])
     FOREX_CANDLES_CACHE.set(cache_key, candles)
     return candles[-safe_limit:]
+
+
+def fetch_forex_history(
+    symbol: str,
+    timeframe: str = "1h",
+    target_candles: int = 3000,
+) -> "Any":
+    """
+    Baixa histórico longo de velas fechadas de Forex/Commodities/Índices via Yahoo Finance
+    (até 2 anos em `1h`, 60 dias em `15m`/`30m`) e retorna DataFrame pronto para o SQLite e ML.
+    """
+    import pandas as pd
+
+    sym = symbol.upper()
+    info = MARKET_INSTRUMENTS.get(sym)
+    if not info or info.get("category") not in NON_CRYPTO_CATEGORIES:
+        raise ValueError(f"Instrumento de mercado global não suportado: {symbol}")
+
+    interval, range_str, tf_sec = _YAHOO_HISTORY_MAP.get(timeframe, ("60m", "2y", 3600))
+    chart = _fm_fn("_fetch_yahoo_chart", _fetch_yahoo_chart)(info["yahoo"], interval=interval, range_str=range_str)
+    timestamps = chart.get("timestamp") or []
+    raw_quotes = (chart.get("indicators") or {}).get("quote") or []
+    quote_block = raw_quotes[0] if (raw_quotes and isinstance(raw_quotes[0], dict)) else {}
+    opens = quote_block.get("open") or []
+    highs = quote_block.get("high") or []
+    lows = quote_block.get("low") or []
+    closes = quote_block.get("close") or []
+    volumes = quote_block.get("volume") or []
+
+    scale = float(info.get("price_scale", 1.0) or 1.0)
+    now_sec = int(time.time())
+    max_idx = min(len(timestamps), len(opens), len(highs), len(lows), len(closes))
+    rows: List[Dict[str, Any]] = []
+    seen_times = set()
+    for i in range(max_idx):
+        ts = timestamps[i]
+        if ts is None:
+            continue
+        t_int = int(ts)
+        if t_int in seen_times or (t_int + tf_sec) > now_sec:
+            continue
+        o, h, l, c = opens[i], highs[i], lows[i], closes[i]
+        if o is None or h is None or l is None or c is None:
+            continue
+        o_f, h_f, l_f, c_f = float(o) * scale, float(h) * scale, float(l) * scale, float(c) * scale
+        if not (c_f > 0 and h_f >= l_f):
+            continue
+        seen_times.add(t_int)
+        v_f = float(volumes[i]) if i < len(volumes) and volumes[i] is not None else 0.0
+        rows.append({
+            "timestamp": t_int * 1000,
+            "open": o_f,
+            "high": h_f,
+            "low": l_f,
+            "close": c_f,
+            "volume": max(0.0, v_f),
+        })
+
+    if not rows:
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+
+    df = pd.DataFrame(rows)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+    df = df.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last").reset_index(drop=True)
+    if target_candles > 0 and len(df) > target_candles:
+        df = df.iloc[-int(target_candles):].reset_index(drop=True)
+    return df
 
 
 def fetch_any_quote(symbol: str) -> Dict[str, Any]:

@@ -18,10 +18,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 import binance_client
-from core import error_learning
+from core import error_learning, forex_market
 from core.database import TradingDatabase, timeframe_to_ms
 from core.logging_setup import DEFAULT_DB_PATH, DEFAULT_MODELS_DIR, setup_logging
-from core.market_data import fetch_live_ohlcv, get_latest_contiguous_segment
+from core.market_data import fetch_live_ohlcv, prepare_training_history
 from core.ml import (
     InsufficientLabelsError,
     ModelPersistence,
@@ -29,7 +29,48 @@ from core.ml import (
     create_target,
     train_model,
 )
-from strategy_config import DEFAULT_TIMEFRAME, get_strategy_profile
+from strategy_config import DEFAULT_TIMEFRAME, StrategyProfile, get_strategy_profile
+
+
+def _resolve_training_profile(symbol: str, timeframe: str) -> StrategyProfile:
+    """Retorna perfil calibrado por classe de ativo: Cripto (Binance), Forex (Moedas) ou Commodities/Índices."""
+    if forex_market.is_forex_symbol(symbol):
+        inst = forex_market.MARKET_INSTRUMENTS.get(symbol.upper(), {})
+        cat = str(inst.get("category", "forex")).lower()
+        if cat == "forex":
+            # Pares de moedas têm volatilidade 1h menor (~0.08–0.18% ATR): barreiras proporcionais ao ATR
+            return StrategyProfile(
+                timeframe=timeframe,
+                tp_pct=0.0035,
+                sl_pct=0.0024,
+                horizon_candles=18 if timeframe == "1h" else 20,
+                confidence=0.55,
+                retrain_every=6,
+                use_atr_barriers=True,
+                atr_tp_mult=2.0,
+                atr_sl_mult=1.4,
+                min_tp_pct=0.0020,
+                max_tp_pct=0.0120,
+                min_sl_pct=0.0014,
+                max_sl_pct=0.0080,
+            )
+        # Metais, Energia & Índices (XAU/USD, OIL/USD, US500/USD, etc.)
+        return StrategyProfile(
+            timeframe=timeframe,
+            tp_pct=0.0075,
+            sl_pct=0.0050,
+            horizon_candles=18 if timeframe == "1h" else 20,
+            confidence=0.56,
+            retrain_every=6,
+            use_atr_barriers=True,
+            atr_tp_mult=2.2,
+            atr_sl_mult=1.5,
+            min_tp_pct=0.0040,
+            max_tp_pct=0.0220,
+            min_sl_pct=0.0028,
+            max_sl_pct=0.0130,
+        )
+    return get_strategy_profile(timeframe)
 
 
 def download_deep_history(
@@ -38,7 +79,13 @@ def download_deep_history(
     timeframe: str = DEFAULT_TIMEFRAME,
     target_candles: int = 5000,
 ) -> int:
-    """Baixa `target_candles` candles fechados paginando para trás/frente na API pública da Binance."""
+    """Baixa histórico longo de velas fechadas (Binance para Cripto; Yahoo Finance para Forex/XTB) e salva no SQLite."""
+    if forex_market.is_forex_symbol(symbol):
+        df = forex_market.fetch_forex_history(symbol=symbol, timeframe=timeframe, target_candles=target_candles)
+        if df.empty:
+            return 0
+        return db.save_candles(symbol, timeframe, df, drop_last_open=False)
+
     exchange = binance_client.get_binance_exchange(testnet=False)
     tf_ms = timeframe_to_ms(timeframe)
     now_ms = int(time.time() * 1000)
@@ -82,11 +129,12 @@ def train_and_select_best_model(
     + ponderação temporal + otimização de limiar), seleciona a de melhor desempenho fora da
     amostra (PnL simulado + Profit Factor + precisão de compra) e salva o vencedor em `models/`.
     """
-    profile = get_strategy_profile(timeframe)
-    clean_df = get_latest_contiguous_segment(df.copy(), timeframe)
+    is_fx = forex_market.is_forex_symbol(symbol)
+    profile = _resolve_training_profile(symbol, timeframe)
+    clean_df = prepare_training_history(df.copy(), timeframe, allow_weekend_gaps=is_fx)
     if len(clean_df) < 120:
         raise InsufficientLabelsError(
-            f"Histórico contíguo insuficiente para treino ({len(clean_df)} candles < 120)."
+            f"Histórico insuficiente para treino ({len(clean_df)} candles < 120)."
         )
 
     feat_df, feature_cols = build_features(clean_df)
@@ -113,7 +161,7 @@ def train_and_select_best_model(
 
     results: List[Dict[str, Any]] = []
     best_model: Optional[Any] = None
-    best_score: Tuple[int, float, float, float, float] = (-2, -1e9, -1e9, -1e9, -1e9)
+    best_score: Tuple[int, float, float, float, float, float] = (-2, -1e9, -1e9, -1e9, -1e9, -1e9)
     best_entry: Optional[Dict[str, Any]] = None
 
     total_cands = max(1, len(candidates))
@@ -150,9 +198,24 @@ def train_and_select_best_model(
         }
         results.append(entry)
 
-        # Critério quantitativo: penaliza modelos mortos (0 sinais) para não vencerem modelos ativos
-        has_signals = 1 if entry["buy_signals"] >= 5 else (0 if entry["buy_signals"] > 0 else -1)
-        score = (has_signals, entry["sim_pnl_pct"], entry["profit_factor"], entry["precision_buy"], -entry["brier_score"])
+        # Critério quantitativo conservador:
+        # 1) Modelos com lucro simulado positivo e amostra mínima (>= 5 sinais) vencem sempre;
+        # 2) Entre modelos negativos, evita promover modelos que sangram muito com dezenas de falsos sinais
+        #    (um modelo seletivo/cauteloso com 0 sinais ou pequena perda é melhor que sangrar -50% em 200 erros).
+        if entry["buy_signals"] >= 5 and entry["sim_pnl_pct"] > 0:
+            tier = 2
+        elif entry["buy_signals"] == 0:
+            tier = 1
+        else:
+            tier = 0
+        score = (
+            tier,
+            entry["sim_pnl_pct"],
+            entry["profit_factor"],
+            entry["roc_auc"],
+            entry["precision_buy"],
+            -entry["brier_score"],
+        )
         if best_entry is None or score > best_score:
             best_score = score
             best_model = model
@@ -189,11 +252,73 @@ def train_and_select_best_model(
     }
 
 
+def train_all_forex_models(
+    db_path: str = DEFAULT_DB_PATH,
+    timeframe: str = "1h",
+    target_candles: int = 3000,
+    models_dir: str = DEFAULT_MODELS_DIR,
+    offline: bool = False,
+    pairs: Optional[Tuple[str, ...]] = None,
+) -> List[Dict[str, Any]]:
+    """Baixa histórico de velas reais Forex/Commodities/Índices para o SQLite e treina ML para cada par."""
+    from core import forex_ai_trader, macro_intelligence
+
+    db = TradingDatabase(db_path=db_path)
+    macro_store = macro_intelligence.MacroLearningStore(db_path=db_path)
+    target_pairs = pairs or forex_ai_trader.FOREX_AI_PAIRS
+    summaries: List[Dict[str, Any]] = []
+
+    for sym in target_pairs:
+        try:
+            saved_c = 0
+            if not offline:
+                saved_c = download_deep_history(db, symbol=sym, timeframe=timeframe, target_candles=target_candles)
+            df = db.get_recent_candles(sym, timeframe, limit=max(target_candles, 2000))
+            if df.empty or len(df) < 120:
+                summaries.append({"symbol": sym, "status": "skipped", "candles": len(df), "error": "Histórico < 120 candles"})
+                continue
+            summary = train_and_select_best_model(
+                df,
+                symbol=sym,
+                timeframe=timeframe,
+                models_dir=models_dir,
+                save_winner=True,
+                db_path=db_path,
+            )
+            winner = summary.get("winner") or {}
+            try:
+                macro_store.record_learning_cycle(
+                    symbol=sym,
+                    timeframe=timeframe,
+                    model_version=int(summary.get("model_version", 1)),
+                    model_type=str(winner.get("model_type", "ensemble")),
+                    metrics=winner,
+                    macro_score=0.0,
+                    promoted=True,
+                    notes=f"Treino ML Forex/XTB ({summary['candles_used']} candles no SQLite)",
+                )
+            except Exception:
+                pass
+            summaries.append({
+                "symbol": sym,
+                "status": "trained",
+                "saved_candles": saved_c,
+                "candles_used": summary["candles_used"],
+                "model_version": summary["model_version"],
+                "winner": winner,
+                "saved_path": summary["saved_path"],
+            })
+        except Exception as exc:
+            summaries.append({"symbol": sym, "status": "error", "error": str(exc)})
+    return summaries
+
+
 def main() -> None:
     setup_logging(console=True)
 
-    parser = argparse.ArgumentParser(description="Treinamento Histórico Profundo da IA FyNex")
-    parser.add_argument("--symbol", type=str, default="BTC/USDT", help="Par negociado (padrão: BTC/USDT)")
+    parser = argparse.ArgumentParser(description="Treinamento Histórico Profundo da IA FyNex (Cripto & Forex/XTB)")
+    parser.add_argument("--symbol", type=str, default="BTC/USDT", help="Par negociado (ex: BTC/USDT, XAU/USD, EUR/USD)")
+    parser.add_argument("--all-forex", action="store_true", help="Baixa histórico e treina ML para todos os pares Forex/Commodities/Índices")
     parser.add_argument(
         "--timeframe",
         type=str,
@@ -202,9 +327,32 @@ def main() -> None:
         help=f"Timeframe para treino (padrão: {DEFAULT_TIMEFRAME})",
     )
     parser.add_argument("--candles", type=int, default=5000, help="Quantidade de candles históricos a baixar (padrão: 5000)")
-    parser.add_argument("--offline", action="store_true", help="Usa apenas os candles já salvos no SQLite (sem baixar da Binance)")
+    parser.add_argument("--offline", action="store_true", help="Usa apenas os candles já salvos no SQLite (sem baixar da rede)")
     parser.add_argument("--db-path", type=str, default=DEFAULT_DB_PATH, help="Caminho do banco SQLite")
     args = parser.parse_args()
+
+    if args.all_forex:
+        print("=" * 72)
+        print(f"  FyNex Quant AI - Treinamento ML em Lote Forex/Commodities/Índices ({args.timeframe})")
+        print("=" * 72)
+        res = train_all_forex_models(
+            db_path=args.db_path,
+            timeframe=args.timeframe,
+            target_candles=args.candles,
+            offline=args.offline,
+        )
+        for item in res:
+            if item["status"] == "trained":
+                w = item["winner"]
+                print(
+                    f"  ✅ {item['symbol']:<11s} | v{item['model_version']} {w['model_type'].upper():<8s} | "
+                    f"Candles: {item['candles_used']:4d} | Prec: {w['precision_buy']*100:5.1f}% ({w['buy_signals']:2d}) | "
+                    f"PF: {w['profit_factor']:.2f} | AUC: {w['roc_auc']:.3f} | PnL: {w['sim_pnl_pct']:+6.2f}%"
+                )
+            else:
+                print(f"  ⚠️ {item['symbol']:<11s} | {item['status']}: {item.get('error', '')}")
+        print("=" * 72)
+        return
 
     db = TradingDatabase(db_path=args.db_path)
 
@@ -213,7 +361,8 @@ def main() -> None:
     print("=" * 72)
 
     if not args.offline:
-        print(f"[1/2] Baixando até {args.candles} candles contíguos da Binance...")
+        src = "Yahoo Finance (Forex/XTB)" if forex_market.is_forex_symbol(args.symbol) else "Binance"
+        print(f"[1/2] Baixando até {args.candles} candles de {src}...")
         saved = download_deep_history(db, symbol=args.symbol, timeframe=args.timeframe, target_candles=args.candles)
         print(f"      {saved} candles gravados/atualizados no banco.")
     else:

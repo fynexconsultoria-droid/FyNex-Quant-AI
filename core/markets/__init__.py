@@ -16,6 +16,7 @@ from core.markets.yahoo_feed import (
     clear_forex_caches,
     fetch_any_quote,
     fetch_forex_candles,
+    fetch_forex_history,
     fetch_forex_quote,
     fetch_watchlist,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "clear_forex_caches",
     "fetch_forex_quote",
     "fetch_forex_candles",
+    "fetch_forex_history",
     "fetch_any_quote",
     "fetch_watchlist",
     "XTBDeskStore",

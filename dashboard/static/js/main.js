@@ -51,7 +51,7 @@ import {
   pollDashboardData,
   toggleBot,
 } from "./terminal.js";
-import { getInstrumentMeta } from "./utils.js";
+import { getInstrumentMeta, showToast } from "./utils.js";
 import { fetchXtbAccount, renderWatchlist, submitXtbOrder, updateXtbMarginEstimate } from "./xtb_desk.js";
 
 function syncActiveAssetUI() {
@@ -173,7 +173,28 @@ function bindUIEvents() {
   on("btnOpenBinance", "click", openBinanceModal);
   on("binanceWalletCard", "click", openBinanceModal);
   on("btnToggleBot", "click", toggleBot);
-  on("btnRefreshDashboard", "click", () => fetchInitialData(syncActiveAssetUI));
+  on("btnRefreshDashboard", "click", async () => {
+    const btn = document.getElementById("btnRefreshDashboard");
+    if (btn) {
+      btn.disabled = true;
+      btn.style.opacity = "0.6";
+    }
+    try {
+      await Promise.all([
+        fetchInitialData(syncActiveAssetUI),
+        fetchMacroIntelligence(true),
+        fetchNewsFeed(true),
+      ]);
+      showToast("✅ Dados do painel atualizados com sucesso!", "success");
+    } catch (err) {
+      showToast(`Erro ao atualizar dados: ${err}`, "error");
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.style.opacity = "";
+      }
+    }
+  });
 
   on("binanceModalOverlay", "click", closeBinanceModalOnOutsideClick);
   on("btnCloseBinanceModal", "click", closeBinanceModal);
@@ -226,13 +247,40 @@ function bindUIEvents() {
     });
   });
   on("newsSearchInput", "input", () => fetchNewsFeed(false));
-  on("btnRefreshNews", "click", () => fetchNewsFeed(true));
+  on("btnRefreshNews", "click", async () => {
+    const btn = document.getElementById("btnRefreshNews");
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "⏳ Atualizando...";
+    }
+    try {
+      await fetchNewsFeed(true);
+      showToast("📰 Feed de notícias atualizado!", "success");
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "🔄 Atualizar Feed";
+      }
+    }
+  });
 
   on("btnRecheckHealth", "click", () => fetchBinanceHealth(true));
   on("btnStartAiTrain", "click", startAiTraining);
-  on("btnRefreshMacro", "click", () => {
-    fetchMacroIntelligence(true);
-    fetchAiEvolution();
+  on("btnRefreshMacro", "click", async () => {
+    const btn = document.getElementById("btnRefreshMacro");
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "⏳ Atualizando...";
+    }
+    try {
+      await Promise.all([fetchMacroIntelligence(true), fetchAiEvolution(), fetchAiErrorLessons()]);
+      showToast("🌎 Inteligência Macro e Evolução da IA atualizadas!", "success");
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "🔄 Atualizar";
+      }
+    }
   });
   on("sidebarEvoBox", "click", () => switchView("ai"));
 

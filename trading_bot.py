@@ -567,8 +567,42 @@ class TradingBotRunner:
             daemon=True,
         ).start()
 
+    def _hot_reload_newer_disk_model(self) -> None:
+        """Recarrega automaticamente um modelo mais novo salvo em disco (ex.: treino profundo via dashboard/CLI)."""
+        try:
+            meta = self.model_storage.load_metadata(self.symbol, self.timeframe)
+            if not meta:
+                return
+            disk_ver = int(meta.get("version", 0) or 0)
+            with self.model_lock:
+                cur_ver = int(self.model_version or 0)
+            if disk_ver <= cur_ver:
+                return
+            loaded = self.model_storage.load_latest_model(self.symbol, self.timeframe)
+            if loaded is None:
+                return
+            loaded_model, loaded_ver, loaded_acc, loaded_cols = loaded
+            if loaded_cols != self.feature_cols or len(list(getattr(loaded_model, "classes_", []))) < 2:
+                return
+            with self.model_lock:
+                self.model = loaded_model
+                self.model_version = loaded_ver
+                self.current_model_acc = loaded_acc
+                self.champion_metrics = getattr(
+                    loaded_model, "validation_metrics_",
+                    {"accuracy": loaded_acc, "precision_buy": loaded_acc},
+                )
+                self.observation_mode = False
+            logger.info(
+                f"🔄 [HOT-RELOAD MODELO] Modelo mais novo v{loaded_ver} detectado em disco e ativado em memória "
+                f"(Prec.Compra: {loaded_acc * 100:.1f}%)."
+            )
+        except Exception as e:
+            logger.debug(f"Hot-reload de modelo ignorado: {e}")
+
     def _run_inference(self, closed_ts: int, closed_close: float, current_price: float) -> None:
         assert self.positions is not None
+        self._hot_reload_newer_disk_model()
         full_history_df = get_latest_contiguous_segment(
             self.db.get_recent_candles(self.symbol, self.timeframe, limit=200), self.timeframe
         )

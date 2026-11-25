@@ -165,3 +165,42 @@ def get_latest_contiguous_segment(df: pd.DataFrame, timeframe: str) -> pd.DataFr
 
     last_gap_pos = int(np.where(gap_mask.values)[0][-1])
     return work.iloc[last_gap_pos:].reset_index(drop=True)
+
+
+def prepare_training_history(
+    df: pd.DataFrame,
+    timeframe: str,
+    allow_weekend_gaps: bool = False,
+) -> pd.DataFrame:
+    """
+    Prepara o histórico de candles para treino ML:
+    - Cripto 24/7 (`allow_weekend_gaps=False`): exige segmento 100% contíguo.
+    - Forex/Commodities/Índices (`allow_weekend_gaps=True`): preserva sessões através de
+      fins de semana e feriados (lacunas <= 7 dias), removendo apenas buracos anormais.
+    """
+    if not allow_weekend_gaps:
+        return get_latest_contiguous_segment(df, timeframe)
+    if df.empty or len(df) < 2:
+        return df
+
+    work = df.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last").reset_index(drop=True)
+    work = work[(work["close"] > 0) & (work["high"] >= work["low"])].reset_index(drop=True)
+    if len(work) < 2:
+        return work
+
+    if pd.api.types.is_datetime64_any_dtype(work["timestamp"]):
+        diffs_ms = work["timestamp"].diff().dt.total_seconds() * 1000.0
+    else:
+        raw_ts = work["timestamp"].astype("int64")
+        if int(raw_ts.max()) < 100_000_000_000:
+            raw_ts = raw_ts * 1000
+        diffs_ms = raw_ts.diff()
+
+    # Mercados globais fecham fins de semana (~48h) e feriados prolongados (~96-120h);
+    # só quebra o segmento em lacunas maiores que 7 dias.
+    max_allowed_gap_ms = max(timeframe_to_ms(timeframe) * 1.5, 7 * 24 * 3600 * 1000)
+    gap_mask = diffs_ms > max_allowed_gap_ms
+    if not gap_mask.any():
+        return work
+    last_gap_pos = int(np.where(gap_mask.values)[0][-1])
+    return work.iloc[last_gap_pos:].reset_index(drop=True)
