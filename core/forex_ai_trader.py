@@ -398,13 +398,19 @@ class ForexAITrader:
     ) -> Dict[str, Any]:
         is_open, open_msg = is_forex_market_open(now_utc=now_utc)
         if not is_open:
+            ks_active = bool(self.kill_switch_path and os.path.exists(self.kill_switch_path))
+            status_msg = (
+                f"Kill-switch ativo ({self.kill_switch_path}) — {open_msg}"
+                if ks_active
+                else open_msg
+            )
             self.last_scan_report = {
                 "market_open": False,
-                "status_message": open_msg,
+                "status_message": status_msg,
                 "opportunities": [],
                 "last_action": None,
             }
-            logger.info(f"💱 [FOREX IA] {open_msg}")
+            logger.info(f"💱 [FOREX IA] {status_msg}")
             return self.last_scan_report
 
         # 1. Atualiza posições existentes (dispara SL/TP automaticamente mesmo com kill-switch ativo)
@@ -605,32 +611,12 @@ class ForexAITrader:
                             f"(Score {best['score']:.0f}/100 | TP {tp_price} | SL {sl_price})"
                         )
                         logger.info(f"💱🚀 [FOREX IA ENTRADA] {last_action} | Motivos: {best['reason']}")
-                        side_pt = "COMPRA (BUY)" if pos["side"] == "BUY" else "VENDA (SELL)"
-                        alerts.send_alert(
-                            (
-                                f"💱 {side_pt} {sym} (Forex/XTB)\n"
-                                f"Entrada: {pos['entry_price']} | Lotes: {pos['lots']} (1:{eff_lev})\n"
-                                f"Take Profit: {tp_price} | Stop Loss: {sl_price}\n"
-                                f"Score IA: {best['score']:.0f}/100 | {best.get('reason', '')}"
-                            ),
-                            level="TRADE_ENTRY",
-                        )
                         break
                     else:
                         if last_action is None:
                             last_action = (
-                                f"Sinal Copiloto XTB {best['side']} em {sym} @ {ref_price} "
+                                f"Oportunidade registrada {best['side']} em {sym} @ {ref_price} "
                                 f"(Score {best['score']:.0f}/100 | TP {tp_price} | SL {sl_price})"
-                            )
-                        if copilot_sig and not copilot_sig.get("deduplicated"):
-                            side_pt = "COMPRA (BUY)" if best["side"] == "BUY" else "VENDA (SELL)"
-                            alerts.send_alert(
-                                (
-                                    f"🧭 SINAL XTB {side_pt} — {copilot_sig.get('xtb_symbol', sym)}\n"
-                                    f"Entrada: {ref_price} | TP: {tp_price} | SL: {sl_price}\n"
-                                    f"Lote sugerido: {safe_lot} (1:{eff_lev}) | Score: {best['score']:.0f}/100"
-                                ),
-                                level="TRADE_ENTRY",
                             )
                     if open_forex_count >= self.max_open_forex_positions:
                         break

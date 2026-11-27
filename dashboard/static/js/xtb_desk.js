@@ -70,16 +70,12 @@ export function renderWatchlist() {
       const chg = Number(item.change_24h_pct || 0);
       const chgCls = chg >= 0 ? "pos" : "neg";
       const priceStr = item.price > 0 ? formatPrice(item.price, item.symbol) : "--";
+      const badgeTxt = item.badge ? ` • ${item.badge}` : "";
       return `
         <div class="wl-row ${isAct ? "active" : ""}" data-symbol="${escapeHtml(item.symbol)}">
           <div class="wl-left">
-            <span class="wl-sym">
-              ${escapeHtml(item.symbol)}
-              <span class="asset-category-pill ${item.category !== "crypto" ? "forex" : "crypto"}" style="font-size:0.56rem;padding:0.06rem 0.3rem;">
-                ${escapeHtml(item.badge || "")}
-              </span>
-            </span>
-            <span class="wl-name">${escapeHtml(item.name || "")}</span>
+            <span class="wl-sym">${escapeHtml(item.symbol)}</span>
+            <span class="wl-name">${escapeHtml(item.name || "")}${escapeHtml(badgeTxt)}</span>
           </div>
           <div class="wl-right">
             <span class="wl-price">${escapeHtml(priceStr)}</span>

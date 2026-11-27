@@ -194,6 +194,59 @@ def compute_macro_decision(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     if abs(sp_chg) >= 0.3:
         drivers.append(f"S&P 500 {sp_chg:+.2f}%")
 
+    # Bolsas de Valores Globais (Nasdaq 100, Dow Jones, DAX, FTSE, Nikkei, Ibovespa) + VIX
+    ndx_chg = float(snapshot.get("nasdaq_change_pct") or 0.0)
+    dji_chg = float(snapshot.get("dowjones_change_pct") or 0.0)
+    dax_chg = float(snapshot.get("dax_change_pct") or 0.0)
+    ftse_chg = float(snapshot.get("ftse_change_pct") or 0.0)
+    nikkei_chg = float(snapshot.get("nikkei_change_pct") or 0.0)
+    ibov_chg = float(snapshot.get("ibovespa_change_pct") or 0.0)
+    vix_val = float(snapshot.get("vix_price") or 0.0)
+    vix_chg = float(snapshot.get("vix_change_pct") or 0.0)
+
+    # Nasdaq tem correlação direta com ativos de risco/cripto
+    if abs(ndx_chg) >= 0.25:
+        score += max(-12.0, min(12.0, ndx_chg * 7.5))
+        if abs(ndx_chg) >= 0.6:
+            drivers.append(f"Nasdaq 100 {ndx_chg:+.2f}%")
+
+    # Amplitude global das bolsas (média ponderada das bolsas com preço disponível)
+    eq_changes: List[float] = []
+    for price_k, chg_v in (
+        ("sp500_price", sp_chg),
+        ("nasdaq_price", ndx_chg),
+        ("dowjones_price", dji_chg),
+        ("dax_price", dax_chg),
+        ("ftse_price", ftse_chg),
+        ("nikkei_price", nikkei_chg),
+        ("ibovespa_price", ibov_chg),
+    ):
+        if float(snapshot.get(price_k) or 0.0) > 0 or abs(chg_v) > 1e-6:
+            eq_changes.append(chg_v)
+    equities_avg_chg = (sum(eq_changes) / len(eq_changes)) if eq_changes else sp_chg
+    if len(eq_changes) >= 2:
+        score += max(-8.0, min(8.0, equities_avg_chg * 5.0))
+
+    # VIX (Índice do Medo de Wall Street): estresse/pânico nas bolsas
+    if vix_val >= 30.0:
+        score -= 18.0
+        drivers.append(f"VIX em pânico ({vix_val:.1f})")
+    elif vix_val >= 23.0:
+        score -= 9.0
+        drivers.append(f"VIX elevado ({vix_val:.1f})")
+    elif 0.0 < vix_val <= 15.0:
+        score += 4.0
+    if vix_chg >= 10.0:
+        score -= min(10.0, vix_chg * 0.5)
+        drivers.append(f"Disparada VIX ({vix_chg:+.1f}%)")
+
+    if vix_val >= 28.0 or equities_avg_chg <= -1.2 or (sp_chg <= -1.2 and ndx_chg <= -1.5):
+        equities_regime = "BOLSAS EM QUEDA / ESTRESSE"
+    elif equities_avg_chg >= 0.5 and (vix_val == 0.0 or vix_val < 22.0):
+        equities_regime = "BOLSAS EM ALTA (RISK-ON)"
+    else:
+        equities_regime = "BOLSAS MISTAS / ESTÁVEIS"
+
     news_score = float(snapshot.get("news_sentiment_score") or 0.0)
     score += max(-20.0, min(20.0, news_score * 30.0))
 
@@ -262,13 +315,16 @@ def compute_macro_decision(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "badge": badge,
         "confidence_adjustment": adj,
         "description": desc,
-        "drivers": drivers[:4],
+        "drivers": drivers[:6],
+        "equities_avg_change_pct": round(equities_avg_chg, 2),
+        "equities_regime": equities_regime,
     }
 
 
 def fetch_macro_snapshot(ttl_seconds: float = 300.0) -> Dict[str, Any]:
     """
-    Coleta em paralelo todos os fatores macroeconômicos e de notícias com cache de 5 min.
+    Coleta em paralelo todos os fatores macroeconômicos, bolsas de valores globais
+    (S&P 500, Nasdaq 100, Dow Jones, VIX, Ibovespa, DAX, FTSE, Nikkei) e notícias com cache.
     Sempre retorna um dicionário completo e seguro mesmo se alguma fonte externa falhar.
     """
     global _MACRO_CACHE
@@ -286,6 +342,20 @@ def fetch_macro_snapshot(ttl_seconds: float = 300.0) -> Dict[str, Any]:
         "us10y_change_pct": 0.0,
         "sp500_price": 0.0,
         "sp500_change_pct": 0.0,
+        "nasdaq_price": 0.0,
+        "nasdaq_change_pct": 0.0,
+        "dowjones_price": 0.0,
+        "dowjones_change_pct": 0.0,
+        "vix_price": 0.0,
+        "vix_change_pct": 0.0,
+        "ibovespa_price": 0.0,
+        "ibovespa_change_pct": 0.0,
+        "dax_price": 0.0,
+        "dax_change_pct": 0.0,
+        "ftse_price": 0.0,
+        "ftse_change_pct": 0.0,
+        "nikkei_price": 0.0,
+        "nikkei_change_pct": 0.0,
         "gold_price": 0.0,
         "gold_change_pct": 0.0,
         "silver_price": 0.0,
@@ -307,12 +377,20 @@ def fetch_macro_snapshot(ttl_seconds: float = 300.0) -> Dict[str, Any]:
         "war_geopolitics_mentions": 0,
         "climate_energy_mentions": 0,
         "rare_earth_minerals_mentions": 0,
+        "top_headlines": [],
     }
 
     tasks = {
         "dxy": lambda: _fetch_yahoo_change("DX-Y.NYB"),
         "us10y": lambda: _fetch_yahoo_change("^TNX"),
         "sp500": lambda: _fetch_yahoo_change("^GSPC"),
+        "nasdaq": lambda: _fetch_yahoo_change("^NDX"),
+        "dowjones": lambda: _fetch_yahoo_change("^DJI"),
+        "vix": lambda: _fetch_yahoo_change("^VIX"),
+        "ibovespa": lambda: _fetch_yahoo_change("^BVSP"),
+        "dax": lambda: _fetch_yahoo_change("^GDAXI"),
+        "ftse": lambda: _fetch_yahoo_change("^FTSE"),
+        "nikkei": lambda: _fetch_yahoo_change("^N225"),
         "gold": lambda: _fetch_yahoo_change("GC=F"),
         "silver": lambda: _fetch_yahoo_change("SI=F"),
         "oil": lambda: _fetch_yahoo_change("CL=F"),
@@ -324,7 +402,7 @@ def fetch_macro_snapshot(ttl_seconds: float = 300.0) -> Dict[str, Any]:
 
     succeeded = 0
     failed_sources: List[str] = []
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=10) as pool:
         future_map = {pool.submit(fn): key for key, fn in tasks.items()}
         for fut in as_completed(future_map):
             key = future_map[fut]
@@ -336,6 +414,20 @@ def fetch_macro_snapshot(ttl_seconds: float = 300.0) -> Dict[str, Any]:
                     snap["us10y_yield"], snap["us10y_change_pct"] = res
                 elif key == "sp500":
                     snap["sp500_price"], snap["sp500_change_pct"] = res
+                elif key == "nasdaq":
+                    snap["nasdaq_price"], snap["nasdaq_change_pct"] = res
+                elif key == "dowjones":
+                    snap["dowjones_price"], snap["dowjones_change_pct"] = res
+                elif key == "vix":
+                    snap["vix_price"], snap["vix_change_pct"] = res
+                elif key == "ibovespa":
+                    snap["ibovespa_price"], snap["ibovespa_change_pct"] = res
+                elif key == "dax":
+                    snap["dax_price"], snap["dax_change_pct"] = res
+                elif key == "ftse":
+                    snap["ftse_price"], snap["ftse_change_pct"] = res
+                elif key == "nikkei":
+                    snap["nikkei_price"], snap["nikkei_change_pct"] = res
                 elif key == "gold":
                     snap["gold_price"], snap["gold_change_pct"] = res
                 elif key == "silver":
@@ -354,6 +446,16 @@ def fetch_macro_snapshot(ttl_seconds: float = 300.0) -> Dict[str, Any]:
                         failed_sources.append(key)
                         continue
                     snap.update(analyze_news_and_inflation(items))
+                    snap["top_headlines"] = [
+                        {
+                            "title": str(it.get("title") or "")[:140],
+                            "source": str(it.get("source") or ""),
+                            "sentiment": str(it.get("sentiment") or "neutro"),
+                            "category": str(it.get("category") or "macro"),
+                        }
+                        for it in items[:8]
+                        if it.get("title")
+                    ]
                 succeeded += 1
             except Exception as e:
                 failed_sources.append(key)
@@ -382,6 +484,176 @@ def fetch_macro_snapshot(ttl_seconds: float = 300.0) -> Dict[str, Any]:
     with _MACRO_CACHE_LOCK:
         _MACRO_CACHE = (now, snap)
     return snap
+
+
+_SYMBOL_NEWS_KEYWORDS: Dict[str, Tuple[str, ...]] = {
+    "BTC": ("bitcoin", "btc", "etf", "crypto", "cripto"),
+    "ETH": ("ethereum", "eth", "ether", "etf", "crypto", "cripto"),
+    "SOL": ("solana", "sol", "crypto", "cripto"),
+    "BNB": ("binance", "bnb", "crypto", "cripto"),
+    "XRP": ("xrp", "ripple", "sec", "crypto", "cripto"),
+}
+
+
+def build_live_pre_order_intelligence(
+    symbol: str,
+    *,
+    side: str = "BUY",
+    macro_snapshot: Optional[Dict[str, Any]] = None,
+    refresh_ttl_seconds: float = 60.0,
+) -> Dict[str, Any]:
+    """
+    Pesquisa obrigatória de informações relevantes ANTES de iniciar qualquer ordem na Conta Real.
+    Consolida em um dossiê objetivo:
+    - Bolsas de Valores Globais (S&P 500, Nasdaq 100, Dow Jones, VIX, Ibovespa, DAX, FTSE, Nikkei)
+    - Macroeconomia (Dólar DXY, Juros EUA 10Y, Petróleo, Ouro, Fear & Greed)
+    - Notícias ao vivo relevantes ao ativo e ao mercado (Fed, Inflação, Geopolítica, Bolsas)
+    - Veredito pré-ordem (`FAVORAVEL` | `CAUTELA` | `BLOQUEADO_RISCO`) + alertas objetivos.
+    """
+    sym = str(symbol or "BTC/USDT").strip().upper()
+    base_asset = sym.split("/")[0] if "/" in sym else sym
+
+    snap: Dict[str, Any]
+    if macro_snapshot is not None:
+        snap = dict(macro_snapshot)
+    else:
+        try:
+            snap = fetch_macro_snapshot(ttl_seconds=refresh_ttl_seconds)
+        except Exception:
+            snap = get_cached_macro_snapshot() or {}
+
+    if "macro_score" not in snap or "equities_regime" not in snap:
+        snap.update(compute_macro_decision(snap))
+
+    # Busca manchetes relevantes (do snapshot ou feed de notícias fresco)
+    headlines = list(snap.get("top_headlines") or [])
+    if not headlines:
+        try:
+            news_res = news_feed.fetch_live_news(category="all", limit=20)
+            items = (news_res.get("items") or []) if isinstance(news_res, dict) else []
+            headlines = [
+                {
+                    "title": str(it.get("title") or "")[:140],
+                    "source": str(it.get("source") or ""),
+                    "sentiment": str(it.get("sentiment") or "neutro"),
+                    "category": str(it.get("category") or "macro"),
+                }
+                for it in items[:12]
+                if it.get("title")
+            ]
+        except Exception:
+            headlines = []
+
+    kws = _SYMBOL_NEWS_KEYWORDS.get(base_asset, (base_asset.lower(), "mercado", "fed", "bolsa"))
+    asset_headlines = [
+        h for h in headlines
+        if any(k in f"{h.get('title', '')} {h.get('category', '')}".lower() for k in kws)
+    ]
+    selected_headlines = (asset_headlines[:3] + [h for h in headlines if h not in asset_headlines][:2])[:4]
+
+    sp_chg = float(snap.get("sp500_change_pct") or 0.0)
+    ndx_chg = float(snap.get("nasdaq_change_pct") or 0.0)
+    dji_chg = float(snap.get("dowjones_change_pct") or 0.0)
+    vix_val = float(snap.get("vix_price") or 0.0)
+    vix_chg = float(snap.get("vix_change_pct") or 0.0)
+    ibov_chg = float(snap.get("ibovespa_change_pct") or 0.0)
+    dax_chg = float(snap.get("dax_change_pct") or 0.0)
+    dxy_chg = float(snap.get("dxy_change_pct") or 0.0)
+    us10y_val = float(snap.get("us10y_yield") or 0.0)
+    macro_score = float(snap.get("macro_score") or 0.0)
+    regime = str(snap.get("regime") or "MACRO NEUTRO")
+    eq_regime = str(snap.get("equities_regime") or "BOLSAS MISTAS / ESTÁVEIS")
+    war_m = int(snap.get("war_geopolitics_mentions") or 0)
+    neg_headlines = sum(1 for h in selected_headlines if h.get("sentiment") == "negativo")
+
+    risk_flags: List[str] = []
+    block_flags: List[str] = []
+
+    if regime.upper() == "RISK-OFF SEVERO" or macro_score <= -45.0:
+        block_flags.append(f"Regime macro adverso ({regime}, score {macro_score:+.1f})")
+    if vix_val >= 32.0:
+        block_flags.append(f"VIX em pânico extremo ({vix_val:.1f})")
+    elif vix_val >= 24.0:
+        risk_flags.append(f"VIX elevado ({vix_val:.1f}, {vix_chg:+.1f}%)")
+    if sp_chg <= -2.5 or (sp_chg <= -1.8 and ndx_chg <= -2.2):
+        block_flags.append(f"Queda severa em Wall Street (S&P {sp_chg:+.2f}%, Nasdaq {ndx_chg:+.2f}%)")
+    elif sp_chg <= -1.0 or ndx_chg <= -1.3:
+        risk_flags.append(f"Pressão nas bolsas EUA (S&P {sp_chg:+.2f}%, Nasdaq {ndx_chg:+.2f}%)")
+    if war_m >= 3:
+        risk_flags.append(f"Tensão geopolítica em destaque ({war_m} manchetes)")
+    if neg_headlines >= 3:
+        risk_flags.append(f"Fluxo de notícias predominantemente negativo ({neg_headlines}/{len(selected_headlines)})")
+    if dxy_chg >= 0.65:
+        risk_flags.append(f"Dólar DXY em alta forte ({dxy_chg:+.2f}%)")
+
+    if block_flags:
+        verdict = "BLOQUEADO_RISCO"
+        verdict_badge = "🔴 ALERTA / RISCO ELEVADO"
+    elif risk_flags or regime.upper() == "CAUTELA MACRO":
+        verdict = "CAUTELA"
+        verdict_badge = "🟡 CAUTELA (REVISAR)"
+    else:
+        verdict = "FAVORAVEL"
+        verdict_badge = "🟢 FAVORÁVEL"
+
+    eq_parts = []
+    if float(snap.get("sp500_price") or 0.0) > 0 or abs(sp_chg) > 1e-6:
+        eq_parts.append(f"S&P 500 {sp_chg:+.2f}%")
+    if float(snap.get("nasdaq_price") or 0.0) > 0 or abs(ndx_chg) > 1e-6:
+        eq_parts.append(f"Nasdaq {ndx_chg:+.2f}%")
+    if vix_val > 0:
+        eq_parts.append(f"VIX {vix_val:.1f}")
+    if float(snap.get("ibovespa_price") or 0.0) > 0 or abs(ibov_chg) > 1e-6:
+        eq_parts.append(f"Ibov {ibov_chg:+.2f}%")
+    if float(snap.get("dax_price") or 0.0) > 0 or abs(dax_chg) > 1e-6:
+        eq_parts.append(f"DAX {dax_chg:+.2f}%")
+
+    equities_line = " | ".join(eq_parts) if eq_parts else "Bolsas sem variação relevante registrada"
+    macro_line = (
+        f"Macro: {regime} ({macro_score:+.1f}) | DXY {dxy_chg:+.2f}%"
+        + (f" | US10Y {us10y_val:.2f}%" if us10y_val > 0 else "")
+    )
+    top_headline_text = selected_headlines[0]["title"] if selected_headlines else ""
+
+    return {
+        "symbol": sym,
+        "side": str(side or "BUY").upper(),
+        "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "verdict": verdict,
+        "verdict_badge": verdict_badge,
+        "allow_live_proposal": verdict != "BLOQUEADO_RISCO",
+        "macro_regime": regime,
+        "macro_score": macro_score,
+        "equities_regime": eq_regime,
+        "equities": {
+            "sp500_price": float(snap.get("sp500_price") or 0.0),
+            "sp500_change_pct": sp_chg,
+            "nasdaq_price": float(snap.get("nasdaq_price") or 0.0),
+            "nasdaq_change_pct": ndx_chg,
+            "dowjones_price": float(snap.get("dowjones_price") or 0.0),
+            "dowjones_change_pct": dji_chg,
+            "vix_price": vix_val,
+            "vix_change_pct": vix_chg,
+            "ibovespa_price": float(snap.get("ibovespa_price") or 0.0),
+            "ibovespa_change_pct": ibov_chg,
+            "dax_price": float(snap.get("dax_price") or 0.0),
+            "dax_change_pct": dax_chg,
+            "ftse_change_pct": float(snap.get("ftse_change_pct") or 0.0),
+            "nikkei_change_pct": float(snap.get("nikkei_change_pct") or 0.0),
+        },
+        "macro": {
+            "dxy_change_pct": dxy_chg,
+            "us10y_yield": us10y_val,
+            "fear_greed_value": snap.get("fear_greed_value"),
+            "news_sentiment_score": float(snap.get("news_sentiment_score") or 0.0),
+        },
+        "risk_flags": block_flags + risk_flags,
+        "headlines": selected_headlines,
+        "top_headline": top_headline_text,
+        "equities_line": equities_line,
+        "macro_line": macro_line,
+        "briefing_summary": f"{verdict_badge} • {equities_line} • {macro_line}",
+    }
 
 
 # -----------------------------------------------------------------------------

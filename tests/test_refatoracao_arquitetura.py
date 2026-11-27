@@ -175,6 +175,41 @@ def test_frontend_es_modules_and_css_manifest_integrity():
     for fname in imported_css:
         assert os.path.exists(os.path.join(static_dir, "css", fname)), f"Módulo CSS ausente: {fname}"
 
+    # Integridade de IDs HTML (sem duplicados) e ausência de handlers inline (bloqueados por CSP)
+    html_ids = re.findall(r'\bid=["\']([^"\']+)["\']', index_html)
+    assert len(html_ids) == len(set(html_ids)), "IDs duplicados detectados em index.html"
+    assert not re.search(r'\bon(click|change|input|submit)\s*=', index_html, re.I), "Evento inline bloqueado por CSP"
+
+    # Todos os imports relativos entre módulos JS devem existir e ser exportados pelo destino
+    exports_map = {}
+    js_sources = {}
+    for fname in os.listdir(js_dir):
+        if not fname.endswith(".js"):
+            continue
+        src = open(os.path.join(js_dir, fname), encoding="utf-8").read()
+        js_sources[fname] = src
+        exports_map[fname] = set(
+            re.findall(r'export\s+(?:async\s+)?(?:function|const|let|var|class)\s+([A-Za-z_$][A-Za-z0-9_$]*)', src)
+        )
+
+    all_exported = {sym for syms in exports_map.values() for sym in syms}
+    for fname, src in js_sources.items():
+        local_syms = set(re.findall(r'(?:function|const|let|var|class)\s+([A-Za-z_$][A-Za-z0-9_$]*)', src))
+        for block, target in re.findall(r'import\s*\{([^}]+)\}\s*from\s*["\']\.\/([^"\']+)["\']', src, re.S):
+            assert target in exports_map, f"{fname} importa módulo inexistente {target}"
+            for item in block.split(","):
+                item = item.strip()
+                if not item:
+                    continue
+                orig = item.split(" as ")[0].strip()
+                alias = item.split(" as ")[-1].strip()
+                assert orig in exports_map[target], f"{fname} importa '{orig}' não exportado por {target}"
+                local_syms.add(alias)
+        clean = re.sub(r'//.*|/\*[\s\S]*?\*/', '', src)
+        for called in re.findall(r'(?<![.\w$])([A-Za-z_$][A-Za-z0-9_$]*)\s*\(', clean):
+            if called in all_exported:
+                assert called in local_syms, f"{fname} chama '{called}()' sem importar o símbolo"
+
 
 def test_forex_anti_correlation_sl_cooldown_and_xtb_breakeven(tmp_path):
     from datetime import datetime, timedelta, timezone

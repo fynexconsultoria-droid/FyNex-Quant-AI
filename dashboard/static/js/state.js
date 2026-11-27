@@ -3,12 +3,9 @@
  */
 
 export const TIMEFRAME_SECONDS = {
-  "1m": 60,
-  "3m": 180,
-  "5m": 300,
-  "15m": 900,
-  "30m": 1800,
   "1h": 3600,
+  "4h": 14400,
+  "1d": 86400,
 };
 
 export const state = {
@@ -52,6 +49,10 @@ export const state = {
   lastXtbFetchAt: 0,
 
   // Mercado & Carteira
+  activeAccount: "demo", // "demo" (Treinamento IA / Simulação) | "live" (Dinheiro Real)
+  accountsOverview: null,
+  liveUsdtFree: null,
+  logAccountFilter: null,
   binanceHasKeys: false,
   marketHigh24h: 0,
   marketLow24h: 0,
@@ -72,4 +73,5 @@ export const hooks = {
   onBidAskUpdated: null,
   onRefreshAll: null,
   onRefreshStatus: null,
+  onAccountChange: null,
 };

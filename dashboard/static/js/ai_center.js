@@ -2,10 +2,148 @@
  * Centro de Treinamento da IA, Macro Inteligência, Evolução e Auto-Análise de Erros
  */
 
+import { fetchAccountsOverview } from "./accounts.js";
 import { hooks, state } from "./state.js";
 import { csrfHeaders, escapeHtml, isActiveForex, showToast } from "./utils.js";
 
 let aiTrainPollTimer = null;
+let autoTrainTargetEpochMs = 0;
+let autoTrainEnabledState = true;
+let autoTrainRunningState = false;
+let autoTrainCountdownTimer = null;
+
+function formatCountdownSeconds(sec) {
+  const s = Math.max(0, Math.floor(sec));
+  const hrs = Math.floor(s / 3600);
+  const mins = Math.floor((s % 3600) / 60);
+  const rem = s % 60;
+  if (hrs > 0) {
+    return `${hrs}h ${String(mins).padStart(2, "0")}m ${String(rem).padStart(2, "0")}s`;
+  }
+  return `${String(mins).padStart(2, "0")}m ${String(rem).padStart(2, "0")}s`;
+}
+
+function tickAutoTrainCountdownUI() {
+  const el = document.getElementById("aiAutoTrainCountdown");
+  if (!el) return;
+  if (autoTrainRunningState) {
+    el.textContent = "⏳ Treinando agora em segundo plano...";
+    return;
+  }
+  if (!autoTrainEnabledState || !autoTrainTargetEpochMs) {
+    el.textContent = "Agendamento pausado";
+    return;
+  }
+  const remSec = Math.max(0, Math.round((autoTrainTargetEpochMs - Date.now()) / 1000));
+  if (remSec <= 0) {
+    el.textContent = "⏰ Iniciando novo ciclo automático...";
+  } else {
+    el.textContent = `⏰ Próximo auto-treino em: ${formatCountdownSeconds(remSec)}`;
+  }
+}
+
+export function renderAiTrainScheduleUI(sched, isRunning = false) {
+  if (!sched) return;
+  autoTrainEnabledState = Boolean(sched.enabled);
+  autoTrainRunningState = Boolean(isRunning);
+
+  const badge = document.getElementById("aiAutoTrainStatusBadge");
+  const meta = document.getElementById("aiAutoTrainMeta");
+  const chk = document.getElementById("chkAiAutoTrainEnabled");
+  const intSel = document.getElementById("aiAutoTrainIntervalSelect");
+  const tfSel = document.getElementById("aiTrainTimeframe");
+  const cdlSel = document.getElementById("aiTrainCandles");
+
+  const hrs = Math.max(1, Math.round(Number(sched.interval_minutes || 60) / 60));
+  if (badge) {
+    if (isRunning) {
+      badge.textContent = "🔄 Treinando IA agora";
+      badge.className = "xtb-tag";
+    } else if (sched.enabled) {
+      badge.textContent = `🟢 Auto-Treino ${hrs}h ATIVO`;
+      badge.className = "xtb-tag";
+    } else {
+      badge.textContent = "⏸️ Auto-Treino PAUSADO";
+      badge.className = "badge badge-subtle";
+    }
+  }
+  if (chk) chk.checked = Boolean(sched.enabled);
+  if (intSel && sched.interval_minutes) {
+    const valStr = String(sched.interval_minutes);
+    if (Array.from(intSel.options).some((o) => o.value === valStr)) {
+      intSel.value = valStr;
+    }
+  }
+  if (tfSel && sched.timeframe && !tfSel.dataset.userEdited) {
+    if (Array.from(tfSel.options).some((o) => o.value === sched.timeframe)) {
+      tfSel.value = sched.timeframe;
+    }
+  }
+  if (cdlSel && sched.candles && !cdlSel.dataset.userEdited) {
+    const cStr = String(sched.candles);
+    if (Array.from(cdlSel.options).some((o) => o.value === cStr)) {
+      cdlSel.value = cStr;
+    }
+  }
+  if (meta) {
+    const lastStr = sched.last_run_at ? `Último: ${sched.last_run_at} UTC` : "Aguardando 1º ciclo";
+    const runs = Number(sched.total_runs || 0);
+    meta.textContent = `${sched.symbol || "BTC/USDT"} (${sched.timeframe || "1h"} • ${Number(sched.candles || 3000).toLocaleString("pt-BR")} candles) • ${lastStr} • ${runs} ciclo(s) auto`;
+  }
+
+  if (sched.enabled && typeof sched.seconds_until_next === "number") {
+    autoTrainTargetEpochMs = Date.now() + Math.max(0, sched.seconds_until_next) * 1000;
+  } else {
+    autoTrainTargetEpochMs = 0;
+  }
+  tickAutoTrainCountdownUI();
+  if (!autoTrainCountdownTimer) {
+    autoTrainCountdownTimer = setInterval(tickAutoTrainCountdownUI, 1000);
+  }
+}
+
+export async function fetchAiTrainSchedule() {
+  try {
+    const res = await fetch("/api/ai/train/schedule");
+    if (!res.ok) return null;
+    const sched = await res.json();
+    renderAiTrainScheduleUI(sched, autoTrainRunningState);
+    return sched;
+  } catch (_) {
+    return null;
+  }
+}
+
+export async function saveAiTrainScheduleUI() {
+  const enabled = Boolean(document.getElementById("chkAiAutoTrainEnabled")?.checked ?? true);
+  const intervalMinutes = Number(document.getElementById("aiAutoTrainIntervalSelect")?.value || 60);
+  const timeframe = document.getElementById("aiTrainTimeframe")?.value || "1h";
+  const candles = Number(document.getElementById("aiTrainCandles")?.value || 3000);
+  const symbol = state.activeSymbol || "BTC/USDT";
+
+  try {
+    const res = await fetch("/api/ai/train/schedule", {
+      method: "POST",
+      headers: csrfHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        enabled,
+        interval_minutes: intervalMinutes,
+        symbol,
+        timeframe,
+        candles,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      showToast(data.detail || "Falha ao salvar agendamento de treino automático.", "error");
+      return;
+    }
+    if (data.schedule) renderAiTrainScheduleUI(data.schedule, autoTrainRunningState);
+    showToast(`⚡ ${data.message || "Agendamento de auto-treino atualizado!"}`, enabled ? "success" : "info");
+  } catch (err) {
+    showToast(`Erro ao salvar agendamento de auto-treino: ${err}`, "error");
+  }
+}
 
 function setText(id, text, cls = null) {
   const el = document.getElementById(id);
@@ -81,6 +219,10 @@ export async function pollAiTrainStatus() {
       btn.textContent = st.running ? "⏳ Treinando..." : "🧠 Treinar IA Agora";
     }
 
+    if (st.schedule) {
+      renderAiTrainScheduleUI(st.schedule, Boolean(st.running));
+    }
+
     if (st.running && !aiTrainPollTimer) {
       aiTrainPollTimer = setInterval(pollAiTrainStatus, 2000);
     }
@@ -93,6 +235,7 @@ export async function pollAiTrainStatus() {
       } else if (st.last_result) {
         showToast(`✅ Treinamento concluído! ${st.stage}`, "success");
         if (typeof hooks.onRefreshStatus === "function") hooks.onRefreshStatus();
+        fetchAccountsOverview();
       }
     }
 
@@ -155,6 +298,36 @@ export async function fetchMacroIntelligence(forceRefresh = false) {
     setText("macroTotalScore", `${sc >= 0 ? "+" : ""}${sc.toFixed(1)}`, `market-metric-value ${sc >= 0 ? "text-up" : "text-down"}`);
     const adj = Math.round(Number(m.confidence_adjustment || 0) * 100);
     setText("macroAdjFilter", `Ajuste filtro: ${adj >= 0 ? "+" : ""}${adj}%`);
+
+    // Bolsas de Valores Globais & VIX
+    setText("macroEquitiesBadge", `🏛️ ${m.equities_regime || "BOLSAS ESTÁVEIS"}`);
+
+    const ndxChg = Number(m.nasdaq_change_pct || 0);
+    setText("macroNasdaqVal", m.nasdaq_price > 0 ? Number(m.nasdaq_price).toLocaleString("en-US", { maximumFractionDigits: 0 }) : "--");
+    setText("macroNasdaqChg", `${ndxChg >= 0 ? "+" : ""}${ndxChg.toFixed(2)}%`, `market-metric-sub ${ndxChg >= 0 ? "text-up" : "text-down"}`);
+
+    const djiChg = Number(m.dowjones_change_pct || 0);
+    setText("macroDowVal", m.dowjones_price > 0 ? Number(m.dowjones_price).toLocaleString("en-US", { maximumFractionDigits: 0 }) : "--");
+    setText("macroDowChg", `${djiChg >= 0 ? "+" : ""}${djiChg.toFixed(2)}%`, `market-metric-sub ${djiChg >= 0 ? "text-up" : "text-down"}`);
+
+    const vixVal = Number(m.vix_price || 0);
+    const vixChg = Number(m.vix_change_pct || 0);
+    setText("macroVixVal", vixVal > 0 ? vixVal.toFixed(2) : "--", `market-metric-value ${vixVal >= 25 ? "text-down" : "text-up"}`);
+    setText("macroVixChg", `${vixChg >= 0 ? "+" : ""}${vixChg.toFixed(2)}%`, `market-metric-sub ${vixChg <= 0 ? "text-up" : "text-down"}`);
+
+    const ibovChg = Number(m.ibovespa_change_pct || 0);
+    setText("macroIbovVal", m.ibovespa_price > 0 ? Number(m.ibovespa_price).toLocaleString("pt-BR", { maximumFractionDigits: 0 }) : "--");
+    setText("macroIbovChg", `${ibovChg >= 0 ? "+" : ""}${ibovChg.toFixed(2)}%`, `market-metric-sub ${ibovChg >= 0 ? "text-up" : "text-down"}`);
+
+    const daxChg = Number(m.dax_change_pct || 0);
+    setText("macroDaxVal", m.dax_price > 0 ? Number(m.dax_price).toLocaleString("en-US", { maximumFractionDigits: 0 }) : "--");
+    setText("macroDaxChg", `${daxChg >= 0 ? "+" : ""}${daxChg.toFixed(2)}%`, `market-metric-sub ${daxChg >= 0 ? "text-up" : "text-down"}`);
+
+    const eqAvg = Number(m.equities_avg_change_pct || 0);
+    const ftseChg = Number(m.ftse_change_pct || 0);
+    const nikChg = Number(m.nikkei_change_pct || 0);
+    setText("macroGlobalEqVal", `${eqAvg >= 0 ? "+" : ""}${eqAvg.toFixed(2)}% méd.`, `market-metric-value ${eqAvg >= 0 ? "text-up" : "text-down"}`);
+    setText("macroGlobalEqSub", `FTSE ${ftseChg >= 0 ? "+" : ""}${ftseChg.toFixed(1)}% • Nikkei ${nikChg >= 0 ? "+" : ""}${nikChg.toFixed(1)}%`);
   } catch (_) {
     // silencioso
   }
@@ -164,7 +337,7 @@ export async function fetchAiEvolution() {
   try {
     const q = new URLSearchParams({
       symbol: isActiveForex() ? "BTC/USDT" : state.activeSymbol,
-      timeframe: "1h",
+      timeframe: state.activeTimeframe || "1h",
     });
     const res = await fetch(`/api/ai/evolution?${q.toString()}`);
     if (!res.ok) return;
@@ -176,8 +349,8 @@ export async function fetchAiEvolution() {
     const pct = Math.max(0, Math.min(100, Number(evo.progress_pct || 0)));
 
     setText("sideEvoPct", `${pct.toFixed(0)}%`);
-    setText("sideEvoLevel", `Nível ${evo.level || 1} • ${evo.stage_name || ""}`);
-    setText("sideEvoStatus", evo.adaptation_tone === "warning" ? "Adaptando..." : "Sincronizada");
+    setText("sideEvoLevel", `Nível ${evo.level || 1}`);
+    setText("sideEvoStatus", evo.adaptation_tone === "warning" ? "Adaptando..." : "🔄 Auto");
     const sideBar = document.getElementById("sideEvoBar");
     if (sideBar) sideBar.style.width = `${pct}%`;
 

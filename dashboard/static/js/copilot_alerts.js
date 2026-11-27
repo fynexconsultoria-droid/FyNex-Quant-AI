@@ -103,7 +103,7 @@ export function renderXtbCopilotTable(signals) {
   if (!tbody) return;
   if (!signals || !signals.length) {
     tbody.innerHTML =
-      '<tr><td colspan="10" class="empty-cell">Nenhum sinal XTB gerado ainda. Clique em "Escanear XTB Agora" quando o mercado global estiver aberto.</td></tr>';
+      '<tr><td colspan="10" class="empty-cell">Nenhum sinal 1h+ gerado ainda. Clique em "🔎 Rodar Scanner 1h+" quando o mercado global estiver aberto.</td></tr>';
     return;
   }
 
@@ -183,8 +183,8 @@ export async function fetchXtbCopilotSignals() {
     if (data.telegram) {
       if (tgStatus) {
         tgStatus.textContent = data.telegram.configured
-          ? `✅ Telegram conectado (Chat ${data.telegram.chat_id}) — alertas ativos!`
-          : "Opcional: informe Bot Token e Chat ID para receber alertas no celular.";
+          ? `✅ Telegram conectado (Chat ${data.telegram.chat_id}) — pronto para aprovação de ordens da Conta Real!`
+          : "Configure Bot Token e Chat ID para aprovar ou rejeitar ordens da Conta Real direto pelo Telegram.";
       }
       if (tgChatInp && !tgChatInp.value && data.telegram.chat_id) tgChatInp.value = data.telegram.chat_id;
     }
@@ -239,7 +239,7 @@ export async function scanXtbCopilotNow() {
   } finally {
     if (btn) {
       btn.disabled = false;
-      btn.textContent = "🔎 Escanear XTB Agora";
+      btn.textContent = "🔎 Rodar Scanner 1h+";
     }
   }
 }

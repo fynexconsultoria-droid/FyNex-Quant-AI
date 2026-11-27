@@ -207,13 +207,15 @@ def is_allowed_origin(origin: str) -> bool:
     return (parsed.scheme.lower(), (parsed.hostname or "").lower(), parsed.port) in ALLOWED_ORIGIN_TUPLES
 
 
-def _apply_security_headers(response, *, is_api: bool = False):
+def _apply_security_headers(response, *, is_api: bool = False, is_static: bool = False):
     response.headers["Content-Security-Policy"] = CSP_HEADER
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
     if is_api and "Cache-Control" not in response.headers:
         response.headers["Cache-Control"] = "no-store, max-age=0"
+    elif is_static and "Cache-Control" not in response.headers:
+        response.headers["Cache-Control"] = "no-cache"
     return response
 
 
@@ -250,7 +252,11 @@ async def security_middleware(request: Request, call_next):
         )
 
     response = await call_next(request)
-    return _apply_security_headers(response, is_api=request.url.path.startswith("/api/"))
+    return _apply_security_headers(
+        response,
+        is_api=request.url.path.startswith("/api/"),
+        is_static=request.url.path.startswith("/static/"),
+    )
 
 
 def require_csrf(request: Request) -> None:

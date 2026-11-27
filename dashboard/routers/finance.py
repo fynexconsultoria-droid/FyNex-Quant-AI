@@ -118,10 +118,11 @@ def _csv_safe(val: Any) -> str:
 def _load_unified_trades(
     conn: sqlite3.Connection,
     source: str,
+    account: str = "all",
 ) -> List[Dict[str, Any]]:
     trades: List[Dict[str, Any]] = []
 
-    if source in ("all", "xtb") and table_exists(conn, "xtb_trades"):
+    if account != "live" and source in ("all", "xtb") and table_exists(conn, "xtb_trades"):
         try:
             rows = conn.execute(
                 """
@@ -140,7 +141,7 @@ def _load_unified_trades(
                     {
                         "uid": f"xtb_{r['id']}",
                         "source": "xtb",
-                        "source_label": "Mesa XTB",
+                        "source_label": "Mesa XTB (Demo)",
                         "symbol": sym,
                         "category": _infer_category(sym, r["category"]),
                         "side": str(r["side"] or "BUY").upper(),
@@ -162,12 +163,18 @@ def _load_unified_trades(
 
     if source in ("all", "bot") and table_exists(conn, "simulated_trades"):
         try:
+            mode_clause = ""
+            if account == "live":
+                mode_clause = "WHERE LOWER(COALESCE(mode, 'paper')) = 'live'"
+            elif account == "demo":
+                mode_clause = "WHERE LOWER(COALESCE(mode, 'paper')) != 'live'"
             rows = conn.execute(
-                """
+                f"""
                 SELECT id, symbol, timeframe, entry_time, exit_time,
                        entry_price, exit_price, reason, pnl_pct, pnl_usd,
                        mode, quantity
                 FROM simulated_trades
+                {mode_clause}
                 ORDER BY exit_time ASC, id ASC
                 """
             ).fetchall()
@@ -209,13 +216,14 @@ def _load_unified_trades(
 def _compute_open_positions_metrics(
     conn: sqlite3.Connection,
     source: str,
+    account: str = "all",
 ) -> Tuple[int, float, float, List[Dict[str, Any]]]:
     """Retorna (count, used_margin_usd, floating_pnl_usd, open_items) usando cotações em cache sem bloquear rede."""
     open_items: List[Dict[str, Any]] = []
     used_margin = 0.0
     floating_pnl = 0.0
 
-    if source in ("all", "xtb") and table_exists(conn, "xtb_positions"):
+    if account != "live" and source in ("all", "xtb") and table_exists(conn, "xtb_positions"):
         try:
             rows = conn.execute(
                 """
@@ -267,11 +275,16 @@ def _compute_open_positions_metrics(
 
     if source in ("all", "bot") and table_exists(conn, "open_positions"):
         try:
+            mode_filter = ""
+            if account == "live":
+                mode_filter = " AND LOWER(COALESCE(mode, 'paper')) = 'live'"
+            elif account == "demo":
+                mode_filter = " AND LOWER(COALESCE(mode, 'paper')) != 'live'"
             rows = conn.execute(
-                """
+                f"""
                 SELECT symbol, mode, entry_price, quantity, entry_time
                 FROM open_positions
-                WHERE status = 'OPEN'
+                WHERE status = 'OPEN'{mode_filter}
                 """
             ).fetchall()
             for r in rows:
@@ -312,12 +325,14 @@ def build_finance_overview(
     period: str = "30d",
     source: str = "all",
     now_utc: Optional[datetime] = None,
+    account: str = "all",
 ) -> Dict[str, Any]:
     now = now_utc or datetime.now(timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     period_key = period if period in PERIOD_DAYS else "30d"
-    source_key = source if source in ("all", "xtb", "bot") else "all"
+    account_key = account if account in ("all", "demo", "live") else "all"
+    source_key = "bot" if account_key == "live" else (source if source in ("all", "xtb", "bot") else "all")
 
     all_trades: List[Dict[str, Any]] = []
     open_count = 0
@@ -327,13 +342,18 @@ def build_finance_overview(
 
     with sqlite_readonly_optional(db_path) as conn:
         if conn is not None:
-            all_trades = _load_unified_trades(conn, source_key)
-            open_count, used_margin, floating_pnl, open_items = _compute_open_positions_metrics(conn, source_key)
+            all_trades = _load_unified_trades(conn, source_key, account=account_key)
+            open_count, used_margin, floating_pnl, open_items = _compute_open_positions_metrics(
+                conn, source_key, account=account_key
+            )
 
     days_window = PERIOD_DAYS[period_key]
     cutoff = (now - timedelta(days=days_window)) if days_window is not None else None
 
-    base_capital = DEFAULT_XTB_CAPITAL_USD if source_key in ("all", "xtb") else 1000.0
+    if account_key == "live":
+        base_capital = 0.0
+    else:
+        base_capital = DEFAULT_XTB_CAPITAL_USD if source_key in ("all", "xtb") else 1000.0
     prior_pnl = 0.0
     period_trades: List[Dict[str, Any]] = []
     for t in all_trades:
@@ -630,6 +650,7 @@ def build_finance_overview(
 
     return {
         "summary": {
+            "account": account_key,
             "period": period_key,
             "source": source_key,
             "starting_capital_usd": period_start_capital,
@@ -679,16 +700,18 @@ def build_finance_overview(
 def get_finance_overview(
     period: str = Query(default="30d", pattern="^(24h|7d|30d|90d|all)$"),
     source: str = Query(default="all", pattern="^(all|xtb|bot)$"),
+    account: str = Query(default="all", pattern="^(all|demo|live)$"),
 ):
-    return build_finance_overview(db_path=_db_path(), period=period, source=source)
+    return build_finance_overview(db_path=_db_path(), period=period, source=source, account=account)
 
 
 @router.get("/api/finance/export.csv")
 def export_finance_csv(
     period: str = Query(default="all", pattern="^(24h|7d|30d|90d|all)$"),
     source: str = Query(default="all", pattern="^(all|xtb|bot)$"),
+    account: str = Query(default="all", pattern="^(all|demo|live)$"),
 ):
-    data = build_finance_overview(db_path=_db_path(), period=period, source=source)
+    data = build_finance_overview(db_path=_db_path(), period=period, source=source, account=account)
     buf = io.StringIO()
     buf.write("\ufeff")  # UTF-8 BOM para Excel em PT-BR
     writer = csv.writer(buf, delimiter=";")

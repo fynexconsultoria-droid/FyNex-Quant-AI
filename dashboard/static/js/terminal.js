@@ -2,6 +2,7 @@
  * Terminal Principal: Polling, Status do Robô, Candles, Previsões, Trades, Logs e Saúde
  */
 
+import { fetchAccountsOverview, fetchLiveApprovals } from "./accounts.js";
 import { fetchAiErrorLessons, fetchAiEvolution } from "./ai_center.js";
 import { updateBinanceStatusUI } from "./binance_modal.js";
 import { refreshEmaSeries, renderOpenPositionLines, updateLoadedCandlesWithTick } from "./chart.js";
@@ -117,6 +118,14 @@ export async function fetchBinanceBalanceAuto(force = false) {
     if (!res.ok) return;
     const data = await res.json();
     if (data && data.success) {
+      state.liveUsdtFree = Number(data.usdt_free || 0);
+      const accBalLive = document.getElementById("accBalLive");
+      if (accBalLive) {
+        accBalLive.textContent = `$${state.liveUsdtFree.toLocaleString("en-US", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })}`;
+      }
       const kpiBalance = document.getElementById("kpiBinanceBalance");
       const kpiBtc = document.getElementById("kpiBinanceBtc");
       if (kpiBalance) {
@@ -133,13 +142,14 @@ export async function fetchBinanceBalanceAuto(force = false) {
 
 export async function fetchStatus() {
   try {
-    const q = new URLSearchParams({ symbol: state.activeSymbol, timeframe: state.activeTimeframe });
+    const acc = state.activeAccount === "live" ? "live" : "demo";
+    const q = new URLSearchParams({ symbol: state.activeSymbol, timeframe: state.activeTimeframe, account: acc });
     const res = await fetch(`/api/status?${q.toString()}`);
     if (!res.ok) return;
     const data = await res.json();
 
     const tfTag = document.getElementById("activeTimeframeTag");
-    if (tfTag) tfTag.textContent = `Candles ${state.activeTimeframe}`;
+    if (tfTag) tfTag.textContent = state.activeTimeframe;
 
     const currentPrice = data.latest_price || 0;
     if (!state.liveWsConnected && currentPrice > 0) updateLiveTickerPrice(currentPrice);
@@ -150,35 +160,45 @@ export async function fetchStatus() {
     const btn = document.getElementById("btnToggleBot");
     const btnText = document.getElementById("btnBotText");
     const btnIcon = document.getElementById("btnBotIcon");
+    const accLabel = acc === "live" ? "REAL" : "Demo";
 
     if (state.isBotOnline) {
-      dot.className = "status-dot online";
-      label.textContent = `Online (PID ${data.bot_pid} • ${data.bot_active_timeframe || state.activeTimeframe})`;
-      btn.className = "btn btn-danger";
-      btnText.textContent = "Parar Robô";
-      btnIcon.textContent = "⏹";
+      if (dot) dot.className = "status-dot online";
+      if (label) label.textContent = `${accLabel} Online (PID ${data.bot_pid} • ${data.bot_active_timeframe || state.activeTimeframe})`;
+      if (btn) btn.className = "btn btn-danger";
+      if (btnText) btnText.textContent = `Parar Robô ${accLabel}`;
+      if (btnIcon) btnIcon.textContent = "⏹";
     } else {
-      dot.className = "status-dot offline";
-      label.textContent = "Offline";
-      btn.className = "btn btn-primary";
-      btnText.textContent = "Iniciar Robô";
-      btnIcon.textContent = "▶";
+      if (dot) dot.className = "status-dot offline";
+      if (label) label.textContent = `${accLabel} Offline`;
+      if (btn) btn.className = acc === "live" ? "btn btn-acc-live" : "btn btn-primary";
+      if (btnText) btnText.textContent = acc === "live" ? "Iniciar Robô REAL" : "Iniciar Robô Demo";
+      if (btnIcon) btnIcon.textContent = acc === "live" ? "💎" : "▶";
     }
 
     const capitalEl = document.getElementById("kpiCapital");
     const pnlBadge = document.getElementById("pnlBadge");
     const pnlUsd = document.getElementById("pnlUsd");
     if (capitalEl) {
-      capitalEl.textContent = `$${(data.simulated_capital || 1000).toLocaleString("en-US", {
-        minimumFractionDigits: 2,
-      })}`;
+      if (acc === "live") {
+        capitalEl.textContent =
+          state.liveUsdtFree !== null && state.liveUsdtFree !== undefined
+            ? `$${Number(state.liveUsdtFree).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+            : data.binance && data.binance.has_keys
+            ? "Conectado"
+            : "Sem Chaves";
+      } else {
+        capitalEl.textContent = `$${(data.simulated_capital || 1000).toLocaleString("en-US", {
+          minimumFractionDigits: 2,
+        })}`;
+      }
     }
     if (pnlBadge && data.trade_stats) {
       const pPct = data.trade_stats.total_pnl_pct || 0;
       const pUsdVal = data.trade_stats.total_pnl_usd || 0;
       pnlBadge.textContent = `${pPct >= 0 ? "+" : ""}${pPct.toFixed(2)}%`;
       pnlBadge.className = `pnl-badge ${pPct >= 0 ? "positive" : "negative"}`;
-      pnlUsd.textContent = `${pUsdVal >= 0 ? "+$" : "-$"}${Math.abs(pUsdVal).toFixed(2)} acumulado`;
+      pnlUsd.textContent = `${pUsdVal >= 0 ? "+$" : "-$"}${Math.abs(pUsdVal).toFixed(2)} (${acc === "live" ? "Real" : "Simulado"})`;
     }
 
     const accVal = document.getElementById("kpiAccuracy");
@@ -215,13 +235,17 @@ export async function fetchStatus() {
     const modelBadge = document.getElementById("modelVerBadge");
     const modelAcc = document.getElementById("modelInitialAcc");
     if (modelBadge && data.model) {
-      modelBadge.textContent = `Versão v${data.model.version} (${data.model.timeframe || state.activeTimeframe})`;
+      const prefix = acc === "live" ? (data.model.is_explicit_champion ? "Campeão Real v" : "Fallback v") : "Demo v";
+      modelBadge.textContent = `${prefix}${data.model.version} (${data.model.timeframe || state.activeTimeframe})`;
       if (modelAcc) modelAcc.textContent = `${Number(data.model.accuracy || 0).toFixed(2)}%`;
     }
 
     const chartUpdateEl = document.getElementById("chartLastUpdate");
     if (chartUpdateEl && data.latest_update && !state.liveWsConnected) {
-      chartUpdateEl.textContent = `Último candle (UTC): ${data.latest_update}`;
+      const rawUpd = String(data.latest_update);
+      const shortUpd = rawUpd.length >= 16 ? rawUpd.slice(11, 16) : rawUpd;
+      chartUpdateEl.textContent = `Candle ${shortUpd} UTC`;
+      chartUpdateEl.title = `Último candle (UTC): ${rawUpd}`;
     }
 
     renderOpenPositionLines(data.open_position);
@@ -243,7 +267,17 @@ export async function fetchCandles(fullReload = false) {
     if (!res.ok) return;
     const candles = await res.json();
     if (reqSymbol !== state.activeSymbol || reqTf !== state.activeTimeframe) return;
-    if (!candles || candles.length === 0) return;
+    if (!candles || candles.length === 0) {
+      if (fullReload) {
+        state.loadedCandles = [];
+        state.candleSeries.setData([]);
+        if (state.volumeSeries) state.volumeSeries.setData([]);
+        refreshEmaSeries();
+        const chartUpdateEl = document.getElementById("chartLastUpdate");
+        if (chartUpdateEl) chartUpdateEl.textContent = "Sem candles disponíveis agora";
+      }
+      return;
+    }
 
     if (fullReload || !state.chartInitializedWithData) {
       state.loadedCandles = candles.slice();
@@ -335,7 +369,8 @@ export async function fetchTrades() {
   if (!container) return;
 
   try {
-    const q = new URLSearchParams({ symbol: state.activeSymbol, timeframe: state.activeTimeframe, limit: "10" });
+    const acc = state.activeAccount === "live" ? "live" : "demo";
+    const q = new URLSearchParams({ symbol: state.activeSymbol, timeframe: state.activeTimeframe, limit: "10", account: acc });
     const res = await fetch(`/api/trades?${q.toString()}`);
     if (!res.ok) return;
     const trades = await res.json();
@@ -387,12 +422,16 @@ export async function fetchLogs() {
   const body = document.getElementById("terminalBody");
   if (!body) return;
   try {
-    const res = await fetch("/api/logs?lines=30");
+    const logAcc = state.logAccountFilter || state.activeAccount || "demo";
+    const res = await fetch(`/api/logs?lines=40&account=${encodeURIComponent(logAcc)}`);
     if (!res.ok) return;
     const data = await res.json();
     if (data.logs && data.logs.length > 0) {
       body.textContent = data.logs.join("\n");
       body.scrollTop = body.scrollHeight;
+    } else {
+      const accLabel = logAcc === "live" ? "Conta Real (logs/trading_bot_live.log)" : "Conta Demo (logs/trading_bot_demo.log)";
+      body.textContent = `Aguardando eventos de execução para ${accLabel}...`;
     }
   } catch (err) {
     console.error("Erro ao buscar logs:", err);
@@ -400,15 +439,28 @@ export async function fetchLogs() {
 }
 
 export async function toggleBot() {
+  const acc = state.activeAccount === "live" ? "live" : "demo";
+  if (!state.isBotOnline && acc === "live") {
+    const ok = window.confirm(
+      "⚠️ ATENÇÃO — CONTA REAL (DINHEIRO REAL)!\n\nDeseja iniciar o robô na Binance Spot Live usando o Modelo Campeão promovido?"
+    );
+    if (!ok) return;
+  }
+
   const btn = document.getElementById("btnToggleBot");
   if (btn) btn.disabled = true;
   try {
     let res;
     if (state.isBotOnline) {
-      res = await fetch("/api/bot/stop", { method: "POST", headers: csrfHeaders() });
+      res = await fetch(`/api/bot/stop?account=${acc}`, { method: "POST", headers: csrfHeaders() });
     } else {
       const targetSymbol = isActiveForex() ? "BTC/USDT" : state.activeSymbol;
-      const q = new URLSearchParams({ symbol: targetSymbol, timeframe: state.activeTimeframe });
+      const q = new URLSearchParams({
+        symbol: targetSymbol,
+        timeframe: state.activeTimeframe,
+        account: acc,
+        trading_mode: acc === "live" ? "live" : "paper",
+      });
       res = await fetch(`/api/bot/start?${q.toString()}`, { method: "POST", headers: csrfHeaders() });
     }
     const data = await res.json().catch(() => ({}));
@@ -417,7 +469,7 @@ export async function toggleBot() {
     } else {
       showToast(data.message || (state.isBotOnline ? "Robô finalizado." : "Robô iniciado em segundo plano!"), "success");
     }
-    await fetchStatus();
+    await Promise.all([fetchStatus(), fetchAccountsOverview()]);
   } catch (err) {
     showToast(`Falha ao comunicar com o servidor: ${err}`, "error");
   } finally {
@@ -432,6 +484,8 @@ export async function fetchInitialData(syncAssetUiCb = null) {
   }
   await Promise.all([
     fetchStatus(),
+    fetchAccountsOverview(),
+    fetchLiveApprovals(),
     fetchCandles(true),
     fetchPredictions(),
     fetchTrades(),
@@ -454,7 +508,7 @@ export async function pollDashboardData() {
   state.isPolling = true;
   try {
     const now = Date.now();
-    const tasks = [fetchStatus(), fetchPredictions(), fetchTrades(), fetchLogs()];
+    const tasks = [fetchStatus(), fetchAccountsOverview(), fetchLiveApprovals(), fetchPredictions(), fetchTrades(), fetchLogs()];
     if (!state.liveWsConnected || isActiveForex()) {
       tasks.push(fetchCandles(false));
       tasks.push(fetchLiveTickerFallback());

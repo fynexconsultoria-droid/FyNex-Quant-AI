@@ -46,6 +46,36 @@
         </div>
       </div>
 
+      <!-- Seletor de Conta Estilo Corretora Internacional (Demo / Treino IA vs Conta Real) -->
+      <div class="account-switcher-card" id="accountSwitcherCard" role="region" aria-label="Divisão de Contas">
+        <div class="account-switcher-header">
+          <span>CONTA ATIVA</span>
+          <span class="dim">DEMO / REAL</span>
+        </div>
+        <div class="account-switcher-tabs">
+          <button type="button" class="acc-switch-btn demo active" id="btnSwitchDemo" title="Abrir Conta Demo / Laboratório de Treinamento da IA (/demo)">
+            <span class="acc-switch-top">
+              <span>🧪 DEMO</span>
+              <span class="acc-mini-dot demo" id="accDotDemo"></span>
+            </span>
+            <span class="acc-switch-bal" id="accBalDemo">$1,000.00</span>
+            <span class="acc-switch-sub">Treino IA</span>
+          </button>
+          <button type="button" class="acc-switch-btn live" id="btnSwitchLive" title="Abrir Conta Real — Dinheiro Real Binance Spot (/live)">
+            <span class="acc-switch-top">
+              <span>💎 REAL</span>
+              <span class="acc-mini-dot live" id="accDotLive"></span>
+            </span>
+            <span class="acc-switch-bal" id="accBalLive">Sem chaves</span>
+            <span class="acc-switch-sub">Dinheiro Real</span>
+          </button>
+        </div>
+        <div class="parallel-bots-strip" title="Os robôs Demo e Real podem operar em paralelo de forma isolada">
+          <span class="parallel-bot-chip dim" id="parallelDemoStatus">Demo: OFF</span>
+          <span class="parallel-bot-chip dim" id="parallelLiveStatus">Real: OFF</span>
+        </div>
+      </div>
+
       <nav class="sidebar-nav" aria-label="Áreas do Terminal">
         <button type="button" class="nav-item active" data-view="terminal">
           <span class="nav-icon">📊</span>
@@ -77,9 +107,9 @@
       </nav>
 
       <!-- Barra de Evolução Contínua da IA (sempre visível) -->
-      <div class="sidebar-evo-box" id="sidebarEvoBox" title="Clique para ver detalhes da evolução da IA">
+      <div class="sidebar-evo-box" id="sidebarEvoBox" title="Evolução automática contínua nas contas Demo e Real — clique para ver detalhes">
         <div class="sidebar-acc-header">
-          <span>EVOLUÇÃO DA IA</span>
+          <span>EVOLUÇÃO IA</span>
           <span class="mono-val accent-cyan" id="sideEvoPct">0%</span>
         </div>
         <div class="evo-progress-track">
@@ -145,9 +175,14 @@
               <option value="NATGAS/USD">NATGAS/USD (Gás Natural)</option>
               <option value="REMX/USD">REMX/USD (Terras Raras)</option>
             </optgroup>
-            <optgroup label="Índices Globais">
+            <optgroup label="Índices &amp; Bolsas Globais">
               <option value="US500/USD">US500/USD (S&amp;P 500)</option>
               <option value="US100/USD">US100/USD (Nasdaq 100)</option>
+              <option value="US30/USD">US30/USD (Dow Jones 30)</option>
+              <option value="DE40/USD">DE40/USD (DAX 40 Alemanha)</option>
+              <option value="IBOV/BRL">IBOV/BRL (Ibovespa B3)</option>
+              <option value="JP225/USD">JP225/USD (Nikkei 225 Japão)</option>
+              <option value="VIX/USD">VIX/USD (Volatilidade VIX)</option>
             </optgroup>
           </select>
           <span class="asset-category-pill crypto" id="activeCategoryPill">CRIPTO</span>
@@ -158,13 +193,10 @@
         </div>
 
         <div class="topbar-actions">
-          <select id="timeframeSelect" class="btn btn-secondary" title="Selecionar Tempo Gráfico">
-            <option value="1m">1m</option>
-            <option value="3m">3m</option>
-            <option value="5m">5m</option>
-            <option value="15m">15m</option>
-            <option value="30m">30m</option>
+          <select id="timeframeSelect" class="btn btn-secondary" title="Selecionar Tempo Gráfico (somente 1h ou superior)">
             <option value="1h" selected>1h</option>
+            <option value="4h">4h</option>
+            <option value="1d">1d</option>
           </select>
 
           <button class="btn btn-binance" id="btnOpenBinance" title="Configurar Conexão com a Binance">
@@ -199,6 +231,23 @@
       <!-- Container das Áreas Separadas -->
       <main class="dashboard-container">
 
+        <!-- Faixa Global de Contexto da Conta (Demo vs Conta Real) -->
+        <div class="account-context-banner" id="accountContextBanner">
+          <div class="acc-banner-left">
+            <span class="acc-banner-pill demo" id="accBannerPill">🧪 CONTA DEMO • TREINO IA</span>
+            <div class="acc-banner-copy">
+              <span class="acc-banner-title" id="accBannerTitle">Laboratório de Treinamento &amp; Simulação Realista da IA</span>
+              <span class="acc-banner-desc" id="accBannerDesc">Simula entradas reais com taxas, slippage, SL/TP e auto-análise de erros. Promova o melhor modelo para a Conta Real quando estiver pronto.</span>
+            </div>
+          </div>
+          <div class="acc-banner-right">
+            <span class="acc-model-chip" id="accBannerModelChip">🧠 Modelo Demo: --</span>
+            <button type="button" class="acc-pending-chip" id="accBannerPendingBtn" style="display:none;" title="Ordens da Conta Real aguardando aprovação do administrador">🔐 0 pendente(s)</button>
+            <button type="button" class="acc-upgrade-chip" id="accBannerUpgradeBtn" style="display:none;" title="Ir para a ponte de promoção de modelo">✨ Promover p/ Real</button>
+            <button type="button" class="btn btn-acc-gold" id="btnQuickSwitchAccount" style="height:32px;padding:0 0.75rem;font-size:0.76rem;">💎 Ir para Conta Real →</button>
+          </div>
+        </div>
+
         <!-- ================================================================
              ÁREA 1: TERMINAL AO VIVO (Watchlist + Gráfico + Boleta XTB + Posições)
              ================================================================ -->
@@ -223,7 +272,7 @@
             </div>
 
             <div class="market-metric">
-              <span class="market-metric-label">Melhor Bid / Ask (Spread)</span>
+              <span class="market-metric-label">Bid / Ask • Spread</span>
               <div class="market-bidask-row">
                 <span class="mono-val text-up" id="mktBestBid">--</span>
                 <span class="dim">/</span>
@@ -233,7 +282,7 @@
             </div>
 
             <div class="market-metric">
-              <span class="market-metric-label">Pressão Order Book</span>
+              <span class="market-metric-label">Order Book (C/V)</span>
               <div class="pressure-wrap">
                 <div class="pressure-labels">
                   <span class="text-up" id="mktBuyPressure">50% C</span>
@@ -273,7 +322,7 @@
                   <button type="button" class="wl-tab" data-cat="crypto">Cripto</button>
                 </div>
               </div>
-              <input type="text" id="watchlistSearch" class="search-input" placeholder="Buscar ativo (BTC, EUR, XAU, Prata, S&P)..." autocomplete="off">
+              <input type="text" id="watchlistSearch" class="search-input" placeholder="Buscar ativo (BTC, EUR, XAU)..." autocomplete="off">
               <div class="watchlist-items" id="watchlistContainer">
                 <div class="empty-state">Carregando cotações ao vivo...</div>
               </div>
@@ -298,6 +347,9 @@
 
             <!-- Boleta de Execução Estilo XTB (Forex & Cripto) -->
             <div class="card xtb-ticket-card">
+              <div class="xtb-live-notice">
+                ℹ️ <strong>Conta Real ativa:</strong> ordens reais com dinheiro são executadas pelo <strong>Robô IA (Binance Spot)</strong> usando o Modelo Campeão. Esta boleta XTB permanece em simulação multi-ativos.
+              </div>
               <div class="card-header compact">
                 <div>
                   <h3 id="xtbTicketSymbol">BTC/USDT</h3>
@@ -465,14 +517,208 @@
           <div class="view-header">
             <div>
               <h2>Robô Quantitativo & Inteligência Artificial</h2>
-              <p class="view-subtitle">Monitoramento de acurácia viva, regime de calibração, modelo em operação e histórico de sinais</p>
+              <p class="view-subtitle">Monitoramento de acurácia viva, governança Demo → Conta Real, modelo campeão em operação e histórico de sinais</p>
+            </div>
+          </div>
+
+          <!-- Ponte de Governança: Conta Demo (Treinamento IA) ↔ Conta Real (Dinheiro Real) -->
+          <div class="card account-governance-card" id="accountGovernanceCard">
+            <div class="card-header">
+              <div>
+                <h3>🏛️ Divisão de Contas &amp; Auto-Evolução Sincronizada (Demo ↔ Conta Real)</h3>
+                <span class="ticket-sub">Evolução automática da IA ativa nas duas contas (validação walk-forward fora da amostra): todo novo campeão validado atualiza Demo e Conta Real automaticamente, mantendo aprovação do administrador para ordens reais</span>
+              </div>
+              <span class="badge badge-subtle" id="govBridgeSyncBadge">Verificando modelos...</span>
+            </div>
+
+            <div class="gov-three-col">
+              <!-- Esquerda: Conta Demo -->
+              <div class="gov-panel demo-panel">
+                <div class="gov-panel-head">
+                  <span class="gov-panel-title">🧪 Conta Demo (Treino IA)</span>
+                  <span class="badge badge-subtle" id="govDemoBotBadge">⚪ OFFLINE</span>
+                </div>
+                <div class="gov-metric-grid">
+                  <div class="gov-metric-box">
+                    <span class="gov-metric-lbl">Modelo em Treino</span>
+                    <span class="gov-metric-val accent-cyan" id="govDemoModelVer">--</span>
+                  </div>
+                  <div class="gov-metric-box">
+                    <span class="gov-metric-lbl">Prec. Compra</span>
+                    <span class="gov-metric-val" id="govDemoModelAcc">--%</span>
+                  </div>
+                  <div class="gov-metric-box">
+                    <span class="gov-metric-lbl">Win Rate Demo</span>
+                    <span class="gov-metric-val" id="govDemoWinRate">0.0%</span>
+                  </div>
+                  <div class="gov-metric-box">
+                    <span class="gov-metric-lbl">PnL Simulado</span>
+                    <span class="gov-metric-val" id="govDemoPnl">$0.00</span>
+                  </div>
+                </div>
+                <label class="gov-toggle-row" title="Mantém o robô Demo rodando continuamente para coletar candles, avaliar previsões, aprender com erros e acompanhar o mercado 24/7">
+                  <span>🧪 Manter IA sempre treinando o mercado (24/7)</span>
+                  <input type="checkbox" id="chkDemoAlwaysOn" checked>
+                </label>
+                <div class="gov-panel-actions">
+                  <button type="button" class="btn btn-primary" id="btnGovToggleDemoBot">▶ Iniciar Robô Demo</button>
+                </div>
+              </div>
+
+              <!-- Centro: Ponte de Promoção -->
+              <div class="gov-panel bridge-panel">
+                <div class="gov-panel-head">
+                  <span class="gov-panel-title">⚡ Ponte de Promoção IA</span>
+                </div>
+                <div class="gov-bridge-controls">
+                  <label class="gov-metric-lbl" for="govPromoteVersionSelect">Selecionar versão treinada na Demo</label>
+                  <select id="govPromoteVersionSelect" class="search-input" style="margin:0;">
+                    <option value="">Carregando versões...</option>
+                  </select>
+                  <button type="button" class="btn btn-acc-gold" id="btnPromoteModelToLive" style="height:36px;justify-content:center;">
+                    🚀 Promover Modelo para Conta Real
+                  </button>
+                  <label class="gov-toggle-row" title="Ativo por padrão: a IA evolui automaticamente nas duas contas (Demo e Conta Real) sempre que um novo modelo vence a validação walk-forward">
+                    <span>⚡ Auto-evolução automática nas duas contas (Demo ↔ Real)</span>
+                    <input type="checkbox" id="chkAutoPromoteLive" checked>
+                  </label>
+                </div>
+              </div>
+
+              <!-- Direita: Conta Real -->
+              <div class="gov-panel live-panel">
+                <div class="gov-panel-head">
+                  <span class="gov-panel-title">💎 Conta Real (Dinheiro Real)</span>
+                  <span class="badge badge-subtle" id="govLiveBotBadge">⚪ OFFLINE</span>
+                </div>
+                <div class="gov-metric-grid">
+                  <div class="gov-metric-box">
+                    <span class="gov-metric-lbl">Campeão Live</span>
+                    <span class="gov-metric-val text-up" id="govLiveModelVer">--</span>
+                  </div>
+                  <div class="gov-metric-box">
+                    <span class="gov-metric-lbl">Prec. Campeão</span>
+                    <span class="gov-metric-val" id="govLiveModelAcc">--%</span>
+                  </div>
+                  <div class="gov-metric-box">
+                    <span class="gov-metric-lbl">Win Rate Real</span>
+                    <span class="gov-metric-val" id="govLiveWinRate">0.0%</span>
+                  </div>
+                  <div class="gov-metric-box">
+                    <span class="gov-metric-lbl">PnL Real</span>
+                    <span class="gov-metric-val" id="govLivePnl">$0.00</span>
+                  </div>
+                </div>
+                <div class="live-sniper-box" id="liveSniperBox">
+                  <label class="gov-toggle-row" style="padding:0.35rem 0.5rem;" title="Na Conta Real, filtra apenas entradas de alta convicção (confiança IA elevada, tendência alinhada, R/R >= 1.5x e macro/bolsas favoráveis)">
+                    <span>🎯 Só operações de maior potencial (Sniper)</span>
+                    <input type="checkbox" id="chkLiveHighPotentialOnly" checked>
+                  </label>
+                  <div class="live-sniper-row">
+                    <label class="live-sniper-field">
+                      <span>Conf. IA mín.</span>
+                      <select id="liveMinConfSelect" class="ticket-input" style="padding:0.24rem 0.4rem;font-size:0.75rem;">
+                        <option value="68">68%</option>
+                        <option value="70">70%</option>
+                        <option value="72" selected>72% (Padrão)</option>
+                        <option value="75">75% (Rig.)</option>
+                        <option value="80">80% (Máx.)</option>
+                      </select>
+                    </label>
+                    <label class="live-sniper-field">
+                      <span>Score mín.</span>
+                      <select id="liveMinScoreSelect" class="ticket-input" style="padding:0.24rem 0.4rem;font-size:0.75rem;">
+                        <option value="72">72/100</option>
+                        <option value="75">75/100</option>
+                        <option value="78" selected>78/100</option>
+                        <option value="82">82/100</option>
+                        <option value="85">85/100</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div class="live-sniper-row" style="align-items:center;">
+                    <label class="gov-toggle-row" style="padding:0.28rem 0.45rem;font-size:0.71rem;" title="Começa no mínimo da Binance ($10 USDT — ideal para R$ 150) e aumenta a mão automaticamente conforme o saldo em USDT cresce">
+                      <span>📈 Micro-Banca (Juros Compostos)</span>
+                      <input type="checkbox" id="chkLiveMicroCompound" checked>
+                    </label>
+                    <label class="live-sniper-field">
+                      <span>Aloc. / Saldo</span>
+                      <select id="liveCompoundPctSelect" class="ticket-input" style="padding:0.24rem 0.4rem;font-size:0.75rem;">
+                        <option value="30">30% (Conserv.)</option>
+                        <option value="40" selected>40% (R$150+)</option>
+                        <option value="50">50% (Dinâmico)</option>
+                      </select>
+                    </label>
+                  </div>
+                </div>
+                <div class="readiness-list" id="govLiveReadinessList"></div>
+                <div class="gov-panel-actions">
+                  <button type="button" class="btn btn-acc-live" id="btnGovToggleLiveBot">💎 Iniciar Robô REAL</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="table-scroll" style="margin-top:0.85rem;">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Promovido em (UTC)</th>
+                    <th>Ativo / TF</th>
+                    <th>Versão</th>
+                    <th>Score / Prec.</th>
+                    <th>Origem</th>
+                    <th>Observação</th>
+                  </tr>
+                </thead>
+                <tbody id="govPromotionsHistoryBody">
+                  <tr><td colspan="6" class="empty-cell">Carregando histórico de promoções para Conta Real...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Central de Aprovação de Ordens da Conta Real (Telegram / WhatsApp / Painel Admin) -->
+          <div class="card live-approvals-card" id="liveApprovalsCard">
+            <div class="card-header">
+              <div>
+                <h3>🔐 Aprovação de Ordens da Conta Real (Gráficos 1h+)</h3>
+                <span class="ticket-sub">Na Conta Real, nenhuma ordem é executada sem aprovação do administrador. O sistema envia alerta no Telegram/WhatsApp e a IA continua buscando novas oportunidades enquanto aguarda sua decisão.</span>
+              </div>
+              <div class="copilot-actions">
+                <span class="badge badge-subtle" id="liveApprovalsCountBadge">0 pendente(s)</span>
+                <span class="badge badge-subtle" id="approvalTgStatusBadge">Telegram: --</span>
+                <span class="badge badge-subtle" id="approvalWaStatusBadge">WhatsApp: --</span>
+                <button type="button" class="btn btn-secondary" id="btnPollTelegramApprovals" title="Verificar comandos /aprovar ou /rejeitar enviados no Telegram">📲 Sincronizar Telegram</button>
+                <button type="button" class="btn btn-secondary" id="btnRefreshLiveApprovals">🔄 Atualizar Fila</button>
+              </div>
+            </div>
+            <div class="table-scroll" style="margin-top:0.65rem;">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>#ID</th>
+                    <th>Data</th>
+                    <th>Ativo</th>
+                    <th>IA</th>
+                    <th>Entrada</th>
+                    <th>TP / SL</th>
+                    <th>Pré-Ordem (Bolsas / News)</th>
+                    <th>Alerta</th>
+                    <th>Status</th>
+                    <th>Ação</th>
+                  </tr>
+                </thead>
+                <tbody id="liveApprovalsTableBody">
+                  <tr><td colspan="10" class="empty-cell">Nenhuma ordem da Conta Real aguardando aprovação no momento. Quando a IA encontrar uma entrada validada em 1h+, ela pesquisará bolsas globais e notícias e enviará aqui e no seu Telegram/WhatsApp.</td></tr>
+                </tbody>
+              </table>
             </div>
           </div>
 
           <section class="kpi-grid">
             <div class="card kpi-card">
               <div class="kpi-header">
-                <span class="kpi-title">Patrimônio Simulado (Paper)</span>
+                <span class="kpi-title" id="kpiCapitalTitle">Patrimônio Simulado (Demo)</span>
                 <span class="kpi-icon money">💰</span>
               </div>
               <div class="kpi-value" id="kpiCapital">$1,000.00</div>
@@ -648,14 +894,15 @@
             </div>
           </div>
 
-          <!-- Painel de Inteligência Macro & Notícias para Decisão de Entrada -->
+          <!-- Painel de Inteligência Macro, Bolsas de Valores Globais & Notícias para Decisão de Entrada -->
           <div class="card">
             <div class="card-header">
               <div>
-                <h3>Inteligência Macro & Notícias na Decisão de Entrada</h3>
-                <span class="ticket-sub" id="macroRegimeDesc">Analisando Dólar (DXY), Juros EUA 10Y, S&amp;P 500, Fear &amp; Greed, Notícias e Inflação/Fed...</span>
+                <h3>🏛️ Inteligência Macro, Bolsas Globais &amp; Notícias na Decisão de Entrada</h3>
+                <span class="ticket-sub" id="macroRegimeDesc">Analisando Bolsas Globais (S&amp;P 500, Nasdaq, Dow Jones, VIX, Ibovespa, DAX, FTSE, Nikkei), Dólar (DXY), Juros EUA 10Y e Notícias antes de cada ordem real...</span>
               </div>
-              <div style="display:flex;align-items:center;gap:0.55rem;">
+              <div style="display:flex;align-items:center;gap:0.55rem;flex-wrap:wrap;">
+                <span class="badge badge-subtle" id="macroEquitiesBadge">🏛️ BOLSAS ESTÁVEIS</span>
                 <span class="xtb-tag" id="macroRegimeBadge">⚖️ MACRO NEUTRO</span>
                 <button type="button" class="btn btn-secondary" id="btnRefreshMacro" style="height:32px;padding:0 0.7rem;">🔄 Atualizar</button>
               </div>
@@ -672,7 +919,7 @@
                 <span class="market-metric-sub" id="macroUs10yChg">--%</span>
               </div>
               <div class="market-metric">
-                <span class="market-metric-label">S&amp;P 500</span>
+                <span class="market-metric-label">S&amp;P 500 (EUA)</span>
                 <span class="market-metric-value" id="macroSp500Val">--</span>
                 <span class="market-metric-sub" id="macroSp500Chg">--%</span>
               </div>
@@ -692,21 +939,55 @@
                 <span class="market-metric-sub" id="macroAdjFilter">Filtro entrada: +0%</span>
               </div>
             </div>
+
+            <!-- Faixa de Bolsas de Valores Globais & Índice VIX -->
+            <div class="market-strip" style="margin-top:0.55rem;padding:0.6rem 0 0;border:none;border-top:1px solid rgba(255,255,255,0.06);border-radius:0;background:transparent;box-shadow:none;">
+              <div class="market-metric">
+                <span class="market-metric-label">📈 Nasdaq 100 (Tech EUA)</span>
+                <span class="market-metric-value" id="macroNasdaqVal">--</span>
+                <span class="market-metric-sub" id="macroNasdaqChg">--%</span>
+              </div>
+              <div class="market-metric">
+                <span class="market-metric-label">🏛️ Dow Jones 30</span>
+                <span class="market-metric-value" id="macroDowVal">--</span>
+                <span class="market-metric-sub" id="macroDowChg">--%</span>
+              </div>
+              <div class="market-metric">
+                <span class="market-metric-label">⚡ VIX (Volatilidade)</span>
+                <span class="market-metric-value" id="macroVixVal">--</span>
+                <span class="market-metric-sub" id="macroVixChg">--%</span>
+              </div>
+              <div class="market-metric">
+                <span class="market-metric-label">🇧🇷 Ibovespa (B3)</span>
+                <span class="market-metric-value" id="macroIbovVal">--</span>
+                <span class="market-metric-sub" id="macroIbovChg">--%</span>
+              </div>
+              <div class="market-metric">
+                <span class="market-metric-label">🇪🇺 DAX 40 (Alemanha)</span>
+                <span class="market-metric-value" id="macroDaxVal">--</span>
+                <span class="market-metric-sub" id="macroDaxChg">--%</span>
+              </div>
+              <div class="market-metric">
+                <span class="market-metric-label">🌍 Londres / Tóquio</span>
+                <span class="market-metric-value" id="macroGlobalEqVal">--</span>
+                <span class="market-metric-sub" id="macroGlobalEqSub">FTSE --% • Nikkei --%</span>
+              </div>
+            </div>
           </div>
 
-          <!-- Copiloto XTB (Modo Híbrido: Binance Automática + Sinais Prontos para xStation 5) -->
+          <!-- Automação Multi-Ativos & Configuração de Canais (Telegram / WhatsApp para Aprovação Conta Real) -->
           <div class="card copilot-card" id="xtbCopilotCard">
             <div class="card-header">
               <div>
-                <h3>🧭 Copiloto XTB — Sinais Prontos para xStation 5 (Modo Híbrido)</h3>
-                <span class="ticket-sub" id="copilotMarketStatus">Binance: Cripto Automático • XTB: Sinais prontos de Forex, Ouro, Prata, Petróleo e Índices</span>
+                <h3>🤖 Automação Multi-Ativos (1h+) &amp; Canais de Aprovação (Telegram / WhatsApp)</h3>
+                <span class="ticket-sub" id="copilotMarketStatus">Operação 100% automatizada (sem envio de sugestões manuais de ativos ao celular) • Telegram/WhatsApp exclusivos para aprovação de ordens da Conta Real</span>
               </div>
               <div class="copilot-actions">
-                <span class="xtb-tag" id="copilotModeBadge">⚡ HÍBRIDO ATIVO</span>
-                <button type="button" class="btn btn-secondary" id="btnCopilotSound" title="Ativar/Desativar alerta sonoro quando surgir novo sinal">🔊 Som: ON</button>
-                <button type="button" class="btn btn-secondary" id="btnToggleWhatsAppBox" title="Receber entradas, saídas, falhas e resumo do dia no WhatsApp (CallMeBot)">💬 WhatsApp</button>
-                <button type="button" class="btn btn-secondary" id="btnToggleTelegramBox" title="Receber alertas no celular via Telegram">📲 Telegram</button>
-                <button type="button" class="btn btn-primary" id="btnScanXtbNow">🔎 Escanear XTB Agora</button>
+                <span class="xtb-tag" id="copilotModeBadge">⚡ AUTOMAÇÃO 1h+ ATIVA</span>
+                <button type="button" class="btn btn-secondary" id="btnCopilotSound" title="Ativar/Desativar alerta sonoro no painel">🔊 Som: ON</button>
+                <button type="button" class="btn btn-secondary" id="btnToggleWhatsAppBox" title="Configurar WhatsApp (CallMeBot) para receber pedidos de aprovação da Conta Real">💬 WhatsApp (Aprovação)</button>
+                <button type="button" class="btn btn-secondary" id="btnToggleTelegramBox" title="Configurar Telegram para aprovar/rejeitar ordens da Conta Real pelo celular">📲 Telegram (Aprovação)</button>
+                <button type="button" class="btn btn-primary" id="btnScanXtbNow">🔎 Rodar Scanner 1h+</button>
               </div>
             </div>
 
@@ -765,7 +1046,7 @@
                 <input type="text" id="tgChatIdInput" class="search-input" placeholder="Seu Chat ID (ex: 987654321)" autocomplete="off">
                 <button type="button" class="btn btn-primary" id="btnSaveTelegram">💾 Salvar &amp; Testar</button>
               </div>
-              <span class="ticket-sub" id="tgConfigStatus">Opcional: receba alertas instantâneos no Telegram quando a IA encontrar uma entrada forte para a XTB.</span>
+              <span class="ticket-sub" id="tgConfigStatus">Configure Bot Token e Chat ID para aprovar ou rejeitar ordens da Conta Real direto pelo Telegram.</span>
             </div>
 
             <div class="table-scroll" style="margin-top:0.65rem;">
@@ -785,7 +1066,7 @@
                   </tr>
                 </thead>
                 <tbody id="xtbCopilotBody">
-                  <tr><td colspan="10" class="empty-cell">Nenhum sinal XTB gerado ainda. Clique em "Escanear XTB Agora" quando o mercado global estiver aberto.</td></tr>
+                  <tr><td colspan="10" class="empty-cell">Nenhum sinal 1h+ gerado ainda. Clique em "🔎 Rodar Scanner 1h+" quando o mercado global estiver aberto.</td></tr>
                 </tbody>
               </table>
             </div>
@@ -799,12 +1080,10 @@
                 <span class="ticket-sub" id="aiTrainStage">Baixa histórico real para o SQLite local (Binance ou Forex/Commodities), compara RF, ExtraTrees, HistGB e Ensemble e promove o campeão</span>
               </div>
               <div style="display:flex;align-items:center;gap:0.55rem;flex-wrap:wrap;">
-                <select id="aiTrainTimeframe" class="btn btn-secondary" style="height:34px;" title="Timeframe de Treinamento">
-                  <option value="1h" selected>1h (Ultra-Seguro)</option>
-                  <option value="30m">30m</option>
-                  <option value="15m">15m</option>
-                  <option value="5m">5m</option>
-                  <option value="1m">1m</option>
+                <select id="aiTrainTimeframe" class="btn btn-secondary" style="height:34px;" title="Timeframe de Treinamento (somente 1h ou superior)">
+                  <option value="1h" selected>1h (Padrão)</option>
+                  <option value="4h">4h (Swing)</option>
+                  <option value="1d">1d (Diário)</option>
                 </select>
                 <select id="aiTrainCandles" class="btn btn-secondary" style="height:34px;">
                   <option value="1500">1.500 candles</option>
@@ -812,6 +1091,27 @@
                   <option value="5000">5.000 candles</option>
                 </select>
                 <button type="button" class="btn btn-primary" id="btnStartAiTrain" style="height:34px;">🧠 Treinar IA Agora</button>
+              </div>
+            </div>
+            <div class="ai-autotrain-bar" id="aiAutoTrainBar">
+              <div class="ai-autotrain-left">
+                <span class="xtb-tag" id="aiAutoTrainStatusBadge">🟢 Auto-Treino 1h ATIVO</span>
+                <span class="ai-autotrain-countdown mono-val" id="aiAutoTrainCountdown">Próximo ciclo: calculando...</span>
+                <span class="dim" id="aiAutoTrainMeta">Sincroniza automaticamente na Demo e Conta Real</span>
+              </div>
+              <div class="ai-autotrain-right">
+                <label class="ai-autotrain-toggle" for="chkAiAutoTrainEnabled" title="Treinar automaticamente em segundo plano e sincronizar o modelo campeão na Demo e Conta Real">
+                  <input type="checkbox" id="chkAiAutoTrainEnabled" checked>
+                  <span>⚡ Treinar sozinho a cada</span>
+                </label>
+                <select id="aiAutoTrainIntervalSelect" class="btn btn-secondary" style="height:30px;padding:0 0.5rem;font-size:0.76rem;" title="Intervalo do treinamento automático profundo">
+                  <option value="60" selected>1 hora</option>
+                  <option value="120">2 horas</option>
+                  <option value="240">4 horas</option>
+                  <option value="360">6 horas</option>
+                  <option value="720">12 horas</option>
+                  <option value="1440">24 horas</option>
+                </select>
               </div>
             </div>
             <div class="kpi-progress-bar" style="margin-bottom:0.85rem;">
@@ -867,8 +1167,11 @@
         <section class="view-section" id="view-finance">
           <div class="view-header">
             <div>
-              <h2>Central Financeira &amp; Analytics</h2>
-              <p class="view-subtitle">Curva de patrimônio, drawdown, fluxo de PnL diário, alocação por classe, calendário de resultados e extrato completo</p>
+              <div style="display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap;">
+                <h2>Central Financeira &amp; Analytics</h2>
+                <span class="acc-banner-pill demo" id="financeAccountPill">🧪 CONTA DEMO (SIMULAÇÃO IA)</span>
+              </div>
+              <p class="view-subtitle">Curva de patrimônio, drawdown, fluxo de PnL diário, alocação por classe, calendário de resultados e extrato isolado por conta</p>
             </div>
             <div class="finance-toolbar-actions">
               <button type="button" class="btn btn-secondary" id="btnFinanceExportCsv" title="Baixar extrato financeiro completo em CSV para Excel">⬇️ Exportar CSV</button>
@@ -1269,7 +1572,11 @@
                 <span class="dot yellow"></span>
                 <span class="dot green"></span>
               </div>
-              <span class="terminal-title">Console Log ao Vivo (logs/trading_bot.log)</span>
+              <span class="terminal-title" id="consoleLogTitle">Console Log ao Vivo — Conta Demo (logs/trading_bot_demo.log)</span>
+              <div class="console-account-tabs" id="consoleAccountTabs">
+                <button type="button" class="fin-pill active" data-log-acc="demo">🧪 Log Demo</button>
+                <button type="button" class="fin-pill" data-log-acc="live">💎 Log Real</button>
+              </div>
             </div>
             <div class="terminal-body expanded-terminal" id="terminalBody">
               Carregando logs...

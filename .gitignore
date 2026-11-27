@@ -12,6 +12,8 @@ models/
 backup_*/
 bot.pid
 bot.stop
+bot_*.pid
+bot_*.stop
 STOP
 
 # Python

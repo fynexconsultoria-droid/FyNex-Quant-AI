@@ -7,7 +7,32 @@ from typing import Optional
 from pydantic import BaseModel
 
 SYMBOL_PATTERN = r"^[A-Z0-9]{2,10}/[A-Z0-9]{2,10}$"
-TIMEFRAME_PATTERN = r"^(1m|3m|5m|15m|30m|1h)$"
+TIMEFRAME_PATTERN = r"^(1m|3m|5m|15m|30m|1h|4h|1d)$"
+OPERATIONAL_TIMEFRAME_PATTERN = r"^(1h|4h|1d)$"
+ACCOUNT_PATTERN = r"^(demo|live)$"
+
+
+class LiveOrderDecisionPayload(BaseModel):
+    note: str = ""
+
+
+class PromoteModelPayload(BaseModel):
+    symbol: str = "BTC/USDT"
+    timeframe: str = "1h"
+    version: Optional[int] = None
+    notes: str = ""
+
+
+class AccountPolicyPayload(BaseModel):
+    auto_promote_to_live: bool = True
+    demo_always_on_training: Optional[bool] = None
+    live_high_potential_only: Optional[bool] = None
+    live_min_confidence_pct: Optional[int] = None
+    live_min_potential_score: Optional[int] = None
+    live_micro_compound_enabled: Optional[bool] = None
+    live_compound_alloc_pct: Optional[int] = None
+    symbol: Optional[str] = None
+    timeframe: Optional[str] = None
 
 
 class XTBOrderPayload(BaseModel):
@@ -41,6 +66,14 @@ class AiChatPayload(BaseModel):
     message: str
     symbol: str = "BTC/USDT"
     timeframe: str = "1h"
+
+
+class AiTrainSchedulePayload(BaseModel):
+    enabled: bool = True
+    interval_minutes: int = 60
+    symbol: Optional[str] = None
+    timeframe: Optional[str] = None
+    candles: Optional[int] = None
 
 
 class BinanceConfigPayload(BaseModel):

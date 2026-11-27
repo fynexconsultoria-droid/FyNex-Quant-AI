@@ -77,7 +77,10 @@ export function renderFullNews(items) {
     .join("");
 }
 
+let newsFetchSeq = 0;
+
 export async function fetchNewsFeed(forceRefresh = false) {
+  const seq = ++newsFetchSeq;
   state.lastNewsFetchAt = Date.now();
   try {
     const qInput = document.getElementById("newsSearchInput");
@@ -89,8 +92,9 @@ export async function fetchNewsFeed(forceRefresh = false) {
       refresh: forceRefresh ? "true" : "false",
     });
     const res = await fetch(`/api/news?${params.toString()}`);
-    if (!res.ok) return;
+    if (!res.ok || seq !== newsFetchSeq) return;
     const data = await res.json();
+    if (seq !== newsFetchSeq) return;
     state.newsCacheItems = data.items || [];
 
     const updEl = document.getElementById("newsLastUpdated");

@@ -21,6 +21,20 @@ STOP_SIGNAL_PATH = os.path.join(BASE_DIR, "bot.stop")
 logger = logging.getLogger("BotSupervisor")
 
 
+def _extract_account_arg(bot_args: Optional[List[str]]) -> Optional[str]:
+    args = list(bot_args or [])
+    for idx, arg in enumerate(args):
+        if arg == "--account" and idx + 1 < len(args):
+            val = str(args[idx + 1]).strip().lower()
+            if val in ("demo", "live"):
+                return val
+        elif arg.startswith("--account="):
+            val = arg.split("=", 1)[1].strip().lower()
+            if val in ("demo", "live"):
+                return val
+    return None
+
+
 def run_supervised(
     bot_args: Optional[List[str]] = None,
     max_restarts: int = 0,
@@ -28,13 +42,16 @@ def run_supervised(
     max_backoff_sec: float = 300.0,
     python_exe: Optional[str] = None,
     bot_script: str = BOT_SCRIPT,
-    stop_signal_path: str = STOP_SIGNAL_PATH,
+    stop_signal_path: Optional[str] = None,
 ) -> int:
     """
     Executa o robô e o reinicia em caso de falha (exit_code != 0).
     `max_restarts=0` significa reiniciar indefinidamente.
     Retorna o último código de saída.
     """
+    if stop_signal_path is None:
+        acc = _extract_account_arg(bot_args)
+        stop_signal_path = os.path.join(BASE_DIR, f"bot_{acc}.stop") if acc else STOP_SIGNAL_PATH
     exe = python_exe or sys.executable
     cmd = [exe, bot_script] + list(bot_args or [])
     restarts = 0
@@ -111,12 +128,14 @@ def run_supervised(
 
 if __name__ == "__main__":
     os.makedirs(os.path.join(BASE_DIR, "logs"), exist_ok=True)
+    _acc = _extract_account_arg(sys.argv[1:])
+    _sup_log = f"supervisor_{_acc}.log" if _acc else "supervisor.log"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
         handlers=[
             RotatingFileHandler(
-                os.path.join(BASE_DIR, "logs", "supervisor.log"),
+                os.path.join(BASE_DIR, "logs", _sup_log),
                 maxBytes=2 * 1024 * 1024,
                 backupCount=2,
                 encoding="utf-8",

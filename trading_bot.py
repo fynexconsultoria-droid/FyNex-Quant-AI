@@ -35,8 +35,12 @@ from core.logging_setup import (
     LOG_FORMAT,
     PID_FILE_PATH,
     STOP_SIGNAL_PATH,
+    get_account_log_path,
+    get_account_pid_path,
+    get_account_stop_path,
     install_exception_hooks,
     logger,
+    normalize_account,
     setup_logging,
 )
 from core.market_data import (
@@ -68,7 +72,10 @@ from core.process import (
     request_bot_stop,
 )
 from position_manager import PAPER_FEE_PCT, PAPER_SLIPPAGE_PCT, PositionManager, RiskManager
-from strategy_config import DEFAULT_TIMEFRAME, get_strategy_profile, resolve_barriers
+from core.trading.live_approvals import LiveOrderApprovalStore
+from strategy_config import DEFAULT_TIMEFRAME, OPERATIONAL_TIMEFRAMES, get_strategy_profile, is_operational_timeframe, resolve_barriers
+
+LIVE_OPPORTUNITY_CRYPTO_PAIRS = ("BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT")
 
 # Trava de segurança: o modo 'live' (dinheiro real) permanece desativado até validação
 # completa em backtest com taxas + paper trading.
@@ -157,6 +164,7 @@ class TradingBotRunner:
         trading_mode: Optional[str] = None,
         trade_amount_usdt: Optional[float] = None,
         testnet: Optional[bool] = None,
+        account: Optional[str] = None,
     ):
         self.symbol = symbol
         self.timeframe = timeframe
@@ -165,6 +173,11 @@ class TradingBotRunner:
         self._trading_mode_override = trading_mode
         self._trade_amount_override = trade_amount_usdt
         self._testnet_override = testnet
+        self._account_override = normalize_account(account) if account else None
+        self.account = self._account_override or ("live" if (trading_mode or "").lower() == "live" else "demo")
+        self.pid_path = get_account_pid_path(self._account_override) if self._account_override else PID_FILE_PATH
+        self.stop_path = get_account_stop_path(self._account_override) if self._account_override else STOP_SIGNAL_PATH
+        self._loaded_champion_promoted_at: Optional[str] = None
 
         profile = get_strategy_profile(
             timeframe,
@@ -194,7 +207,10 @@ class TradingBotRunner:
         self.macro_store = macro_intelligence.MacroLearningStore(db_path=self.db_path)
         self.error_learning = error_learning.ErrorLearningStore(db_path=self.db_path)
         self.forex_trader = forex_ai_trader.ForexAITrader(db_path=self.db_path)
+        self.live_approvals = LiveOrderApprovalStore(db_path=self.db_path)
         self.model_storage = ModelPersistence(models_dir=DEFAULT_MODELS_DIR)
+        self._last_telegram_poll_ts = 0.0
+        self._live_scan_in_progress = False
         self.exchange: Any = None
         self.positions: Optional[PositionManager] = None
         self.final_mode = "paper"
@@ -233,7 +249,14 @@ class TradingBotRunner:
 
     def _resolve_runtime_config(self) -> Optional[Dict[str, Any]]:
         bin_cfg = binance_client.load_binance_config()
-        final_mode = (self._trading_mode_override or bin_cfg["trading_mode"]).lower()
+        if self._account_override == "live":
+            final_mode = "live"
+        elif self._account_override == "demo":
+            cand = (self._trading_mode_override or "paper").lower()
+            final_mode = cand if cand in ("paper", "testnet") else "paper"
+        else:
+            final_mode = (self._trading_mode_override or bin_cfg["trading_mode"]).lower()
+        self.account = self._account_override or ("live" if final_mode == "live" else "demo")
         final_amount = (
             self._trade_amount_override
             if self._trade_amount_override is not None
@@ -251,6 +274,11 @@ class TradingBotRunner:
             return None
 
         if final_mode in ("live", "testnet") and not bin_cfg["has_keys"]:
+            if self._account_override == "live":
+                logger.error(
+                    "⛔ [CONTA REAL BLOQUEADA] Chaves da Binance Spot de produção não configuradas no .env."
+                )
+                return None
             logger.warning(
                 f"⚠️ [AVISO DE SEGURANÇA] Modo '{final_mode}' selecionado, mas as chaves da Binance "
                 f"não foram configuradas no .env! Alternando automaticamente para 'paper' (simulado)."
@@ -309,7 +337,43 @@ class TradingBotRunner:
 
     def _load_or_train_initial_model(self, recent_df: pd.DataFrame) -> None:
         _, current_feature_cols = build_features(recent_df.iloc[:40])
-        saved_model_data = self.model_storage.load_latest_model(self.symbol, self.timeframe)
+        if self.account == "live":
+            # Se auto-evolução nas duas contas estiver ativa, garante sincronia inicial com o melhor modelo da Demo
+            if self.db.is_auto_evolution_enabled():
+                demo_meta = self.model_storage.load_metadata(self.symbol, self.timeframe)
+                champ_meta = self.model_storage.load_live_champion_metadata(self.symbol, self.timeframe)
+                demo_ver = int(demo_meta.get("version", 0)) if demo_meta else 0
+                champ_ver = int(champ_meta.get("version", 0)) if champ_meta else 0
+                if demo_ver > champ_ver:
+                    try:
+                        promoted = self.model_storage.promote_to_live(
+                            self.symbol,
+                            self.timeframe,
+                            version=demo_ver,
+                            promoted_by="auto",
+                            notes="Sincronização automática inicial (Demo -> Conta Real)",
+                        )
+                        val = promoted.get("validation") if isinstance(promoted.get("validation"), dict) else {}
+                        self.db.record_model_promotion(
+                            symbol=self.symbol,
+                            timeframe=self.timeframe,
+                            model_version=demo_ver,
+                            model_type=str(promoted.get("model_type", "ensemble")),
+                            accuracy=float(promoted.get("accuracy", 0.5)),
+                            precision_buy=float(val.get("precision_buy", promoted.get("accuracy", 0.5))),
+                            profit_factor=float(val.get("profit_factor", 0.0)),
+                            promoted_by="auto",
+                            notes="Sincronização automática inicial (Demo -> Conta Real)",
+                        )
+                    except Exception as sync_err:
+                        logger.debug(f"Sincronização inicial de campeão ignorada: {sync_err}")
+            champ_meta = self.model_storage.load_live_champion_metadata(self.symbol, self.timeframe)
+            self._loaded_champion_promoted_at = champ_meta.get("promoted_at") if champ_meta else None
+            saved_model_data = self.model_storage.load_live_champion_model(
+                self.symbol, self.timeframe, allow_fallback_to_latest=True
+            )
+        else:
+            saved_model_data = self.model_storage.load_latest_model(self.symbol, self.timeframe)
         self.model = None
         self.model_version = self.model_storage.next_version(self.symbol, self.timeframe)
         self.current_model_acc = 0.0
@@ -385,6 +449,29 @@ class TradingBotRunner:
                 self.timeframe,
                 extra_meta={"validation": self.champion_metrics},
             )
+            if self.account == "live" or self.db.is_auto_evolution_enabled():
+                try:
+                    champ_info = self.model_storage.promote_to_live(
+                        self.symbol,
+                        self.timeframe,
+                        version=self.model_version,
+                        promoted_by="auto",
+                        notes=f"Evolução inicial automática ({self.account.upper()} -> Demo & Conta Real)",
+                    )
+                    self._loaded_champion_promoted_at = champ_info.get("promoted_at")
+                    self.db.record_model_promotion(
+                        symbol=self.symbol,
+                        timeframe=self.timeframe,
+                        model_version=self.model_version,
+                        model_type=str(champ_info.get("model_type", "ensemble")),
+                        accuracy=float(champ_info.get("accuracy", self.current_model_acc)),
+                        precision_buy=float((self.champion_metrics or {}).get("precision_buy", self.current_model_acc)),
+                        profit_factor=float((self.champion_metrics or {}).get("profit_factor", 0.0)),
+                        promoted_by="auto",
+                        notes=f"Evolução inicial automática ({self.account.upper()} -> Demo & Conta Real)",
+                    )
+                except Exception as init_promo_err:
+                    logger.debug(f"Auto-promoção inicial ignorada: {init_promo_err}")
             try:
                 self.macro_store.record_learning_cycle(
                     symbol=self.symbol,
@@ -436,6 +523,8 @@ class TradingBotRunner:
             calibration_desc=self.calib["description"],
             in_position=self.positions.in_position,
             entry_price=self.positions.position.entry_price if self.positions.position else 0.0,
+            account=self.account,
+            model_source="live_champion" if self.account == "live" else "demo_latest",
         )
 
     def _background_retrain_worker(self, df_snapshot: pd.DataFrame, ver: int) -> None:
@@ -506,7 +595,38 @@ class TradingBotRunner:
                     challenger_final, ver, final_acc, f_cols, self.symbol, self.timeframe,
                     extra_meta={"validation": chal_metrics},
                 )
-                logger.info(f"🏆 [CAMPEÃO PROMOVIDO] Modelo v{ver} assumiu a operação e foi salvo em disco.")
+                logger.info(
+                    f"🏆 [AUTO-EVOLUÇÃO {self.account.upper()}] Modelo v{ver} venceu validação walk-forward "
+                    f"e foi salvo para evolução contínua."
+                )
+                if self.account == "live" or self.db.is_auto_evolution_enabled():
+                    try:
+                        origin_label = "Conta Real" if self.account == "live" else "Conta Demo"
+                        promo_note = f"Auto-evolução sincronizada ({origin_label} -> Demo & Conta Real)"
+                        champ_info = self.model_storage.promote_to_live(
+                            self.symbol,
+                            self.timeframe,
+                            version=ver,
+                            promoted_by="auto",
+                            notes=promo_note,
+                        )
+                        self._loaded_champion_promoted_at = champ_info.get("promoted_at")
+                        self.db.record_model_promotion(
+                            symbol=self.symbol,
+                            timeframe=self.timeframe,
+                            model_version=ver,
+                            model_type=str(champ_info.get("model_type", "ensemble")),
+                            accuracy=float(champ_info.get("accuracy", final_acc)),
+                            precision_buy=float((chal_metrics or {}).get("precision_buy", final_acc)),
+                            profit_factor=float((chal_metrics or {}).get("profit_factor", 0.0)),
+                            promoted_by="auto",
+                            notes=promo_note,
+                        )
+                        logger.info(
+                            f"⚡ [DUAL-ACCOUNT SYNC] Modelo v{ver} ativado automaticamente na Conta Demo e na Conta Real!"
+                        )
+                    except Exception as promo_err:
+                        logger.warning(f"⚠️ Auto-promoção para Conta Real falhou: {promo_err}")
             else:
                 logger.info(
                     f"🛡️ [CAMPEÃO MANTIDO] Desafiante v{ver} (Prec.Compra {chal_metrics.get('precision_buy', 0)*100:.1f}%) "
@@ -533,6 +653,13 @@ class TradingBotRunner:
             self.retrain_in_progress = False
 
     def _maybe_trigger_retrain(self) -> None:
+        # Auto-evolução contínua habilitada nas DUAS contas (Demo e Real) com validação walk-forward estrita.
+        # Se a Conta Real estiver rodando em paralelo com a Demo e um modelo mais novo acabou de ser
+        # promovido em disco, faz hot-reload primeiro para evitar treinar em duplicidade.
+        if self.account == "live":
+            self._hot_reload_newer_disk_model()
+            if not self.db.is_auto_evolution_enabled():
+                return
         if self.candles_since_retrain < self.retrain_every_n_candles or self.retrain_in_progress:
             return
         retrain_raw = self.db.get_recent_candles(self.symbol, self.timeframe, limit=1500)
@@ -553,8 +680,48 @@ class TradingBotRunner:
         ).start()
 
     def _hot_reload_newer_disk_model(self) -> None:
-        """Recarrega automaticamente um modelo mais novo salvo em disco (ex.: treino profundo via dashboard/CLI)."""
+        """
+        Recarrega automaticamente um modelo mais novo salvo em disco:
+        - Conta Demo: monitora `metadata_*.json` (latest).
+        - Conta Real (Live): monitora `live_champion_*.json` (promovido pela governança).
+        """
         try:
+            if self.account == "live":
+                meta = self.model_storage.load_live_champion_metadata(self.symbol, self.timeframe)
+                if not meta:
+                    return
+                promoted_at = meta.get("promoted_at")
+                disk_ver = int(meta.get("version", 0) or 0)
+                with self.model_lock:
+                    cur_ver = int(self.model_version or 0)
+                if disk_ver == cur_ver and promoted_at == self._loaded_champion_promoted_at:
+                    return
+                loaded = self.model_storage.load_live_champion_model(
+                    self.symbol, self.timeframe, allow_fallback_to_latest=False
+                )
+                if loaded is None:
+                    return
+                loaded_model, loaded_ver, loaded_acc, loaded_cols = loaded
+                if loaded_cols and loaded_cols != self.feature_cols:
+                    return
+                if len(list(getattr(loaded_model, "classes_", []))) < 2:
+                    return
+                with self.model_lock:
+                    self.model = loaded_model
+                    self.model_version = loaded_ver
+                    self.current_model_acc = loaded_acc
+                    self.champion_metrics = getattr(
+                        loaded_model, "validation_metrics_",
+                        {"accuracy": loaded_acc, "precision_buy": loaded_acc},
+                    )
+                    self.observation_mode = False
+                self._loaded_champion_promoted_at = promoted_at
+                logger.info(
+                    f"💎 [HOT-RELOAD CAMPEÃO LIVE] Novo modelo promovido v{loaded_ver} ativado na Conta Real "
+                    f"(Prec.Compra: {loaded_acc * 100:.1f}%)."
+                )
+                return
+
             meta = self.model_storage.load_metadata(self.symbol, self.timeframe)
             if not meta:
                 return
@@ -716,25 +883,119 @@ class TradingBotRunner:
                     learned_notes=learned["matched_lessons"],
                 )
                 size_detail = f" ({'; '.join(size_notes)})" if size_notes else ""
-                logger.info(
-                    f"   🛡️ [ENTRADA APROVADA] IA ({prob_up:.1%} >= {effective_confidence:.1%}) | "
-                    f"Alvo Dinâmico: TP {dyn_tp*100:.2f}% / SL {dyn_sl*100:.2f}% | "
-                    f"Caixa: ${safe_amount:.2f} ({size_mult*100:.0f}%){size_detail}"
-                )
-                self.positions.try_open(
-                    current_price,
-                    active_ver,
-                    prob_up,
-                    tp_pct_override=dyn_tp,
-                    sl_pct_override=dyn_sl,
-                    amount_usdt_override=safe_amount,
-                    entry_context={
-                        "features": feat_dict,
-                        "macro": dict(self.last_macro) if self.last_macro else None,
-                        "candle_timestamp": closed_ts,
-                        "prediction_id": pred_id,
-                    },
-                )
+                if self.account == "live" or self.final_mode == "live":
+                    # Pesquisa obrigatória de informações relevantes (Bolsas S&P500/Nasdaq/VIX + Macro + Notícias)
+                    # ANTES de iniciar/propor qualquer ordem na Conta Real!
+                    pre_intel = macro_intelligence.build_live_pre_order_intelligence(
+                        self.symbol, side="BUY", refresh_ttl_seconds=60.0
+                    )
+                    if not pre_intel.get("allow_live_proposal", True):
+                        logger.warning(
+                            f"   🛑 [PESQUISA PRÉ-ORDEM BLOQUEOU CONTA REAL] {self.symbol}: "
+                            f"{'; '.join(pre_intel.get('risk_flags') or [])}"
+                        )
+                        return
+                    # Filtro Sniper de Alto Potencial exclusivo da Conta Real
+                    live_pol = self.db.get_live_potential_policy()
+                    pot_score = None
+                    pot_badge = ""
+                    if live_pol.get("live_high_potential_only", True):
+                        hp_ok, pot_score, hp_reasons, pot_badge = entry_guard.evaluate_live_high_potential(
+                            prob_up=prob_up,
+                            effective_confidence=effective_confidence,
+                            tp_pct=dyn_tp,
+                            sl_pct=dyn_sl,
+                            features_row=feat_dict,
+                            macro_snapshot=self.last_macro,
+                            pre_order_intel=pre_intel,
+                            champion_metrics=self.champion_metrics,
+                            min_confidence=float(live_pol["live_min_confidence_pct"]) / 100.0,
+                            min_potential_score=float(live_pol["live_min_potential_score"]),
+                            min_risk_reward=float(live_pol["live_min_risk_reward"]),
+                        )
+                        if not hp_ok:
+                            logger.info(
+                                f"   🎯 [FILTRO ALTO POTENCIAL — CONTA REAL] {self.symbol} ignorada "
+                                f"({pot_badge}) | {' | '.join(hp_reasons)}"
+                            )
+                            return
+                    # Gestão de Micro-Banca / Juros Compostos Automáticos na Conta Real
+                    live_amount = safe_amount
+                    micro_note = ""
+                    if live_pol.get("live_micro_compound_enabled", True):
+                        free_usdt_live = self._fetch_live_free_usdt()
+                        max_amt_cfg = self.positions.risk.max_trade_amount_usdt if self.positions.risk else 100.0
+                        live_amount, micro_note = entry_guard.compute_micro_bankroll_amount(
+                            free_usdt_balance=free_usdt_live,
+                            fallback_base_amount=safe_amount,
+                            alloc_pct=float(live_pol.get("live_compound_alloc_pct", 40)) / 100.0,
+                            min_order_usdt=float(live_pol.get("live_min_order_usdt", 10.0)),
+                            max_trade_amount_usdt=max_amt_cfg,
+                        )
+                        if live_amount <= 0:
+                            logger.warning(f"   ⚠️ [MICRO-BANCA CONTA REAL] {self.symbol}: {micro_note}")
+                            return
+                    # Na Conta Real, a ordem NUNCA é disparada sem aprovação explícita do administrador.
+                    # A IA enfileira a proposta com o dossiê completo, envia alerta no Telegram/WhatsApp e segue buscando oportunidades.
+                    pot_prefix = f"{pot_badge} • " if pot_badge else ""
+                    micro_suffix = f" • {micro_note}" if micro_note else ""
+                    proposal, created = self.live_approvals.create_proposal(
+                        symbol=self.symbol,
+                        timeframe=self.timeframe,
+                        model_version=active_ver,
+                        prob_up=prob_up,
+                        confidence_threshold=max(
+                            effective_confidence,
+                            float(live_pol["live_min_confidence_pct"]) / 100.0 if live_pol.get("live_high_potential_only", True) else effective_confidence,
+                        ),
+                        entry_price=current_price,
+                        sl_pct=dyn_sl,
+                        tp_pct=dyn_tp,
+                        amount_usdt=live_amount,
+                        side="BUY",
+                        reason=f"{pot_prefix}IA Campeã v{active_ver} ({prob_up:.1%} >= {effective_confidence:.1%}){size_detail}{micro_suffix}",
+                        pre_order_intel=pre_intel,
+                        entry_context={
+                            "features": feat_dict,
+                            "macro": dict(self.last_macro) if self.last_macro else None,
+                            "candle_timestamp": closed_ts,
+                            "prediction_id": pred_id,
+                            "pre_order_intel": pre_intel,
+                            "live_potential_score": pot_score,
+                            "live_potential_badge": pot_badge,
+                            "micro_bankroll_note": micro_note,
+                        },
+                    )
+                    if created:
+                        logger.info(
+                            f"   🔐 [AGUARDANDO APROVAÇÃO ADMIN] Ordem #{proposal['id']} em {self.symbol} ({self.timeframe}) "
+                            f"@ ${current_price:,.2f} enviada p/ Telegram/WhatsApp. A IA segue buscando oportunidades."
+                        )
+                    else:
+                        logger.info(
+                            f"   ⏳ [PROPOSTA JÁ PENDENTE] Ordem #{proposal['id']} em {self.symbol} ({self.timeframe}) "
+                            f"aguardando administrador; continuando monitoramento."
+                        )
+                else:
+                    logger.info(
+                        f"   🛡️ [ENTRADA APROVADA DEMO] IA ({prob_up:.1%} >= {effective_confidence:.1%}) | "
+                        f"Alvo Dinâmico: TP {dyn_tp*100:.2f}% / SL {dyn_sl*100:.2f}% | "
+                        f"Caixa: ${safe_amount:.2f} ({size_mult*100:.0f}%){size_detail}"
+                    )
+                    self.positions.try_open(
+                        current_price,
+                        active_ver,
+                        prob_up,
+                        tp_pct_override=dyn_tp,
+                        sl_pct_override=dyn_sl,
+                        amount_usdt_override=safe_amount,
+                        entry_context={
+                            "features": feat_dict,
+                            "macro": dict(self.last_macro) if self.last_macro else None,
+                            "candle_timestamp": closed_ts,
+                            "prediction_id": pred_id,
+                        },
+                    )
             else:
                 logger.info(f"   🛡️ [ENTRADA BLOQUEADA POR SEGURANÇA] {' | '.join(guard_reasons)}")
         elif not self.positions.in_position and pred == 1 and prob_up < effective_confidence:
@@ -802,8 +1063,22 @@ class TradingBotRunner:
         self._maybe_trigger_retrain()
         self._run_inference(closed_ts, closed_close, current_price)
 
-        # Em paralelo (sem bloquear o loop de saídas cripto), escaneia Forex/Commodities
-        if not self._forex_cycle_in_progress:
+        # Na Conta Real, enquanto eventuais propostas aguardam aprovação, continua escaneando
+        # oportunidades adicionais em outros pares cripto de 1h+ com Modelo Campeão disponível.
+        if (self.account == "live" or self.final_mode == "live") and not self._live_scan_in_progress:
+            def _scan_other_crypto_bg() -> None:
+                try:
+                    self._scan_additional_live_opportunities()
+                except Exception as scan_err:
+                    logger.debug(f"[SCANNER CONTA REAL] Erro ao buscar oportunidades extras: {scan_err}")
+                finally:
+                    self._live_scan_in_progress = False
+
+            self._live_scan_in_progress = True
+            threading.Thread(target=_scan_other_crypto_bg, daemon=True).start()
+
+        # Em paralelo (sem bloquear o loop de saídas cripto), escaneia Forex/Commodities (Demo/Simulação)
+        if self.account != "live" and not self._forex_cycle_in_progress:
             macro_copy = dict(self.last_macro) if self.last_macro else None
 
             def _run_forex_bg() -> None:
@@ -816,6 +1091,131 @@ class TradingBotRunner:
 
             self._forex_cycle_in_progress = True
             threading.Thread(target=_run_forex_bg, daemon=True).start()
+
+    def _fetch_live_free_usdt(self) -> Optional[float]:
+        """Consulta saldo USDT livre real na Binance Spot para cálculo de micro-banca/juros compostos."""
+        try:
+            bin_cfg = binance_client.load_binance_config()
+            if not bin_cfg.get("has_keys") or bin_cfg.get("testnet"):
+                return None
+            bal = binance_client.test_binance_connection(
+                api_key=bin_cfg["api_key"],
+                api_secret=bin_cfg["api_secret"],
+                testnet=False,
+            )
+            if bal and bal.get("success"):
+                return float(bal.get("usdt_free") or 0.0)
+        except Exception:
+            pass
+        return None
+
+    def _scan_additional_live_opportunities(self) -> None:
+        """
+        Busca continuamente oportunidades em outros pares cripto (>= 1h) enquanto
+        ordens anteriores aguardam aprovação do administrador na Conta Real.
+        """
+        if not is_operational_timeframe(self.timeframe) or self.exchange is None or self.positions is None:
+            return
+        for cand_sym in LIVE_OPPORTUNITY_CRYPTO_PAIRS:
+            if cand_sym == self.symbol:
+                continue
+            loaded = self.model_storage.load_live_champion_model(
+                cand_sym, self.timeframe, allow_fallback_to_latest=False
+            )
+            if loaded is None:
+                continue
+            cand_model, cand_ver, _, cand_cols = loaded
+            try:
+                cand_df = fetch_live_ohlcv(self.exchange, symbol=cand_sym, timeframe=self.timeframe, limit=120)
+                if cand_df.empty or len(cand_df) < 40:
+                    continue
+                closed_df = cand_df.iloc[:-1]
+                feat_df, _ = build_features(closed_df)
+                if feat_df.empty or not all(c in feat_df.columns for c in cand_cols):
+                    continue
+                row_df = feat_df.iloc[-1:][cand_cols]
+                if row_df.isna().values.any():
+                    continue
+                pred, _, prob_up = predict_signal(cand_model, row_df)
+                if pred != 1 or prob_up < self.active_confidence:
+                    continue
+                feat_dict = row_df.iloc[0].to_dict()
+                safe_ok, _ = entry_guard.evaluate_entry_safety(
+                    features_row=feat_dict,
+                    macro_snapshot=self.last_macro,
+                )
+                if not safe_ok:
+                    continue
+                cur_p = float(cand_df["close"].iloc[-1])
+                cur_atr = feat_dict.get("atr_pct")
+                dyn_tp, dyn_sl = resolve_barriers(self.profile, atr_pct=float(cur_atr) if cur_atr is not None else None)
+                pre_intel = macro_intelligence.build_live_pre_order_intelligence(
+                    cand_sym, side="BUY", refresh_ttl_seconds=60.0
+                )
+                if not pre_intel.get("allow_live_proposal", True):
+                    continue
+                live_pol = self.db.get_live_potential_policy()
+                pot_score = None
+                pot_badge = ""
+                if live_pol.get("live_high_potential_only", True):
+                    cand_metrics = getattr(cand_model, "validation_metrics_", None)
+                    hp_ok, pot_score, _, pot_badge = entry_guard.evaluate_live_high_potential(
+                        prob_up=prob_up,
+                        effective_confidence=self.active_confidence,
+                        tp_pct=dyn_tp,
+                        sl_pct=dyn_sl,
+                        features_row=feat_dict,
+                        macro_snapshot=self.last_macro,
+                        pre_order_intel=pre_intel,
+                        champion_metrics=cand_metrics if isinstance(cand_metrics, dict) else None,
+                        min_confidence=float(live_pol["live_min_confidence_pct"]) / 100.0,
+                        min_potential_score=float(live_pol["live_min_potential_score"]),
+                        min_risk_reward=float(live_pol["live_min_risk_reward"]),
+                    )
+                    if not hp_ok:
+                        continue
+                live_amount = self.positions.trade_amount_usdt
+                micro_note = ""
+                if live_pol.get("live_micro_compound_enabled", True):
+                    max_amt_cfg = self.positions.risk.max_trade_amount_usdt if self.positions.risk else 100.0
+                    live_amount, micro_note = entry_guard.compute_micro_bankroll_amount(
+                        free_usdt_balance=self._fetch_live_free_usdt(),
+                        fallback_base_amount=self.positions.trade_amount_usdt,
+                        alloc_pct=float(live_pol.get("live_compound_alloc_pct", 40)) / 100.0,
+                        min_order_usdt=float(live_pol.get("live_min_order_usdt", 10.0)),
+                        max_trade_amount_usdt=max_amt_cfg,
+                    )
+                    if live_amount <= 0:
+                        continue
+                pot_prefix = f"{pot_badge} • " if pot_badge else ""
+                micro_suffix = f" • {micro_note}" if micro_note else ""
+                self.live_approvals.create_proposal(
+                    symbol=cand_sym,
+                    timeframe=self.timeframe,
+                    model_version=cand_ver,
+                    prob_up=prob_up,
+                    confidence_threshold=max(
+                        self.active_confidence,
+                        float(live_pol["live_min_confidence_pct"]) / 100.0 if live_pol.get("live_high_potential_only", True) else self.active_confidence,
+                    ),
+                    entry_price=cur_p,
+                    sl_pct=dyn_sl,
+                    tp_pct=dyn_tp,
+                    amount_usdt=live_amount,
+                    side="BUY",
+                    reason=f"{pot_prefix}Scanner contínuo Conta Real • Campeão v{cand_ver} ({prob_up:.1%}){micro_suffix}",
+                    pre_order_intel=pre_intel,
+                    entry_context={
+                        "features": feat_dict,
+                        "macro": dict(self.last_macro) if self.last_macro else None,
+                        "pre_order_intel": pre_intel,
+                        "live_potential_score": pot_score,
+                        "live_potential_badge": pot_badge,
+                        "micro_bankroll_note": micro_note,
+                    },
+                )
+            except Exception as err:
+                logger.debug(f"[SCANNER CONTA REAL] {cand_sym} ignorado: {err}")
 
     def _emit_heartbeat(self, current_price: float) -> None:
         assert self.positions is not None
@@ -850,7 +1250,7 @@ class TradingBotRunner:
     def _sleep_with_stop_check(self, seconds: int) -> bool:
         """Dorme `seconds` segundos checando `bot.stop` e sinal de desligamento a cada 1s. Retorna True se deve parar."""
         for _ in range(max(1, int(seconds))):
-            if self._shutdown_requested.is_set() or consume_stop_signal():
+            if self._shutdown_requested.is_set() or consume_stop_signal(self.stop_path):
                 return True
             time.sleep(1)
         return False
@@ -885,12 +1285,15 @@ class TradingBotRunner:
         final_testnet = cfg["testnet"]
 
         self._install_shutdown_handlers()
-        if not acquire_single_instance_lock(self.symbol, self.timeframe, self.final_mode):
-            other_pid = get_running_bot_pid()
-            logger.error(f"⛔ Já existe uma instância do robô em execução (PID {other_pid}). Abortando nova instância.")
+        if not acquire_single_instance_lock(self.symbol, self.timeframe, self.final_mode, pid_path=self.pid_path):
+            other_pid = get_running_bot_pid(pid_path=self.pid_path)
+            logger.error(
+                f"⛔ Já existe uma instância do robô ({self.account.upper()}) em execução (PID {other_pid}). "
+                f"Abortando nova instância."
+            )
             return
         # Só consome bot.stop APÓS adquirir o lock exclusivo (nunca engole sinal de parada de outra instância ativa)
-        consume_stop_signal()
+        consume_stop_signal(self.stop_path)
 
         exit_code = 0
         try:
@@ -953,7 +1356,7 @@ class TradingBotRunner:
             tf_ms = timeframe_to_ms(self.timeframe)
 
             while True:
-                if self._shutdown_requested.is_set() or consume_stop_signal():
+                if self._shutdown_requested.is_set() or consume_stop_signal(self.stop_path):
                     logger.info("🛑 Sinal de parada limpa recebido (bot.stop / desligamento). Salvando checkpoint e encerrando...")
                     break
 
@@ -986,6 +1389,16 @@ class TradingBotRunner:
                     )
 
                     self._process_closed_candle(live_df.iloc[-2], current_price)
+                    if self.account == "live" or self.final_mode == "live":
+                        now_m = time.monotonic()
+                        if (now_m - self._last_telegram_poll_ts) >= 20.0:
+                            self._last_telegram_poll_ts = now_m
+                            try:
+                                self.live_approvals.poll_telegram_admin_commands()
+                                if not self.positions.in_position:
+                                    self.positions.restore()
+                            except Exception:
+                                pass
                     self._publish_state()
                     self._emit_heartbeat(current_price)
                     consecutive_errors = 0
@@ -1023,7 +1436,7 @@ class TradingBotRunner:
                     self._publish_state()
             except Exception:
                 pass
-            release_single_instance_lock()
+            release_single_instance_lock(pid_path=self.pid_path)
             self._log_final_report()
 
         if exit_code != 0:
@@ -1043,6 +1456,7 @@ def run_continuous_trading_bot(
     trading_mode: Optional[str] = None,
     trade_amount_usdt: Optional[float] = None,
     testnet: Optional[bool] = None,
+    account: Optional[str] = None,
 ) -> None:
     """Função de entrada compatível que instancia e executa `TradingBotRunner`."""
     runner = TradingBotRunner(
@@ -1058,14 +1472,12 @@ def run_continuous_trading_bot(
         trading_mode=trading_mode,
         trade_amount_usdt=trade_amount_usdt,
         testnet=testnet,
+        account=account,
     )
     runner.run()
 
 
 def main() -> None:
-    setup_logging(DEFAULT_LOG_PATH)
-    install_exception_hooks(os.path.join(DEFAULT_LOGS_DIR, "stderr.log"))
-
     parser = argparse.ArgumentParser(
         description="Quant Trading Bot com Machine Learning Contínuo em Tempo Real"
     )
@@ -1073,8 +1485,8 @@ def main() -> None:
         "--timeframe",
         type=str,
         default=DEFAULT_TIMEFRAME,
-        choices=["1m", "3m", "5m", "15m", "30m", "1h"],
-        help=f"Tempo gráfico dos candles (padrão: {DEFAULT_TIMEFRAME})",
+        choices=list(OPERATIONAL_TIMEFRAMES),
+        help=f"Tempo gráfico dos candles (>= 1h: {', '.join(OPERATIONAL_TIMEFRAMES)} | padrão: {DEFAULT_TIMEFRAME})",
     )
     parser.add_argument(
         "--symbol",
@@ -1131,8 +1543,19 @@ def main() -> None:
         default=None,
         help="Valor em USDT alocado para cada compra na Binance (padrão: do .env ou 50.0)",
     )
+    parser.add_argument(
+        "--account",
+        type=str,
+        default=None,
+        choices=["demo", "live"],
+        help="Conta isolada (demo: treinamento/simulação, live: dinheiro real com modelo campeão)",
+    )
 
     args = parser.parse_args()
+
+    target_log = get_account_log_path(args.account) if args.account else DEFAULT_LOG_PATH
+    setup_logging(target_log)
+    install_exception_hooks(os.path.join(DEFAULT_LOGS_DIR, "stderr.log"))
 
     run_continuous_trading_bot(
         symbol=args.symbol,
@@ -1145,6 +1568,7 @@ def main() -> None:
         check_interval_seconds=args.interval,
         trading_mode=args.trading_mode,
         trade_amount_usdt=args.trade_amount,
+        account=args.account,
     )
 
 

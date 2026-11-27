@@ -115,7 +115,7 @@ MARKET_INSTRUMENTS: Dict[str, Dict[str, Any]] = {
         "yahoo": "REMX", "decimals": 2, "pip_size": 0.01, "contract_size": 100.0,
         "default_lot": 0.10, "min_lot": 0.01, "max_leverage": 10, "typical_spread_pips": 5.0,
     },
-    # --- Índices ---
+    # --- Índices & Bolsas Globais ---
     "US500/USD": {
         "symbol": "US500/USD", "name": "Índice S&P 500 Futuros (EUA)", "category": "indices", "badge": "ÍNDICE",
         "yahoo": "ES=F", "decimals": 2, "pip_size": 0.1, "contract_size": 1.0,
@@ -125,6 +125,31 @@ MARKET_INSTRUMENTS: Dict[str, Dict[str, Any]] = {
         "symbol": "US100/USD", "name": "Índice Nasdaq 100 Futuros (EUA)", "category": "indices", "badge": "ÍNDICE",
         "yahoo": "NQ=F", "decimals": 2, "pip_size": 0.1, "contract_size": 1.0,
         "default_lot": 0.10, "min_lot": 0.01, "max_leverage": 20, "typical_spread_pips": 6.0,
+    },
+    "US30/USD": {
+        "symbol": "US30/USD", "name": "Índice Dow Jones 30 (Wall Street)", "category": "indices", "badge": "BOLSA",
+        "yahoo": "^DJI", "decimals": 2, "pip_size": 1.0, "contract_size": 1.0,
+        "default_lot": 0.05, "min_lot": 0.01, "max_leverage": 20, "typical_spread_pips": 8.0,
+    },
+    "DE40/USD": {
+        "symbol": "DE40/USD", "name": "Bolsa da Alemanha (DAX 40)", "category": "indices", "badge": "BOLSA",
+        "yahoo": "^GDAXI", "decimals": 2, "pip_size": 1.0, "contract_size": 1.0,
+        "default_lot": 0.10, "min_lot": 0.01, "max_leverage": 20, "typical_spread_pips": 6.0,
+    },
+    "IBOV/BRL": {
+        "symbol": "IBOV/BRL", "name": "Bolsa do Brasil (Ibovespa B3)", "category": "indices", "badge": "B3",
+        "yahoo": "^BVSP", "decimals": 0, "pip_size": 10.0, "contract_size": 1.0,
+        "default_lot": 0.05, "min_lot": 0.01, "max_leverage": 10, "typical_spread_pips": 25.0,
+    },
+    "JP225/USD": {
+        "symbol": "JP225/USD", "name": "Bolsa de Tóquio (Nikkei 225)", "category": "indices", "badge": "BOLSA",
+        "yahoo": "^N225", "decimals": 2, "pip_size": 1.0, "contract_size": 1.0,
+        "default_lot": 0.05, "min_lot": 0.01, "max_leverage": 15, "typical_spread_pips": 10.0,
+    },
+    "VIX/USD": {
+        "symbol": "VIX/USD", "name": "Índice de Volatilidade Wall Street (VIX)", "category": "indices", "badge": "VIX",
+        "yahoo": "^VIX", "decimals": 2, "pip_size": 0.01, "contract_size": 1.0,
+        "default_lot": 1.0, "min_lot": 0.1, "max_leverage": 5, "typical_spread_pips": 5.0,
     },
 }
 

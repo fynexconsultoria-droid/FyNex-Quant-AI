@@ -148,7 +148,7 @@ def save_xtb_copilot_telegram(payload: TelegramConfigPayload):
     test_result = None
     if payload.send_test:
         test_result = xtb_copilot.send_telegram_message(
-            "✅ FyNex Quant AI — Copiloto XTB conectado com sucesso! "
-            "Você receberá aqui os alertas de Forex, Ouro, Prata, Petróleo e Índices prontos para a xStation 5."
+            "✅ FyNex Quant AI — Telegram conectado para Aprovação de Ordens da Conta Real!\n"
+            "Você receberá aqui cada oportunidade identificada pela IA (gráficos 1h+) para aprovar ou rejeitar antes da execução real."
         )
     return {"status": "saved", "telegram": cfg, "test_result": test_result}

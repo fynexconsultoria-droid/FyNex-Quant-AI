@@ -42,13 +42,24 @@ def evaluate_entry_safety(
     reasons: List[str] = []
     now_dt = now_utc or datetime.now(timezone.utc)
 
-    # 1. Proteção Macro (Dólar, Juros EUA, Inflação/Fed, Petróleo, Guerras e Notícias)
+    # 1. Proteção Macro & Bolsas Globais (Dólar, Juros EUA, S&P 500, Nasdaq, VIX, Inflação/Fed e Notícias)
     if macro_snapshot:
         regime = str(macro_snapshot.get("regime", "")).upper()
         macro_score = _finite_float(macro_snapshot.get("macro_score")) or 0.0
         if regime == "RISK-OFF SEVERO" or macro_score <= -45.0:
             reasons.append(
                 f"Regime macro adverso ({regime}, score {macro_score:+.1f}) — compras suspensas para proteger capital."
+            )
+        vix_val = _finite_float(macro_snapshot.get("vix_price")) or 0.0
+        if vix_val >= 32.0:
+            reasons.append(
+                f"Pânico nas bolsas de valores (VIX={vix_val:.1f} >= 32) — compras bloqueadas por proteção."
+            )
+        sp_chg = _finite_float(macro_snapshot.get("sp500_change_pct")) or 0.0
+        ndx_chg = _finite_float(macro_snapshot.get("nasdaq_change_pct")) or 0.0
+        if sp_chg <= -2.5 or (sp_chg <= -1.8 and ndx_chg <= -2.2):
+            reasons.append(
+                f"Forte queda em Wall Street (S&P 500 {sp_chg:+.2f}%, Nasdaq {ndx_chg:+.2f}%) — aguardando estabilização."
             )
 
     # 2. Anti-Topo / Sobrecompra (RSI 14)
@@ -207,3 +218,159 @@ def compute_safe_position_size(
     mult = max(0.25, min(1.0, round(mult, 2)))
     final_amount = round(max(min(base_f, min_ord), base_f * mult), 2)
     return final_amount, mult, notes
+
+
+def evaluate_live_high_potential(
+    *,
+    prob_up: float,
+    effective_confidence: float,
+    tp_pct: float,
+    sl_pct: float,
+    features_row: Dict[str, Any],
+    macro_snapshot: Optional[Dict[str, Any]] = None,
+    pre_order_intel: Optional[Dict[str, Any]] = None,
+    champion_metrics: Optional[Dict[str, Any]] = None,
+    min_confidence: float = 0.72,
+    min_potential_score: float = 78.0,
+    min_risk_reward: float = 1.5,
+) -> Tuple[bool, float, List[str], str]:
+    """
+    Filtro Sniper de Alto Potencial exclusivo da CONTA REAL (Dinheiro Real).
+    Enquanto a Conta Demo opera continuamente para treinar e acompanhar o mercado,
+    a Conta Real só aprova propostas com alta convicção estatística, tendência clara,
+    boa assimetria Risco/Retorno e cenário macro/bolsas favorável.
+
+    Retorna `(aprovado, score_0_100, motivos_bloqueio, resumo_curto)`.
+    """
+    reasons: List[str] = []
+    prob_f = _finite_float(prob_up) or 0.0
+    req_conf = max(_finite_float(effective_confidence) or 0.55, float(min_confidence))
+    tp_f = _finite_float(tp_pct) or 0.0
+    sl_f = _finite_float(sl_pct) or 0.0
+    rr = (tp_f / sl_f) if sl_f > 0 else 0.0
+
+    # 1. Convicção estatística mínima para dinheiro real
+    if prob_f < req_conf:
+        reasons.append(
+            f"Confiança IA ({prob_f*100:.1f}%) abaixo do mínimo Sniper da Conta Real ({req_conf*100:.0f}%)."
+        )
+
+    # 2. Assimetria Risco/Retorno favorável (TP/SL >= 1.5x)
+    if rr < float(min_risk_reward):
+        reasons.append(
+            f"Relação Retorno/Risco baixa ({rr:.2f}x < {min_risk_reward:.2f}x) para dinheiro real."
+        )
+
+    # 3. Tendência e força direcional (evita entradas fracas ou contra-tendência)
+    ema_ratio = _finite_float(features_row.get("ema_trend_ratio"))
+    if ema_ratio is not None and ema_ratio < 0.0:
+        reasons.append(
+            f"EMA12/26 ainda negativa ({ema_ratio*100:+.2f}%) — Conta Real exige tendência alinhada a favor."
+        )
+
+    adx = _finite_float(features_row.get("adx_14"))
+    if adx is not None and adx < 0.16:
+        reasons.append(
+            f"Força de tendência fraca (ADX={adx*100:.1f} < 16) — reservado para treino na Conta Demo."
+        )
+
+    # 4. Zona técnica saudável (evita comprar já esticado na Conta Real)
+    rsi = _finite_float(features_row.get("rsi_14"))
+    if rsi is not None and rsi > 64.0:
+        reasons.append(f"RSI 14 elevado ({rsi:.1f} > 64) — sem margem segura para Conta Real.")
+
+    bb_pos = _finite_float(features_row.get("bb_pos"))
+    if bb_pos is not None and bb_pos > 0.85:
+        reasons.append(f"Preço próximo do topo de Bollinger (%B={bb_pos:.2f} > 0.85) — aguardando melhor ponto.")
+
+    # 5. Cenário Macro & Bolsas Globais (S&P 500, VIX, Notícias)
+    macro_score = 0.0
+    vix_val = 0.0
+    if isinstance(macro_snapshot, dict) and macro_snapshot:
+        macro_score = _finite_float(macro_snapshot.get("macro_score")) or 0.0
+        vix_val = _finite_float(macro_snapshot.get("vix_price")) or 0.0
+        if macro_score < -12.0:
+            reasons.append(
+                f"Cenário macro desfavorável ({macro_snapshot.get('regime', 'CAUTELA')}, score {macro_score:+.1f}) para Conta Real."
+            )
+        if vix_val >= 26.0:
+            reasons.append(f"Volatilidade global elevada nas bolsas (VIX={vix_val:.1f} >= 26) — modo defensivo na Conta Real.")
+
+    if isinstance(pre_order_intel, dict) and pre_order_intel:
+        if not pre_order_intel.get("allow_live_proposal", True):
+            reasons.append("Dossiê pré-ordem (Bolsas/Notícias) vetou entrada na Conta Real.")
+
+    # Cálculo do Score Composto de Potencial (0 a 100)
+    # A) Convicção IA (até 42 pts)
+    conf_pts = max(0.0, min(42.0, ((prob_f - 0.50) / 0.35) * 42.0))
+    # B) Risco/Retorno TP/SL (até 20 pts)
+    rr_pts = max(0.0, min(20.0, ((rr - 1.0) / 1.2) * 20.0))
+    # C) Tendência & Momentum técnico (até 18 pts)
+    trend_pts = 9.0
+    if ema_ratio is not None:
+        trend_pts = 11.0 if ema_ratio >= 0.002 else (9.0 if ema_ratio >= 0.0 else 2.0)
+    if adx is not None:
+        trend_pts += 7.0 if adx >= 0.22 else (5.0 if adx >= 0.16 else 1.0)
+    else:
+        trend_pts += 5.0
+    trend_pts = max(0.0, min(18.0, trend_pts))
+    # D) Contexto Macro & Bolsas (até 12 pts)
+    macro_pts = max(0.0, min(12.0, 7.5 + (macro_score / 40.0) * 4.5))
+    if vix_val >= 26.0:
+        macro_pts = min(macro_pts, 3.0)
+    # E) Qualidade do Modelo Campeão (até 8 pts)
+    champ_prec = _finite_float((champion_metrics or {}).get("precision_buy"))
+    if champ_prec is None:
+        champ_prec = _finite_float((champion_metrics or {}).get("accuracy"))
+    if champ_prec is None:
+        champ_pts = 6.0
+    else:
+        champ_pts = max(0.0, min(8.0, ((champ_prec - 0.50) / 0.30) * 8.0))
+
+    total_score = round(min(100.0, conf_pts + rr_pts + trend_pts + macro_pts + champ_pts), 1)
+    if total_score < float(min_potential_score):
+        reasons.append(
+            f"Score de potencial ({total_score:.0f}/100) abaixo do mínimo da Conta Real ({min_potential_score:.0f}/100)."
+        )
+
+    approved = len(reasons) == 0
+    badge = f"🎯 Potencial {total_score:.0f}/100 (R/R {rr:.2f}x • IA {prob_f*100:.1f}%)"
+    return approved, total_score, reasons, badge
+
+
+def compute_micro_bankroll_amount(
+    *,
+    free_usdt_balance: Optional[float],
+    fallback_base_amount: float = 10.0,
+    alloc_pct: float = 0.40,
+    min_order_usdt: float = 10.0,
+    max_trade_amount_usdt: float = 100.0,
+    safety_reserve_usdt: float = 1.0,
+) -> Tuple[float, str]:
+    """
+    Gestão de Micro-Banca com Juros Compostos Automáticos (Conta Real Spot):
+    - Ideal para começar com bancas pequenas (ex.: R$ 150 ≈ $26-$27 USDT).
+    - Sempre respeita o mínimo operacional da Binance ($10 USDT) e reserva margem de segurança.
+    - Conforme o saldo real em USDT cresce com os lucros, aumenta proporcionalmente o valor
+      por operação (ex.: 40% do saldo livre), limitado por `max_trade_amount_usdt`.
+
+    Retorna `(valor_usdt_final, descricao)`. Se saldo real for menor que `min_order_usdt`,
+    retorna `(0.0, motivo)` para evitar enviar ordem que falharia por MIN_NOTIONAL.
+    """
+    min_ord = max(5.0, _finite_float(min_order_usdt) or 10.0)
+    max_amt = max(min_ord, _finite_float(max_trade_amount_usdt) or 100.0)
+    pct = max(0.15, min(0.75, _finite_float(alloc_pct) or 0.40))
+    reserve = max(0.0, _finite_float(safety_reserve_usdt) or 0.0)
+    bal = _finite_float(free_usdt_balance)
+
+    if bal is None or bal <= 0.0:
+        fb = round(max(min_ord, min(max_amt, _finite_float(fallback_base_amount) or min_ord)), 2)
+        return fb, f"Base configurada (${fb:.2f} USDT)"
+
+    if bal < min_ord:
+        return 0.0, f"Saldo USDT livre (${bal:.2f}) abaixo do mínimo Binance (${min_ord:.2f})"
+
+    spendable = max(min_ord, bal - reserve) if bal >= (min_ord + reserve) else bal
+    target = max(min_ord, bal * pct)
+    final_amt = round(min(max_amt, spendable, target), 2)
+    return final_amt, f"Micro-Banca {pct*100:.0f}% de ${bal:.2f} → ${final_amt:.2f} USDT"

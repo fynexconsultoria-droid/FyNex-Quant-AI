@@ -171,7 +171,7 @@ class TradingDatabase:
                 ON simulated_trades(mode, id DESC);
             """)
 
-            # 4. Tabela de estado vivo do robô (lida pelo dashboard em tempo real)
+            # 4. Tabela de estado vivo do robô (legado id=1, mantida para compatibilidade)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS bot_state (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -193,18 +193,78 @@ class TradingDatabase:
                 );
             """)
             self._ensure_column(cursor, "bot_state", "order_in_flight", "INTEGER NOT NULL DEFAULT 0")
+
+            # 5. Estado vivo por conta (Demo / Treinamento IA vs Conta Real / Live rodando em paralelo)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS bot_account_state (
+                    account TEXT PRIMARY KEY CHECK (account IN ('demo', 'live')),
+                    pid INTEGER,
+                    symbol TEXT NOT NULL,
+                    timeframe TEXT NOT NULL,
+                    trading_mode TEXT NOT NULL,
+                    model_version INTEGER NOT NULL,
+                    model_accuracy REAL NOT NULL,
+                    model_source TEXT NOT NULL DEFAULT 'latest',
+                    base_confidence REAL NOT NULL,
+                    active_confidence REAL NOT NULL,
+                    calibration_mode TEXT NOT NULL,
+                    calibration_badge TEXT NOT NULL,
+                    calibration_desc TEXT NOT NULL,
+                    in_position INTEGER NOT NULL DEFAULT 0,
+                    entry_price REAL NOT NULL DEFAULT 0.0,
+                    order_in_flight INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );
+            """)
+
+            # 6. Configurações persistentes de governança entre contas (ex.: auto_promote_to_live)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS account_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+            """)
+
+            # 7. Histórico auditável de promoções de modelos Demo -> Conta Real
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS model_promotions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    timeframe TEXT NOT NULL,
+                    model_version INTEGER NOT NULL,
+                    model_type TEXT NOT NULL DEFAULT 'ensemble',
+                    accuracy REAL NOT NULL DEFAULT 0.0,
+                    precision_buy REAL NOT NULL DEFAULT 0.0,
+                    profit_factor REAL NOT NULL DEFAULT 0.0,
+                    promoted_by TEXT NOT NULL DEFAULT 'manual',
+                    notes TEXT NOT NULL DEFAULT '',
+                    promoted_at TEXT NOT NULL
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_model_promotions_sym_tf
+                ON model_promotions(symbol, timeframe, id DESC);
+            """)
         logger.info(f"Banco de dados SQLite operacional (WAL): {self.db_path}")
 
-    def set_order_in_flight(self, active: bool) -> None:
+    def set_order_in_flight(self, active: bool, account: Optional[str] = None) -> None:
+        val = 1 if active else 0
         with self._get_connection() as conn:
-            conn.execute(
-                "UPDATE bot_state SET order_in_flight = ? WHERE id = 1",
-                (1 if active else 0,),
-            )
+            conn.execute("UPDATE bot_state SET order_in_flight = ? WHERE id = 1", (val,))
+            if account in ("demo", "live"):
+                conn.execute("UPDATE bot_account_state SET order_in_flight = ? WHERE account = ?", (val, account))
             conn.commit()
 
-    def is_order_in_flight(self) -> bool:
+    def is_order_in_flight(self, account: Optional[str] = None) -> bool:
         with self._get_connection() as conn:
+            if account in ("demo", "live"):
+                row = conn.execute(
+                    "SELECT order_in_flight FROM bot_account_state WHERE account = ?",
+                    (account,),
+                ).fetchone()
+                if row is not None:
+                    return bool(row["order_in_flight"])
             row = conn.execute("SELECT order_in_flight FROM bot_state WHERE id = 1").fetchone()
         return bool(row and row["order_in_flight"])
 
@@ -223,9 +283,41 @@ class TradingDatabase:
         calibration_desc: str,
         in_position: bool,
         entry_price: float = 0.0,
+        account: Optional[str] = None,
+        model_source: Optional[str] = None,
     ) -> None:
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        acc = account if account in ("demo", "live") else ("live" if str(trading_mode).lower() == "live" else "demo")
+        src = model_source or ("live_champion" if acc == "live" else "demo_latest")
         with self._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO bot_account_state (
+                    account, pid, symbol, timeframe, trading_mode, model_version, model_accuracy,
+                    model_source, base_confidence, active_confidence, calibration_mode, calibration_badge,
+                    calibration_desc, in_position, entry_price, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account) DO UPDATE SET
+                    pid = excluded.pid,
+                    symbol = excluded.symbol,
+                    timeframe = excluded.timeframe,
+                    trading_mode = excluded.trading_mode,
+                    model_version = excluded.model_version,
+                    model_accuracy = excluded.model_accuracy,
+                    model_source = excluded.model_source,
+                    base_confidence = excluded.base_confidence,
+                    active_confidence = excluded.active_confidence,
+                    calibration_mode = excluded.calibration_mode,
+                    calibration_badge = excluded.calibration_badge,
+                    calibration_desc = excluded.calibration_desc,
+                    in_position = excluded.in_position,
+                    entry_price = excluded.entry_price,
+                    updated_at = excluded.updated_at
+            """, (
+                acc, pid, symbol, timeframe, trading_mode, model_version, float(model_accuracy),
+                src, float(base_confidence), float(active_confidence), calibration_mode,
+                calibration_badge, calibration_desc, 1 if in_position else 0,
+                float(entry_price), now_str,
+            ))
             conn.execute("""
                 INSERT INTO bot_state (
                     id, pid, symbol, timeframe, trading_mode, model_version, model_accuracy,
@@ -255,10 +347,146 @@ class TradingDatabase:
             ))
             conn.commit()
 
-    def get_bot_state(self) -> Optional[Dict[str, Any]]:
+    def get_bot_state(self, account: Optional[str] = None) -> Optional[Dict[str, Any]]:
         with self._get_connection() as conn:
+            if account in ("demo", "live"):
+                row = conn.execute(
+                    "SELECT * FROM bot_account_state WHERE account = ?",
+                    (account,),
+                ).fetchone()
+                return dict(row) if row else None
             row = conn.execute("SELECT * FROM bot_state WHERE id = 1").fetchone()
         return dict(row) if row else None
+
+    def get_account_setting(self, key: str, default: str = "") -> str:
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT value FROM account_settings WHERE key = ?", (str(key),)).fetchone()
+        return str(row["value"]) if row else default
+
+    def is_auto_evolution_enabled(self) -> bool:
+        """
+        Retorna True quando a evolução automática sincronizada entre Conta Demo e Conta Real
+        está ativa (padrão: True — ambas as contas evoluem automaticamente juntas).
+        """
+        raw = self.get_account_setting("auto_promote_to_live", "1").strip().lower()
+        return raw in ("1", "true", "yes", "sim", "on")
+
+    def is_demo_always_on_enabled(self) -> bool:
+        """Retorna True quando a Conta Demo deve permanecer sempre treinando/acompanhando o mercado."""
+        raw = self.get_account_setting("demo_always_on_training", "1").strip().lower()
+        return raw in ("1", "true", "yes", "sim", "on")
+
+    def get_live_potential_policy(self) -> Dict[str, Any]:
+        """Retorna a política de seletividade (somente alto potencial) para a Conta Real."""
+        only_high = self.get_account_setting("live_high_potential_only", "1").strip().lower() in (
+            "1", "true", "yes", "sim", "on",
+        )
+        try:
+            min_conf = int(float(self.get_account_setting("live_min_confidence_pct", "72")))
+        except (TypeError, ValueError):
+            min_conf = 72
+        try:
+            min_score = int(float(self.get_account_setting("live_min_potential_score", "78")))
+        except (TypeError, ValueError):
+            min_score = 78
+        try:
+            min_rr = float(self.get_account_setting("live_min_risk_reward", "1.5"))
+        except (TypeError, ValueError):
+            min_rr = 1.5
+        micro_enabled = self.get_account_setting("live_micro_compound_enabled", "1").strip().lower() in (
+            "1", "true", "yes", "sim", "on",
+        )
+        try:
+            alloc_pct = int(float(self.get_account_setting("live_compound_alloc_pct", "40")))
+        except (TypeError, ValueError):
+            alloc_pct = 40
+        try:
+            min_ord = float(self.get_account_setting("live_min_order_usdt", "10.0"))
+        except (TypeError, ValueError):
+            min_ord = 10.0
+        return {
+            "live_high_potential_only": bool(only_high),
+            "live_min_confidence_pct": max(60, min(90, min_conf)),
+            "live_min_potential_score": max(60, min(95, min_score)),
+            "live_min_risk_reward": max(1.1, min(4.0, round(min_rr, 2))),
+            "live_micro_compound_enabled": bool(micro_enabled),
+            "live_compound_alloc_pct": max(20, min(65, alloc_pct)),
+            "live_min_order_usdt": max(5.0, min(50.0, round(min_ord, 2))),
+        }
+
+    def set_account_setting(self, key: str, value: str) -> None:
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO account_settings (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """,
+                (str(key), str(value), now_str),
+            )
+            conn.commit()
+
+    def record_model_promotion(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+        model_version: int,
+        model_type: str = "ensemble",
+        accuracy: float = 0.0,
+        precision_buy: float = 0.0,
+        profit_factor: float = 0.0,
+        promoted_by: str = "manual",
+        notes: str = "",
+    ) -> int:
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        with self._get_connection() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO model_promotions (
+                    symbol, timeframe, model_version, model_type, accuracy,
+                    precision_buy, profit_factor, promoted_by, notes, promoted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    symbol,
+                    timeframe,
+                    int(model_version),
+                    str(model_type or "ensemble"),
+                    float(accuracy),
+                    float(precision_buy),
+                    float(profit_factor),
+                    str(promoted_by or "manual"),
+                    str(notes or ""),
+                    now_str,
+                ),
+            )
+            conn.commit()
+            return int(cur.lastrowid or 0)
+
+    def get_model_promotions(
+        self,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            clauses = []
+            params: List[Any] = []
+            if symbol:
+                clauses.append("symbol = ?")
+                params.append(symbol)
+            if timeframe:
+                clauses.append("timeframe = ?")
+                params.append(timeframe)
+            where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            params.append(int(limit))
+            rows = conn.execute(
+                f"SELECT * FROM model_promotions {where_sql} ORDER BY id DESC LIMIT ?",
+                tuple(params),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def save_candles(
         self,

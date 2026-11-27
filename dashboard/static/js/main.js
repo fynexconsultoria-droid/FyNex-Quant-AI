@@ -4,10 +4,25 @@
  */
 
 import {
+  applyAccountTheme,
+  controlAccountBot,
+  detectInitialAccount,
+  fetchAccountsOverview,
+  fetchLiveApprovals,
+  pollTelegramApprovalsNow,
+  promoteModelToLive,
+  saveAccountPoliciesFromUI,
+  switchAccount,
+  syncPromoteButtonLabel,
+  updateAutoPromotePolicy,
+} from "./accounts.js";
+import {
   fetchAiErrorLessons,
   fetchAiEvolution,
+  fetchAiTrainSchedule,
   fetchMacroIntelligence,
   pollAiTrainStatus,
+  saveAiTrainScheduleUI,
   startAiTraining,
 } from "./ai_center.js";
 import { fetchAiPerformanceAndWelcome, sendAiChatMessage, toggleAiChatDrawer } from "./ai_chat.js";
@@ -49,6 +64,7 @@ import {
   fetchInitialData,
   fetchLogs,
   fetchStatus,
+  fetchTrades,
   pollDashboardData,
   toggleBot,
 } from "./terminal.js";
@@ -127,13 +143,17 @@ async function onSymbolChange(newSym) {
 }
 
 async function onTimeframeChange(newTf) {
-  state.activeTimeframe = newTf || "1m";
+  state.activeTimeframe = newTf || "1h";
+  const trainTf = document.getElementById("aiTrainTimeframe");
+  if (trainTf && Array.from(trainTf.options).some((o) => o.value === state.activeTimeframe)) {
+    trainTf.value = state.activeTimeframe;
+  }
   disconnectLiveMarketStream();
   state.chartInitializedWithData = false;
   state.loadedCandles = [];
   clearPositionPriceLines();
   const tag = document.getElementById("activeTimeframeTag");
-  if (tag) tag.textContent = `Candles ${state.activeTimeframe}`;
+  if (tag) tag.textContent = state.activeTimeframe;
   updateCandleCountdown();
   await fetchInitialData(syncActiveAssetUI);
   connectLiveMarketStream();
@@ -167,6 +187,8 @@ function switchView(viewName) {
 
   if (state.activeView === "terminal") setTimeout(resizeChart, 30);
   if (state.activeView === "ai") {
+    fetchAccountsOverview();
+    fetchLiveApprovals();
     fetchMacroIntelligence(false);
     fetchAiEvolution();
     fetchAiErrorLessons();
@@ -180,7 +202,7 @@ function switchView(viewName) {
   if (state.activeView === "news" && state.newsCacheItems.length === 0) fetchNewsFeed(false);
   if (state.activeView === "portfolio") {
     fetchXtbAccount();
-    if (state.binanceHasKeys) fetchBinanceBalanceAuto(false);
+    if (state.binanceHasKeys) fetchBinanceBalanceAuto(true);
   }
   if (state.activeView === "system") {
     fetchBinanceHealth(true);
@@ -196,6 +218,34 @@ function bindUIEvents() {
 
   on("btnMobileMenu", "click", toggleMobileSidebar);
   on("sidebarBackdrop", "click", closeMobileSidebar);
+  on("btnSwitchDemo", "click", () => switchAccount("demo"));
+  on("btnSwitchLive", "click", () => switchAccount("live"));
+  on("btnQuickSwitchAccount", "click", () => switchAccount(state.activeAccount === "live" ? "demo" : "live"));
+  on("accBannerUpgradeBtn", "click", () => switchView("ai"));
+  on("accBannerPendingBtn", "click", () => {
+    switchView("ai");
+    fetchLiveApprovals();
+  });
+  on("btnRefreshLiveApprovals", "click", () => fetchLiveApprovals());
+  on("btnPollTelegramApprovals", "click", () => pollTelegramApprovalsNow());
+  on("btnPromoteModelToLive", "click", () => promoteModelToLive());
+  on("govPromoteVersionSelect", "change", () => syncPromoteButtonLabel());
+  on("chkAutoPromoteLive", "change", (e) => updateAutoPromotePolicy(Boolean(e.target && e.target.checked)));
+  on("chkDemoAlwaysOn", "change", () => saveAccountPoliciesFromUI());
+  on("chkLiveHighPotentialOnly", "change", () => saveAccountPoliciesFromUI());
+  on("liveMinConfSelect", "change", () => saveAccountPoliciesFromUI());
+  on("liveMinScoreSelect", "change", () => saveAccountPoliciesFromUI());
+  on("chkLiveMicroCompound", "change", () => saveAccountPoliciesFromUI());
+  on("liveCompoundPctSelect", "change", () => saveAccountPoliciesFromUI());
+  on("btnGovToggleDemoBot", "click", () => controlAccountBot("demo"));
+  on("btnGovToggleLiveBot", "click", () => controlAccountBot("live"));
+  document.querySelectorAll("#consoleAccountTabs .fin-pill[data-log-acc]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.logAccountFilter = btn.dataset.logAcc === "live" ? "live" : "demo";
+      applyAccountTheme(state.activeAccount);
+      fetchLogs();
+    });
+  });
   on("symbolSelect", "change", (e) => onSymbolChange(e.target.value));
   on("timeframeSelect", "change", (e) => onTimeframeChange(e.target.value));
   on("btnToggleEma", "click", toggleEmaOverlay);
@@ -276,7 +326,11 @@ function bindUIEvents() {
       fetchNewsFeed(false);
     });
   });
-  on("newsSearchInput", "input", () => fetchNewsFeed(false));
+  let newsSearchDebounce = null;
+  on("newsSearchInput", "input", () => {
+    if (newsSearchDebounce) clearTimeout(newsSearchDebounce);
+    newsSearchDebounce = setTimeout(() => fetchNewsFeed(false), 250);
+  });
   on("btnRefreshNews", "click", async () => {
     const btn = document.getElementById("btnRefreshNews");
     if (btn) {
@@ -296,6 +350,16 @@ function bindUIEvents() {
 
   on("btnRecheckHealth", "click", () => fetchBinanceHealth(true));
   on("btnStartAiTrain", "click", startAiTraining);
+  on("chkAiAutoTrainEnabled", "change", () => saveAiTrainScheduleUI());
+  on("aiAutoTrainIntervalSelect", "change", () => saveAiTrainScheduleUI());
+  on("aiTrainTimeframe", "change", (e) => {
+    if (e.target) e.target.dataset.userEdited = "1";
+    if (document.getElementById("chkAiAutoTrainEnabled")?.checked) saveAiTrainScheduleUI();
+  });
+  on("aiTrainCandles", "change", (e) => {
+    if (e.target) e.target.dataset.userEdited = "1";
+    if (document.getElementById("chkAiAutoTrainEnabled")?.checked) saveAiTrainScheduleUI();
+  });
   on("btnRefreshMacro", "click", async () => {
     const btn = document.getElementById("btnRefreshMacro");
     if (btn) {
@@ -319,7 +383,7 @@ function bindUIEvents() {
   on("btnToggleWhatsAppBox", "click", () => {
     const box = document.getElementById("copilotWhatsAppBox");
     if (box) {
-      const opening = box.style.display === "none";
+      const opening = window.getComputedStyle(box).display === "none";
       box.style.display = opening ? "flex" : "none";
       if (opening) fetchWhatsAppConfigUI();
     }
@@ -334,7 +398,10 @@ function bindUIEvents() {
   });
   on("btnToggleTelegramBox", "click", () => {
     const box = document.getElementById("copilotTelegramBox");
-    if (box) box.style.display = box.style.display === "none" ? "flex" : "none";
+    if (box) {
+      const opening = window.getComputedStyle(box).display === "none";
+      box.style.display = opening ? "flex" : "none";
+    }
   });
   on("btnSaveTelegram", "click", saveTelegramConfigUI);
 
@@ -342,6 +409,7 @@ function bindUIEvents() {
   on("btnCloseAiChatDrawer", "click", () => toggleAiChatDrawer(false));
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
+      closeBinanceModal();
       toggleAiChatDrawer(false);
       closeMobileSidebar();
     }
@@ -365,18 +433,55 @@ hooks.onSymbolChange = onSymbolChange;
 hooks.onBidAskUpdated = updateXtbMarginEstimate;
 hooks.onRefreshAll = () => fetchInitialData(syncActiveAssetUI);
 hooks.onRefreshStatus = fetchStatus;
+hooks.onAccountChange = async () => {
+  clearPositionPriceLines();
+  await Promise.all([
+    fetchStatus(),
+    fetchAccountsOverview(),
+    fetchLiveApprovals(),
+    fetchTrades(),
+    fetchLogs(),
+    fetchFinanceOverview(false),
+  ]);
+  if (state.activeView === "finance") {
+    setTimeout(renderAllFinanceCharts, 30);
+  }
+  if (state.binanceHasKeys) {
+    fetchBinanceBalanceAuto(true);
+  }
+};
 
 document.addEventListener("DOMContentLoaded", () => {
+  const initialAcc = detectInitialAccount();
+  state.logAccountFilter = initialAcc;
+  applyAccountTheme(initialAcc);
+
   bindUIEvents();
   initFinanceUI();
   initTradingViewChart();
+
+  const urlView = new URLSearchParams(window.location.search).get("view");
+  const validViews = new Set(["terminal", "news", "ai", "finance", "portfolio", "system"]);
+  if (urlView && validViews.has(urlView)) {
+    switchView(urlView);
+  }
+
   fetchInitialData(syncActiveAssetUI);
   fetchFinanceOverview(false);
+  fetchAiTrainSchedule();
   connectLiveMarketStream();
 
+  window.addEventListener("popstate", () => {
+    const acc = detectInitialAccount();
+    switchAccount(acc, { pushUrl: false, refresh: true });
+  });
+
+  let pollTick = 0;
   state.pollingInterval = setInterval(() => {
+    pollTick += 1;
     pollDashboardData();
     if (state.activeView === "finance") fetchFinanceOverview(false);
+    if (state.activeView === "ai" && pollTick % 5 === 0) pollAiTrainStatus();
   }, 3000);
   updateCandleCountdown();
   state.countdownInterval = setInterval(updateCandleCountdown, 1000);

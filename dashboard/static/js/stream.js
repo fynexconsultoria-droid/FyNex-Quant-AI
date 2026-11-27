@@ -225,7 +225,7 @@ export function connectLiveMarketStream() {
           const chartUpdateEl = document.getElementById("chartLastUpdate");
           if (chartUpdateEl) {
             const dt = new Date(Number(payload.E || Date.now()));
-            chartUpdateEl.textContent = `Ao vivo (WS): ${dt.toLocaleTimeString("pt-BR")}`;
+            chartUpdateEl.textContent = `WS ${dt.toLocaleTimeString("pt-BR")}`;
           }
         } else if (streamName.endsWith("@ticker") || payload.e === "24hrTicker") {
           update24hStatsUI({

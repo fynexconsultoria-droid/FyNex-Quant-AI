@@ -3,7 +3,7 @@
  */
 
 import { hooks } from "./state.js";
-import { csrfHeaders, escapeHtml } from "./utils.js";
+import { csrfHeaders, escapeHtml, showToast } from "./utils.js";
 
 let currentSelectedEnvIsTestnet = false;
 let savedApiKeyMasked = "";
@@ -92,9 +92,13 @@ export function bindTradingModeListener() {
 export async function pasteApiKey() {
   try {
     const text = await navigator.clipboard.readText();
-    if (text) document.getElementById("inputApiKey").value = text.trim();
+    const inp = document.getElementById("inputApiKey");
+    if (text && inp) {
+      inp.value = text.trim();
+      showToast("📋 API Key colada da área de transferência.", "info");
+    }
   } catch (_) {
-    alert("Não foi possível ler da área de transferência. Por favor, cole manualmente (Ctrl+V).");
+    showToast("Não foi possível ler a área de transferência. Cole manualmente com Ctrl+V.", "error");
   }
 }
 
@@ -179,12 +183,12 @@ export async function testBinanceConnectionModal(silent = false) {
   const btnText = document.getElementById("btnModalTestText");
 
   if (!silent) {
-    spinner.style.display = "inline";
-    btnText.textContent = "Testando...";
+    if (spinner) spinner.style.display = "inline";
+    if (btnText) btnText.textContent = "Testando...";
   }
 
-  const apiKeyInput = document.getElementById("inputApiKey").value.trim();
-  const apiSecretInput = document.getElementById("inputApiSecret").value.trim();
+  const apiKeyInput = (document.getElementById("inputApiKey")?.value || "").trim();
+  const apiSecretInput = (document.getElementById("inputApiSecret")?.value || "").trim();
 
   const isKeyMasked = apiKeyInput === savedApiKeyMasked;
   const isSecretMasked = apiSecretInput.startsWith("•") || apiSecretInput.startsWith("*");
@@ -292,16 +296,16 @@ export async function testBinanceConnectionModal(silent = false) {
     `;
   } finally {
     if (!silent) {
-      spinner.style.display = "none";
-      btnText.textContent = "🔍 Testar Conexão";
+      if (spinner) spinner.style.display = "none";
+      if (btnText) btnText.textContent = "🔍 Testar Conexão";
     }
   }
 }
 
 export async function saveBinanceConnectionModal() {
-  const apiKeyInput = document.getElementById("inputApiKey").value.trim();
-  const apiSecretInput = document.getElementById("inputApiSecret").value.trim();
-  const amountVal = parseFloat(document.getElementById("inputTradeAmount").value) || 50.0;
+  const apiKeyInput = (document.getElementById("inputApiKey")?.value || "").trim();
+  const apiSecretInput = (document.getElementById("inputApiSecret")?.value || "").trim();
+  const amountVal = parseFloat(document.getElementById("inputTradeAmount")?.value || "50") || 50.0;
 
   const modeRadio = document.querySelector('input[name="tradingMode"]:checked');
   const tradingMode = modeRadio ? modeRadio.value : "paper";
@@ -312,8 +316,8 @@ export async function saveBinanceConnectionModal() {
 
   const saveBtn = document.getElementById("btnModalSave");
   const saveBtnText = document.getElementById("btnModalSaveText");
-  saveBtn.disabled = true;
-  saveBtnText.textContent = "Salvando...";
+  if (saveBtn) saveBtn.disabled = true;
+  if (saveBtnText) saveBtnText.textContent = "Salvando...";
 
   try {
     const res = await fetch("/api/binance/save", {
@@ -328,32 +332,32 @@ export async function saveBinanceConnectionModal() {
       }),
     });
 
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      alert("Falha ao salvar: " + (data.detail || "Erro no servidor"));
+      showToast(`Falha ao salvar: ${data.detail || "Erro no servidor"}`, "error");
       return;
     }
 
     if (data.test_result && data.test_result.success) {
-      alert(
-        `✅ ${data.message}\nConexão estabelecida com a ${data.test_result.environment}.\nSaldo USDT Livre: $${(
+      showToast(
+        `✅ ${data.message} • ${data.test_result.environment} • Saldo USDT: $${(
           data.test_result.usdt_free || 0
-        ).toFixed(2)}`
+        ).toFixed(2)}`,
+        "success"
       );
     } else {
-      alert(
-        `⚠️ ${data.message}\nPorém o teste de conexão retornou:\n${
-          (data.test_result && data.test_result.message) || "Verifique suas chaves."
-        }`
+      showToast(
+        `⚠️ ${data.message} • ${(data.test_result && data.test_result.message) || "Verifique suas chaves."}`,
+        "warning"
       );
     }
 
     closeBinanceModal();
     if (typeof hooks.onRefreshAll === "function") await hooks.onRefreshAll();
   } catch (err) {
-    alert("Erro ao salvar dados: " + err);
+    showToast(`Erro ao salvar dados da Binance: ${err}`, "error");
   } finally {
-    saveBtn.disabled = false;
-    saveBtnText.textContent = "💾 Salvar e Aplicar";
+    if (saveBtn) saveBtn.disabled = false;
+    if (saveBtnText) saveBtnText.textContent = "💾 Salvar e Aplicar";
   }
 }

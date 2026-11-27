@@ -118,7 +118,13 @@ STRATEGY_PROFILES: Dict[str, StrategyProfile] = {
     ),
 }
 
-DEFAULT_TIMEFRAME = "5m"
+DEFAULT_TIMEFRAME = "1h"
+OPERATIONAL_TIMEFRAMES: Tuple[str, ...] = ("1h", "4h", "1d")
+
+
+def is_operational_timeframe(timeframe: str) -> bool:
+    """Retorna True apenas para timeframes operacionais permitidos (>= 1h: 1h, 4h, 1d)."""
+    return str(timeframe or "").strip().lower() in OPERATIONAL_TIMEFRAMES
 
 # Taxa Spot padrão da Binance (0.1%/lado) e slippage estimado no paper trading/backtest
 PAPER_FEE_PCT = 0.001

@@ -8,6 +8,7 @@
  * 5. Ranking Horizontal por Ativo + Calendário Heatmap 35 Dias + Extrato Unificado
  */
 
+import { state } from "./state.js";
 import { escapeHtml, fmtSignedUsd, fmtUsd, formatPrice, showToast } from "./utils.js";
 
 const financeState = {
@@ -308,11 +309,11 @@ function renderEquityChart() {
   // Rótulos X
   ctx.fillStyle = "#64748b";
   ctx.font = "500 10.5px 'JetBrains Mono', monospace";
-  ctx.textAlign = "center";
   ctx.textBaseline = "top";
   const maxLabels = Math.min(6, series.length);
   for (let k = 0; k < maxLabels; k++) {
     const idx = Math.round((k / Math.max(1, maxLabels - 1)) * (series.length - 1));
+    ctx.textAlign = k === 0 ? "left" : k === maxLabels - 1 ? "right" : "center";
     ctx.fillText(series[idx].label || "", xOf(idx), height - pad.bottom + 9);
   }
 
@@ -743,7 +744,9 @@ export function renderAllFinanceCharts() {
 
 export async function fetchFinanceOverview(showSuccessToast = false) {
   try {
-    const url = `/api/finance/overview?period=${encodeURIComponent(financeState.period)}&source=${encodeURIComponent(financeState.source)}`;
+    const acc = state.activeAccount === "live" ? "live" : "demo";
+    const effSource = acc === "live" ? "bot" : financeState.source;
+    const url = `/api/finance/overview?period=${encodeURIComponent(financeState.period)}&source=${encodeURIComponent(effSource)}&account=${encodeURIComponent(acc)}`;
     const res = await fetch(url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
@@ -751,7 +754,12 @@ export async function fetchFinanceOverview(showSuccessToast = false) {
     renderSummary(data.summary);
     renderAllFinanceCharts();
     if (showSuccessToast) {
-      showToast("💰 Painel financeiro atualizado com dados reais.", "success");
+      showToast(
+        acc === "live"
+          ? "💎 Painel financeiro da CONTA REAL atualizado."
+          : "🧪 Painel financeiro da CONTA DEMO atualizado.",
+        "success"
+      );
     }
   } catch (err) {
     if (showSuccessToast) {
@@ -825,9 +833,11 @@ export function initFinanceUI() {
   const exportBtn = document.getElementById("btnFinanceExportCsv");
   if (exportBtn) {
     exportBtn.addEventListener("click", () => {
-      const dlUrl = `/api/finance/export.csv?period=${encodeURIComponent(financeState.period)}&source=${encodeURIComponent(financeState.source)}`;
+      const acc = state.activeAccount === "live" ? "live" : "demo";
+      const effSource = acc === "live" ? "bot" : financeState.source;
+      const dlUrl = `/api/finance/export.csv?period=${encodeURIComponent(financeState.period)}&source=${encodeURIComponent(effSource)}&account=${encodeURIComponent(acc)}`;
       window.location.href = dlUrl;
-      showToast("⬇️ Gerando extrato CSV financeiro...", "info");
+      showToast(`⬇️ Gerando extrato CSV financeiro (${acc === "live" ? "Conta Real" : "Conta Demo"})...`, "info");
     });
   }
 

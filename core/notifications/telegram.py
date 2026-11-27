@@ -177,3 +177,101 @@ def send_telegram_message(
         return {"sent": False, "error": f"HTTP {e.code}: {e.reason}"}
     except Exception as e:
         return {"sent": False, "error": scrub_secrets(e, (token,))}
+
+
+def send_telegram_approval_prompt(
+    text: str,
+    order_id: int,
+    timeout: float = 8.0,
+    env_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Envia pedido de aprovação de ordem na Conta Real com botões inline no Telegram."""
+    token, chat_id = load_telegram_credentials(env_path=env_path, prefer_environ=True)
+    if not token or not chat_id:
+        return {"sent": False, "error": "Telegram não configurado."}
+    if not TELEGRAM_TOKEN_RE.match(token) or not TELEGRAM_CHAT_ID_RE.match(chat_id):
+        return {"sent": False, "error": "Configuração de Telegram inválida."}
+
+    safe_text = str(text or "")
+    if len(safe_text) > 4000:
+        safe_text = safe_text[:3997] + "..."
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = json.dumps({
+        "chat_id": chat_id,
+        "text": safe_text,
+        "disable_web_page_preview": True,
+        "reply_markup": {
+            "inline_keyboard": [
+                [
+                    {"text": f"✅ Aprovar #{int(order_id)}", "callback_data": f"approve:{int(order_id)}"},
+                    {"text": f"❌ Rejeitar #{int(order_id)}", "callback_data": f"reject:{int(order_id)}"},
+                ]
+            ]
+        },
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with _urlopen()(req, timeout=timeout) as resp:
+            raw_bytes = resp.read(65536)
+            body = json.loads(raw_bytes.decode("utf-8", errors="ignore") or "{}")
+            ok = bool(body.get("ok"))
+            return {
+                "sent": ok,
+                "error": None if ok else scrub_secrets(body.get("description") or "Erro Telegram", (token,)),
+            }
+    except urllib.error.HTTPError as e:
+        return {"sent": False, "error": f"HTTP {e.code}: {e.reason}"}
+    except Exception as e:
+        return {"sent": False, "error": scrub_secrets(e, (token,))}
+
+
+def fetch_telegram_updates(
+    offset: int = 0,
+    timeout: float = 5.0,
+    env_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Busca atualizações pendentes (`getUpdates`) apenas quando Telegram está configurado."""
+    token, chat_id = load_telegram_credentials(env_path=env_path, prefer_environ=True)
+    if not token or not chat_id:
+        return {"ok": False, "updates": [], "chat_id": "", "error": "Telegram não configurado."}
+    if not TELEGRAM_TOKEN_RE.match(token) or not TELEGRAM_CHAT_ID_RE.match(chat_id):
+        return {"ok": False, "updates": [], "chat_id": "", "error": "Configuração de Telegram inválida."}
+
+    url = f"https://api.telegram.org/bot{token}/getUpdates?timeout=0&limit=25"
+    if offset > 0:
+        url += f"&offset={int(offset)}"
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with _urlopen()(req, timeout=timeout) as resp:
+            raw_bytes = resp.read(262144)
+            body = json.loads(raw_bytes.decode("utf-8", errors="ignore") or "{}")
+            if not body.get("ok"):
+                return {"ok": False, "updates": [], "chat_id": chat_id, "error": "Erro getUpdates Telegram."}
+            return {"ok": True, "updates": list(body.get("result") or []), "chat_id": chat_id, "error": None}
+    except Exception as e:
+        return {"ok": False, "updates": [], "chat_id": chat_id, "error": scrub_secrets(e, (token,))}
+
+
+def answer_telegram_callback(
+    callback_query_id: str,
+    text: str = "",
+    timeout: float = 4.0,
+    env_path: Optional[str] = None,
+) -> bool:
+    token, _ = load_telegram_credentials(env_path=env_path, prefer_environ=True)
+    if not token or not callback_query_id:
+        return False
+    url = f"https://api.telegram.org/bot{token}/answerCallbackQuery"
+    payload = json.dumps({"callback_query_id": callback_query_id, "text": str(text or "")[:180]}).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with _urlopen()(req, timeout=timeout):
+            return True
+    except Exception:
+        return False

@@ -21,6 +21,35 @@ DEFAULT_LOG_PATH = os.path.join(DEFAULT_LOGS_DIR, "trading_bot.log")
 PID_FILE_PATH = os.path.join(BASE_DIR, "bot.pid")
 STOP_SIGNAL_PATH = os.path.join(BASE_DIR, "bot.stop")
 
+ACCOUNT_TYPES = ("demo", "live")
+
+
+def normalize_account(account: Optional[str], default: str = "demo") -> str:
+    """Normaliza o identificador de conta ('demo' ou 'live')."""
+    acc = (account or "").strip().lower()
+    if acc in ACCOUNT_TYPES:
+        return acc
+    if acc in ("paper", "testnet", "sim", "simulation", "training"):
+        return "demo"
+    if acc in ("real", "prod", "production"):
+        return "live"
+    return default
+
+
+def get_account_pid_path(account: str, base_dir: str = BASE_DIR) -> str:
+    acc = normalize_account(account)
+    return os.path.join(base_dir, f"bot_{acc}.pid")
+
+
+def get_account_stop_path(account: str, base_dir: str = BASE_DIR) -> str:
+    acc = normalize_account(account)
+    return os.path.join(base_dir, f"bot_{acc}.stop")
+
+
+def get_account_log_path(account: str, logs_dir: str = DEFAULT_LOGS_DIR) -> str:
+    acc = normalize_account(account)
+    return os.path.join(logs_dir, f"trading_bot_{acc}.log")
+
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s - %(message)s"
 LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 

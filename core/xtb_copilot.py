@@ -149,7 +149,7 @@ class XTBCopilotStore:
         suggested_lots: float,
         leverage: int,
         reason: str = "",
-        notify_telegram: bool = True,
+        notify_telegram: bool = False,
         dedup_minutes: int = 120,
     ) -> Dict[str, Any]:
         """Registra um novo sinal para o Copiloto XTB com deduplicação atômica por símbolo/direção."""
@@ -200,17 +200,8 @@ class XTBCopilotStore:
         sig = dict(row)
         sig["copy_text"] = format_copilot_copy_text(sig)
         sig["deduplicated"] = False
-
-        if notify_telegram and get_telegram_config()["configured"]:
-            msg = f"🧭 SINAL COPILOTO XTB (FyNex AI)\n\n{sig['copy_text']}"
-            tg_res = send_telegram_message(msg)
-            if tg_res.get("sent"):
-                with self._connect() as conn:
-                    conn.execute("UPDATE xtb_copilot_signals SET telegram_sent = 1 WHERE id = ?", (sig_id,))
-                sig["telegram_sent"] = 1
-            else:
-                logger.debug(f"[COPILOTO XTB] Alerta Telegram não enviado: {tg_res.get('error')}")
-
+        # Política de automação: não envia mais alertas de "qual ativo escolher" para o celular.
+        # Mensagens no Telegram/WhatsApp são reservadas para aprovação de ordens na Conta Real.
         return sig
 
     def list_signals(self, limit: int = 25) -> List[Dict[str, Any]]:

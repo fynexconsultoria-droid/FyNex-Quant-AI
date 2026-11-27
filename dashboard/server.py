@@ -18,7 +18,7 @@ import os
 import sqlite3
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -125,7 +125,12 @@ from dashboard.security import (  # noqa: E402
     require_csrf,
     security_middleware,
 )
-from dashboard.training_jobs import _AI_TRAIN_LOCK, _AI_TRAIN_STATE  # noqa: E402
+from dashboard.training_jobs import (  # noqa: E402
+    _AI_TRAIN_LOCK,
+    _AI_TRAIN_STATE,
+    start_auto_train_scheduler,
+    stop_auto_train_scheduler,
+)
 
 DB_PATH = DEFAULT_DB_PATH
 MODELS_DIR = DEFAULT_MODELS_DIR
@@ -133,7 +138,17 @@ META_PATH = os.path.join(MODELS_DIR, "metadata.json")
 LOG_PATH = DEFAULT_LOG_PATH
 LEGACY_LOG_PATH = os.path.join(BASE_DIR, "trading_bot.log")
 
-app = FastAPI(title="FyNex Quant AI Dashboard")
+
+@asynccontextmanager
+async def _dashboard_lifespan(_app: FastAPI):
+    start_auto_train_scheduler()
+    try:
+        yield
+    finally:
+        stop_auto_train_scheduler()
+
+
+app = FastAPI(title="FyNex Quant AI Dashboard", lifespan=_dashboard_lifespan)
 app.middleware("http")(security_middleware)
 
 for _router in ALL_ROUTERS:
@@ -162,17 +177,34 @@ STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
-@app.get("/")
-def serve_index():
+def _render_index_html(initial_account: str = "demo"):
     index_file = os.path.join(STATIC_DIR, "index.html")
     if os.path.exists(index_file):
         with open(index_file, "r", encoding="utf-8") as f:
             html = f.read()
-        meta_tag = f'<meta name="csrf-token" content="{CSRF_TOKEN}">'
+        meta_tags = (
+            f'<meta name="csrf-token" content="{CSRF_TOKEN}">\n'
+            f'  <meta name="initial-account" content="{initial_account}">'
+        )
         if 'name="csrf-token"' not in html:
-            html = html.replace("<head>", f"<head>\n  {meta_tag}", 1)
+            html = html.replace("<head>", f"<head>\n  {meta_tags}", 1)
         return HTMLResponse(content=html, headers={"Cache-Control": "no-store, max-age=0"})
     return JSONResponse({"message": "Dashboard frontend pronto. Abra static/index.html."})
+
+
+@app.get("/")
+def serve_index():
+    return _render_index_html(initial_account="demo")
+
+
+@app.get("/demo")
+def serve_demo_account():
+    return _render_index_html(initial_account="demo")
+
+
+@app.get("/live")
+def serve_live_account():
+    return _render_index_html(initial_account="live")
 
 
 if __name__ == "__main__":
